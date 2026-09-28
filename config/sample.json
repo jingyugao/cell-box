@@ -1,0 +1,38 @@
+{
+  "listen": "127.0.0.1:8090",
+  "dataDir": "data",
+  "publicUrl": "http://127.0.0.1:8090",
+  "startupTimeoutSeconds": 120,
+  "clients": [
+    {
+      "id": "cocell",
+      "tokenEnv": "CELLBOX_COCELL_TOKEN"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "docker-dev",
+      "provider": "docker",
+      "image": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "cpu": 1,
+      "memoryMiB": 512,
+      "clients": [
+        "cocell"
+      ],
+      "guest": {
+        "workspace": "/workspace",
+        "agent": {
+          "uid": 11000,
+          "gid": 11000
+        },
+        "debug": {
+          "uid": 11001,
+          "gid": 11001
+        },
+        "command": [],
+        "env": {},
+        "tools": []
+      }
+    }
+  ]
+}

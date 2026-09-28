@@ -1,0 +1,9 @@
+/dist/
+/data/
+/evidence/
+/tmp
+/coverage.out
+/.env
+/kubeconfig
+*.test
+/.cache/

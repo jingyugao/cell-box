@@ -1,0 +1,153 @@
+# Example only. Create the referenced Secrets and provide a storage class before applying.
+# This file is intentionally omitted from deploy/kustomization.yaml.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cellbox-api
+  namespace: recoverable-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cellbox-api
+  namespace: recoverable-system
+rules:
+  - apiGroups: [recovery.gvisor.dev]
+    resources: [resumablepods]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ['']
+    resources: [pods, services]
+    verbs: [get]
+  - apiGroups: ['']
+    resources: [pods/exec]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cellbox-api
+  namespace: recoverable-system
+subjects:
+  - kind: ServiceAccount
+    name: cellbox-api
+    namespace: recoverable-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cellbox-api
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cellbox-api-data
+  namespace: recoverable-system
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cellbox-api
+  namespace: recoverable-system
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: cellbox-api
+  template:
+    metadata:
+      labels:
+        app: cellbox-api
+    spec:
+      serviceAccountName: cellbox-api
+      automountServiceAccountToken: true
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: prepare-data-dir
+          image: busybox:1.36
+          command: [/bin/sh, -ec, 'chown 10001:10001 /var/lib/cellbox && chmod 0700 /var/lib/cellbox']
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [CHOWN, FOWNER]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/cellbox
+      containers:
+        - name: api
+          image: registry.example.invalid/cellbox-api:v0.1.0 # Replace with a built image.
+          imagePullPolicy: IfNotPresent
+          command: [/usr/local/bin/cellbox]
+          args: [--config, /etc/cellbox/config.json]
+          envFrom:
+            - secretRef:
+                name: cellbox-api-client-tokens
+          ports:
+            - name: http
+              containerPort: 8090
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: '1'
+              memory: 512Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/cellbox
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/cellbox
+            - name: temp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          secret:
+            secretName: cellbox-api-config
+            defaultMode: 0440
+            items:
+              - key: config.json
+                path: config.json
+        - name: data
+          persistentVolumeClaim:
+            claimName: cellbox-api-data
+        - name: temp
+          emptyDir:
+            sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cellbox-api
+  namespace: recoverable-system
+spec:
+  selector:
+    app: cellbox-api
+  ports:
+    - name: http
+      port: 8090
+      targetPort: http

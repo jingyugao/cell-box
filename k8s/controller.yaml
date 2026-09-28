@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: resumablepod-controller
+  namespace: resumablepod-system
+spec:
+  selector:
+    matchLabels:
+      app: resumablepod-controller
+  updateStrategy:
+    type: OnDelete
+  template:
+    metadata:
+      labels:
+        app: resumablepod-controller
+    spec:
+      serviceAccountName: resumablepod-controller
+      hostPID: true
+      terminationGracePeriodSeconds: 60
+      initContainers:
+        - name: install-runtime-adapter
+          image: resumablepod-controller:v0.1.0
+          imagePullPolicy: IfNotPresent
+          command: [/bin/sh, /usr/local/bin/install-k8s-node.sh]
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+      containers:
+        - name: controller
+          image: resumablepod-controller:v0.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --node=$(NODE_NAME)
+            - --namespace=recoverable-system
+            - --leader-election-namespace=resumablepod-system
+            - --host-mount-namespace
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          volumeMounts:
+            - name: cri-directory
+              mountPath: /run/k3s/containerd
+            - name: runsc-root
+              mountPath: /run/containerd/runsc/k8s.io
+            - name: snapshot-store
+              mountPath: /var/lib/resumablepod
+            - name: runsc-binary
+              mountPath: /usr/local/bin/runsc
+              readOnly: true
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+        - name: cri-directory
+          hostPath:
+            path: /run/k3s/containerd
+            type: Directory
+        - name: runsc-root
+          hostPath:
+            path: /run/containerd/runsc/k8s.io
+            type: DirectoryOrCreate
+        - name: snapshot-store
+          hostPath:
+            path: /var/lib/resumablepod
+            type: DirectoryOrCreate
+        - name: runsc-binary
+          hostPath:
+            path: /usr/local/bin/runsc
+            type: File

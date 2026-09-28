@@ -1,0 +1,35 @@
+apiVersion: recovery.gvisor.dev/v1alpha1
+kind: ResumablePod
+metadata:
+  name: counter
+  namespace: recoverable-system
+spec:
+  nodeName: replace-with-node-name # Or use hack/create-example.sh on the target node.
+  desiredState: Running
+  startupTimeoutSeconds: 45
+  container:
+    name: server
+    image: docker.io/library/resumablepod-counter:dev
+    imagePullPolicy: Never
+    resources:
+      requests:
+        memory: 64Mi
+      limits:
+        memory: 256Mi
+    ports:
+      - containerPort: 8000
+    readinessProbe:
+      httpGet:
+        path: /healthz
+        port: 8000
+      periodSeconds: 2
+    livenessProbe:
+      httpGet:
+        path: /healthz
+        port: 8000
+      periodSeconds: 5
+      failureThreshold: 6
+  servicePorts:
+    - name: http
+      port: 8000
+      targetPort: 8000

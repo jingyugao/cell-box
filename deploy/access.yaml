@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: recoverable-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: resumablepod-controller
+  namespace: recoverable-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: resumablepod-controller
+  namespace: recoverable-system
+rules:
+  - apiGroups: [recovery.gvisor.dev]
+    resources: [resumablepods]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [recovery.gvisor.dev]
+    resources: [resumablepods/status, resumablepods/finalizers]
+    verbs: [get, update, patch]
+  - apiGroups: ['']
+    resources: [pods, services]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: ['']
+    resources: [events]
+    verbs: [get, list, watch, create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: resumablepod-controller
+  namespace: recoverable-system
+subjects:
+  - kind: ServiceAccount
+    name: resumablepod-controller
+    namespace: recoverable-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: resumablepod-controller
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: runsc-recoverable
+handler: runsc-recoverable

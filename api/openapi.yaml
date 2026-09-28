@@ -1,0 +1,1359 @@
+components:
+  parameters:
+    IdempotencyKey:
+      description: Scoped by client, action and target. Reuse identical input to retrieve
+        original operation, including after restart.
+      in: header
+      name: Idempotency-Key
+      required: true
+      schema:
+        maxLength: 200
+        minLength: 1
+        type: string
+  responses:
+    Error:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+      description: 'Structured error: 400 invalid input, 401 unauthenticated, 403
+        denied, 404 missing or not owned, 409 conflict/busy/stale generation, 422
+        unsupported, 502 runtime failure, 504 timeout.'
+  schemas:
+    AccessRequest:
+      additionalProperties: false
+      properties:
+        approved:
+          type: boolean
+        boxId:
+          type: string
+        callbackUrl:
+          format: uri
+          type: string
+        consumed:
+          type: boolean
+        expiresAt:
+          format: date-time
+          type: string
+        id:
+          type: string
+        routeId:
+          type: string
+      required:
+      - id
+      - routeId
+      - boxId
+      - callbackUrl
+      - expiresAt
+      - approved
+      - consumed
+      type: object
+    Archive:
+      additionalProperties: false
+      properties:
+        agent:
+          $ref: '#/components/schemas/Identity'
+        consistency:
+          const: workspace-best-effort
+          type: string
+        createdAt:
+          format: date-time
+          type: string
+        id:
+          type: string
+        imageId:
+          type: string
+        profileId:
+          type: string
+        sha256:
+          type: string
+        size:
+          type: integer
+        sourceBoxId:
+          type: string
+      required:
+      - id
+      - sourceBoxId
+      - profileId
+      - imageId
+      - agent
+      - sha256
+      - size
+      - consistency
+      - createdAt
+      type: object
+    Box:
+      additionalProperties: false
+      properties:
+        capabilities:
+          $ref: '#/components/schemas/Capabilities'
+        createdAt:
+          format: date-time
+          type: string
+        error:
+          additionalProperties: false
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+          required:
+          - code
+          - message
+          type: object
+        generation:
+          type: integer
+        id:
+          type: string
+        image:
+          type: string
+        imageId:
+          type: string
+        operationId:
+          type: string
+        ownerKey:
+          type: string
+        profileId:
+          type: string
+        resourceVersion:
+          type: integer
+        state:
+          type: string
+        workspace:
+          type: string
+      required:
+      - id
+      - ownerKey
+      - profileId
+      - state
+      - generation
+      - resourceVersion
+      - image
+      - workspace
+      - capabilities
+      - createdAt
+      type: object
+    Capabilities:
+      additionalProperties: false
+      properties:
+        archives:
+          const: workspace-best-effort
+          type: string
+        exec:
+          type: boolean
+        files:
+          type: boolean
+        freeze:
+          type: boolean
+        http:
+          type: boolean
+        protectedTools:
+          type: boolean
+        pty:
+          type: boolean
+        reconnectExec:
+          type: boolean
+        suspend:
+          enum:
+          - none
+          - same-node-checkpoint
+          type: string
+        websocket:
+          type: boolean
+      required:
+      - exec
+      - files
+      - http
+      - websocket
+      - pty
+      - reconnectExec
+      - freeze
+      - suspend
+      - archives
+      - protectedTools
+      type: object
+    CreateBox:
+      additionalProperties: false
+      properties:
+        ownerKey:
+          maxLength: 256
+          minLength: 1
+          type: string
+        profileId:
+          type: string
+      required:
+      - profileId
+      - ownerKey
+      type: object
+    Error:
+      additionalProperties: false
+      properties:
+        error:
+          additionalProperties: false
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+          required:
+          - code
+          - message
+          type: object
+      required:
+      - error
+      type: object
+    ExecRequest:
+      additionalProperties: false
+      properties:
+        argv:
+          description: First argument must be an absolute executable path. Shell syntax
+            requires explicit /bin/sh -c when available.
+          items:
+            type: string
+          maxItems: 128
+          minItems: 1
+          type: array
+        cwd:
+          description: Relative workspace directory; defaults to workspace root.
+          type: string
+        env:
+          additionalProperties:
+            type: string
+          type: object
+        expectedGeneration:
+          minimum: 1
+          type: integer
+        timeoutMs:
+          default: 30000
+          maximum: 300000
+          minimum: 1
+          type: integer
+      required:
+      - argv
+      - expectedGeneration
+      type: object
+    ExecResult:
+      additionalProperties: false
+      properties:
+        exitCode:
+          type: integer
+        stderr:
+          type: string
+        stdout:
+          type: string
+        truncated:
+          type: boolean
+      required:
+      - stdout
+      - stderr
+      - exitCode
+      type: object
+    Execution:
+      additionalProperties: false
+      properties:
+        boxId:
+          type: string
+        id:
+          type: string
+        operationId:
+          type: string
+        result:
+          $ref: '#/components/schemas/ExecResult'
+        state:
+          enum:
+          - running
+          - exited
+          - unknown
+          type: string
+      required:
+      - id
+      - boxId
+      - operationId
+      - state
+      type: object
+    FileEntry:
+      additionalProperties: false
+      properties:
+        directory:
+          type: boolean
+        name:
+          type: string
+        size:
+          type: integer
+      required:
+      - name
+      - directory
+      - size
+      type: object
+    Grant:
+      additionalProperties: false
+      properties:
+        expiresAt:
+          format: date-time
+          type: string
+        id:
+          type: string
+        revoked:
+          type: boolean
+        routeId:
+          type: string
+        subject:
+          type: string
+      required:
+      - id
+      - routeId
+      - subject
+      - expiresAt
+      - revoked
+      type: object
+    GrantCreated:
+      additionalProperties: false
+      properties:
+        grant:
+          $ref: '#/components/schemas/Grant'
+        token:
+          description: Returned once; store only in the calling product. Never put
+            this token in URLs.
+          type: string
+      required:
+      - grant
+      - token
+      type: object
+    GrantInput:
+      additionalProperties: false
+      properties:
+        subject:
+          maxLength: 256
+          minLength: 1
+          type: string
+        ttlSeconds:
+          default: 900
+          maximum: 3600
+          minimum: 1
+          type: integer
+      required:
+      - subject
+      type: object
+    GrantRenewInput:
+      additionalProperties: false
+      properties:
+        ttlSeconds:
+          maximum: 3600
+          minimum: 1
+          type: integer
+      required:
+      - ttlSeconds
+      type: object
+    Identity:
+      additionalProperties: false
+      properties:
+        gid:
+          type: integer
+        uid:
+          type: integer
+      required:
+      - uid
+      - gid
+      type: object
+    Lease:
+      additionalProperties: false
+      properties:
+        boxId:
+          type: string
+        expiresAt:
+          format: date-time
+          type: string
+        id:
+          type: string
+        purpose:
+          type: string
+      required:
+      - id
+      - boxId
+      - purpose
+      - expiresAt
+      type: object
+    LeaseInput:
+      additionalProperties: false
+      properties:
+        purpose:
+          maxLength: 256
+          type: string
+        ttlSeconds:
+          default: 60
+          maximum: 3600
+          minimum: 1
+          type: integer
+      required: []
+      type: object
+    Operation:
+      additionalProperties: false
+      properties:
+        createdAt:
+          format: date-time
+          type: string
+        error:
+          additionalProperties: false
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+          required:
+          - code
+          - message
+          type: object
+        finishedAt:
+          format: date-time
+          type: string
+        id:
+          type: string
+        kind:
+          type: string
+        result:
+          additionalProperties:
+            type: string
+          type: object
+        status:
+          enum:
+          - queued
+          - running
+          - succeeded
+          - failed
+          type: string
+        targetId:
+          type: string
+        version:
+          type: integer
+      required:
+      - id
+      - kind
+      - targetId
+      - status
+      - version
+      - createdAt
+      type: object
+    Profile:
+      additionalProperties: false
+      properties:
+        agent:
+          $ref: '#/components/schemas/Identity'
+        behavior:
+          enum:
+          - normal
+          - resumable
+          type: string
+        capabilities:
+          $ref: '#/components/schemas/Capabilities'
+        cpu:
+          exclusiveMinimum: 0
+          type: number
+        id:
+          type: string
+        image:
+          type: string
+        kind:
+          enum:
+          - docker-normal
+          - k8s-resumable
+          type: string
+        memoryMiB:
+          minimum: 1
+          type: integer
+        provider:
+          enum:
+          - docker
+          - resumable-k8s-pod
+          type: string
+        runtime:
+          enum:
+          - docker
+          - k8s
+          type: string
+        workspace:
+          type: string
+      required:
+      - id
+      - provider
+      - runtime
+      - behavior
+      - kind
+      - image
+      - workspace
+      - agent
+      - cpu
+      - memoryMiB
+      - capabilities
+      type: object
+    RestoreBox:
+      additionalProperties: false
+      properties:
+        archiveId:
+          type: string
+        ownerKey:
+          maxLength: 256
+          minLength: 1
+          type: string
+        profileId:
+          type: string
+      required:
+      - profileId
+      - ownerKey
+      - archiveId
+      type: object
+    Route:
+      additionalProperties: false
+      properties:
+        boxId:
+          type: string
+        id:
+          type: string
+        port:
+          type: integer
+        url:
+          format: uri
+          type: string
+      required:
+      - id
+      - boxId
+      - port
+      - url
+      type: object
+    RouteInput:
+      additionalProperties: false
+      properties:
+        boxId:
+          type: string
+        port:
+          maximum: 65535
+          minimum: 1
+          not:
+            const: 40000
+          type: integer
+      required:
+      - boxId
+      - port
+      type: object
+    ToolRequest:
+      additionalProperties: false
+      properties:
+        args:
+          items:
+            type: string
+          type: array
+        timeoutMs:
+          default: 30000
+          maximum: 300000
+          minimum: 1
+          type: integer
+      required: []
+      type: object
+  securitySchemes:
+    ClientBearer:
+      description: Registered product client token from tokenEnv. Keep server-side;
+        never send to sandbox or browser.
+      scheme: bearer
+      type: http
+info:
+  description: Reusable Go sandbox infrastructure. CoCell and other products authenticate
+    as registered API clients, select admitted profiles, and enforce their own end-user
+    authorization. Single-writer durable state; no automatic command replay or implicit
+    wake.
+  title: Cellbox REST API
+  version: 0.1.0
+openapi: 3.1.0
+paths:
+  /healthz:
+    get:
+      operationId: health
+      parameters: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                additionalProperties: false
+                properties:
+                  status:
+                    type: string
+                required:
+                - status
+                type: object
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      security: []
+      summary: Service process health
+  /v1/access-requests/{id}:
+    get:
+      operationId: getAccessRequest
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessRequest'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Inspect a browser authorization transaction
+  /v1/access-requests/{id}:approve:
+    post:
+      description: CoCell authenticates the user and checks permission for the returned
+        boxId before approving. Redirect browser to returned exact URL. One approval
+        and one browser-bound callback only.
+      operationId: approveAccessRequest
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GrantInput'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                additionalProperties: false
+                properties:
+                  redirectUrl:
+                    format: uri
+                    type: string
+                required:
+                - redirectUrl
+                type: object
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Authorize a browser after product permission checks
+  /v1/archives:
+    get:
+      operationId: listArchives
+      parameters: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/Archive'
+                type: array
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: List archives independently of box lifecycle
+  /v1/archives/{id}:
+    delete:
+      operationId: deleteArchive
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "204":
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Delete an archive not used by an active restore
+    get:
+      operationId: getArchive
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Archive'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Get owned archive metadata
+  /v1/archives/{id}/content:
+    get:
+      operationId: downloadArchive
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/gzip:
+              schema:
+                format: binary
+                type: string
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Download an integrity-checked gzip tar
+  /v1/boxes:
+    get:
+      operationId: listBoxes
+      parameters: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/Box'
+                type: array
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: List owned boxes (stored snapshots)
+    post:
+      operationId: createBox
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBox'
+        required: true
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Create a box asynchronously
+  /v1/boxes/{id}:
+    get:
+      operationId: getBox
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Box'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Inspect owned box and refresh provider state
+  /v1/boxes/{id}/archives:
+    post:
+      description: result.archiveId identifies the capture; source runtime is not
+        destroyed or suspended. Excludes debug credentials and files outside workspace.
+      operationId: captureArchive
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Capture a durable best-effort workspace archive
+  /v1/boxes/{id}/credentials/{slot}:
+    put:
+      description: 1..65536 bytes. Slot must be referenced by an admitted tool. Secret
+        never enters public box metadata or archive.
+      operationId: putCredential
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: slot
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/octet-stream:
+            schema:
+              format: binary
+              maxLength: 65536
+              type: string
+        required: true
+      responses:
+        "204":
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Install an admitted debug credential slot
+  /v1/boxes/{id}/execs:
+    post:
+      description: result.execId identifies the execution. Outcome may be unknown
+        on interruption; never automatically replay. No PTY or stdin stream.
+      operationId: createExec
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExecRequest'
+        required: true
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Execute a bounded command as agent
+  /v1/boxes/{id}/files:
+    get:
+      description: API file transfer limit is 16 MiB; list=1 returns directory entries.
+      operationId: readFiles
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - description: Workspace-relative path; traversal and symlink following are
+          denied.
+        in: query
+        name: path
+        required: true
+        schema:
+          type: string
+      - in: query
+        name: list
+        schema:
+          enum:
+          - "1"
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/FileEntry'
+                type: array
+            application/octet-stream:
+              schema:
+                format: binary
+                type: string
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Read a workspace file or list a directory
+    put:
+      operationId: writeFile
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - description: Workspace-relative path; traversal and symlink following are
+          denied.
+        in: query
+        name: path
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/octet-stream:
+            schema:
+              format: binary
+              type: string
+        required: true
+      responses:
+        "204":
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Write workspace bytes with agent ownership
+  /v1/boxes/{id}/leases:
+    post:
+      operationId: createLease
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LeaseInput'
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lease'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Prevent lifecycle changes during product work
+  /v1/boxes/{id}/tools/{tool}:
+    post:
+      description: Arguments are validated against full-match patterns. Tool definitions
+        are server profile configuration; arbitrary debug commands are forbidden.
+        This synchronous request is not replay safe.
+      operationId: runTool
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: tool
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ToolRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecResult'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Run an immutable admitted tool as debug
+  /v1/boxes/{id}:activate:
+    post:
+      description: An active operation, service request, or unexpired usage lease
+        blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
+        never reruns an interrupted exec or resumes a failed archive restore.
+      operationId: activateBox
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Start the product workload in a successfully restored candidate
+  /v1/boxes/{id}:destroy:
+    post:
+      description: An active operation, service request, or unexpired usage lease
+        blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
+        never reruns an interrupted exec or resumes a failed archive restore.
+      operationId: destroyBox
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Delete runtime while retaining archives
+  /v1/boxes/{id}:freeze:
+    post:
+      description: An active operation, service request, or unexpired usage lease
+        blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
+        never reruns an interrupted exec or resumes a failed archive restore.
+      operationId: freezeBox
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Pause a Docker container
+  /v1/boxes/{id}:reconcile:
+    post:
+      description: An active operation, service request, or unexpired usage lease
+        blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
+        never reruns an interrupted exec or resumes a failed archive restore.
+      operationId: reconcileBox
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Explicitly recover observed state after an interrupted operation
+  /v1/boxes/{id}:resume:
+    post:
+      description: An active operation, service request, or unexpired usage lease
+        blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
+        never reruns an interrupted exec or resumes a failed archive restore.
+      operationId: resumeBox
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Restore a resumable Kubernetes checkpoint
+  /v1/boxes/{id}:suspend:
+    post:
+      description: An active operation, service request, or unexpired usage lease
+        blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
+        never reruns an interrupted exec or resumes a failed archive restore.
+      operationId: suspendBox
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Checkpoint a resumable Kubernetes box on its node
+  /v1/boxes/{id}:unfreeze:
+    post:
+      description: An active operation, service request, or unexpired usage lease
+        blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
+        never reruns an interrupted exec or resumes a failed archive restore.
+      operationId: unfreezeBox
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Unpause a Docker container
+  /v1/boxes:restore:
+    post:
+      description: Requires exact prepared image identity and agent UID/GID. Product
+        workload is held until activate. Failed candidates must be destroyed.
+      operationId: restoreBox
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestoreBox'
+        required: true
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Restore an archive into a new staged box
+  /v1/execs/{id}:
+    get:
+      operationId: getExec
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Execution'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Get recorded execution output and status
+  /v1/grants/{id}:
+    delete:
+      operationId: revokeGrant
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "204":
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Revoke a grant and close its active streams
+    patch:
+      operationId: renewGrant
+      description: Extends validity to at least now plus ttlSeconds; never shortens the current expiry. Expired or revoked grants cannot be renewed.
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GrantRenewInput'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Grant'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Renew an owned, unexpired service grant without replacing its token
+  /v1/leases/{id}:
+    delete:
+      operationId: releaseLease
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "204":
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Release usage lease
+    patch:
+      operationId: renewLease
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LeaseInput'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lease'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Renew an unexpired usage lease
+  /v1/operations/{id}:
+    get:
+      operationId: getOperation
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Get durable operation status
+  /v1/operations/{id}/events:
+    get:
+      description: SSE event snapshot uses operation version as id. Reconnection sends
+        the latest snapshot, not event history. Disconnect does not cancel the operation.
+      operationId: watchOperation
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            text/event-stream:
+              schema:
+                type: string
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Stream operation snapshots
+  /v1/profiles:
+    get:
+      operationId: listProfiles
+      parameters: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/Profile'
+                type: array
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: List admitted profiles for the authenticated client
+  /v1/routes:
+    post:
+      description: One route per box/port; duplicate registration returns the existing
+        route. Browser session auth requires serviceDomain and per-route HTTPS hostnames.
+      operationId: createRoute
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RouteInput'
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Route'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Register an authenticated service route
+  /v1/routes/{id}/grants:
+    post:
+      operationId: createGrant
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GrantInput'
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrantCreated'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Issue a short-lived box-port grant
+security:
+- ClientBearer: []
+servers:
+- description: Local default; use TLS for remote deployment
+  url: http://127.0.0.1:8090

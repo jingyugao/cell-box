@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: resumablepod-system
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: resumablepod-controller
+  namespace: resumablepod-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: resumablepod-controller-k8s
+  namespace: recoverable-system
+subjects:
+  - kind: ServiceAccount
+    name: resumablepod-controller
+    namespace: resumablepod-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: resumablepod-controller
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: resumablepod-controller
+  namespace: resumablepod-system
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: ['']
+    resources: [events]
+    verbs: [get, list, watch, create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: resumablepod-controller
+  namespace: resumablepod-system
+subjects:
+  - kind: ServiceAccount
+    name: resumablepod-controller
+    namespace: resumablepod-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: resumablepod-controller
