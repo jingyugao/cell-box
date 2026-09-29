@@ -130,6 +130,25 @@ func TestScratchAccountFileAndDirectories(t *testing.T) {
 	}
 }
 
+func TestDebugHostHomeMustBePrivate(t *testing.T) {
+	home := t.TempDir()
+	debug := guestapi.Identity{UID: uint32(os.Getuid()), GID: uint32(os.Getgid())}
+	for _, mode := range []os.FileMode{0755, 0710} {
+		if err := os.Chmod(home, mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateDebugHome(home, debug); err == nil || !strings.Contains(err.Error(), "0700") {
+			t.Fatalf("mode %o accepted or unclear error: %v", mode, err)
+		}
+	}
+	if err := os.Chmod(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDebugHome(home, debug); err != nil {
+		t.Fatalf("private debug home rejected: %v", err)
+	}
+}
+
 func TestCredentialWriteIsPrivateAndAtomic(t *testing.T) {
 	root := t.TempDir()
 	id := guestapi.Identity{UID: uint32(os.Getuid()), GID: uint32(os.Getgid())}
@@ -237,6 +256,47 @@ func TestQuiesceAndToolArguments(t *testing.T) {
 	}
 	if got := request(s.Handler(), "POST", "/v1/unquiesce", "secret", nil).Code; got != 204 {
 		t.Fatalf("unquiesce: %d", got)
+	}
+}
+
+func TestPassThroughToolArguments(t *testing.T) {
+	c := testConfig(t)
+	c.Tools = []guestapi.Tool{{ID: "proxy", Executable: "/opt/cellbox/tools/proxy", PassThroughArgs: true}}
+	tools, err := validateConfig(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := tools["proxy"]
+	for _, args := range [][]string{nil, {"status"}, {"--format", `{"path":"a b"}`, "with spaces"}, {strings.Repeat("x", 8192)}} {
+		if err := validateToolArgs(proxy, args); err != nil {
+			t.Fatalf("rejected valid arguments %q: %v", args, err)
+		}
+	}
+	for _, args := range [][]string{{strings.Repeat("x", 8193)}, {strings.Repeat("x", 8192), "x"}, {"a\x00b"}, make([]string, 33)} {
+		if err := validateToolArgs(proxy, args); err == nil {
+			t.Fatalf("accepted invalid arguments %q", args)
+		}
+	}
+	c.Tools[0].InputPatterns = []string{`[a-z]+`}
+	if _, err := validateConfig(c); err == nil {
+		t.Fatal("combined pass-through and input patterns accepted")
+	}
+	c.Tools[0].PassThroughArgs = false
+	tools, err = validateConfig(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := tools["proxy"]
+	for _, args := range [][]string{nil, {"one", "two"}} {
+		if err := validateToolArgs(legacy, args); err == nil {
+			t.Fatalf("accepted incorrect pattern count %q", args)
+		}
+	}
+	if err := validateToolArgs(legacy, []string{"ok"}); err != nil {
+		t.Fatalf("rejected matching legacy argument: %v", err)
+	}
+	if err := validateToolArgs(legacy, []string{"ok;echo"}); err == nil {
+		t.Fatal("accepted nonmatching legacy argument")
 	}
 }
 

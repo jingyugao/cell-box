@@ -64,13 +64,8 @@ func writeCredential(root, slot string, body io.Reader, id guestapi.Identity) er
 }
 
 func (s *Server) runTool(ctx context.Context, t compiledTool, req guestapi.ToolRequest) (result guestapi.ExecResult, err error) {
-	if len(req.Args) != len(t.patterns) {
-		return guestapi.ExecResult{}, errors.New("tool argument count mismatch")
-	}
-	for i, a := range req.Args {
-		if len(a) > 8192 || !t.patterns[i].MatchString(a) {
-			return guestapi.ExecResult{}, fmt.Errorf("tool argument %d rejected", i)
-		}
+	if err := validateToolArgs(t, req.Args); err != nil {
+		return guestapi.ExecResult{}, err
 	}
 	if err := checkImmutable(t.spec.Executable, true); err != nil {
 		return guestapi.ExecResult{}, err
@@ -117,8 +112,37 @@ func (s *Server) runTool(ctx context.Context, t compiledTool, req guestapi.ToolR
 	if s.cfg.DebugHome != "" {
 		home = s.cfg.DebugHome
 	}
-	result, err = runWithGroups(ctx, s.self, s.cfg.Debug, groups, argv, s.cfg.Workspace, home, env, req.TimeoutMS)
+	workingDir := home
+	if t.spec.WorkspaceRead {
+		workingDir = s.cfg.Workspace
+	}
+	result, err = runWithGroups(ctx, s.self, s.cfg.Debug, groups, argv, workingDir, home, env, req.TimeoutMS)
 	return result, err
+}
+
+func validateToolArgs(t compiledTool, args []string) error {
+	if t.spec.PassThroughArgs {
+		if len(args) > 32 {
+			return errors.New("too many tool arguments")
+		}
+	} else if len(args) != len(t.patterns) {
+		return errors.New("tool argument count mismatch")
+	}
+	total := 0
+	for i, a := range args {
+		if len(a) > 8192 || strings.ContainsRune(a, 0) {
+			return fmt.Errorf("tool argument %d rejected", i)
+		}
+		if t.spec.PassThroughArgs {
+			total += len(a)
+			if total > 8192 {
+				return errors.New("tool arguments exceed 8192 bytes")
+			}
+		} else if !t.patterns[i].MatchString(a) {
+			return fmt.Errorf("tool argument %d rejected", i)
+		}
+	}
+	return nil
 }
 
 func chownWorkspaceTree(root string, owner guestapi.Identity) error {

@@ -16,6 +16,9 @@ type Tool struct {
 	Args       []string `json:"args"`
 	// Each supplied argument must match its corresponding full regular expression.
 	InputPatterns []string `json:"inputPatterns,omitempty"`
+	// PassThroughArgs accepts a variable number of caller arguments without
+	// patterns. It cannot be combined with InputPatterns.
+	PassThroughArgs bool `json:"passThroughArgs,omitempty"`
 	// Values are private credential slot names, not caller-selected paths.
 	CredentialEnv map[string]string `json:"credentialEnv,omitempty"`
 	WorkspaceRead bool              `json:"workspaceRead,omitempty"`

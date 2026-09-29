@@ -56,13 +56,8 @@ func Bootstrap(c guestapi.Config) (string, error) {
 		}
 	}
 	if c.DebugHome != "" {
-		info, err := os.Lstat(c.DebugHome)
-		if err != nil {
-			return "", fmt.Errorf("debug host home: %w", err)
-		}
-		owner, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || !info.IsDir() || uint32(owner.Uid) != c.Debug.UID || uint32(owner.Gid) != c.Debug.GID || info.Mode().Perm()&0300 != 0300 {
-			return "", fmt.Errorf("debug host home must be a writable directory owned by the debug identity")
+		if err := validateDebugHome(c.DebugHome, c.Debug); err != nil {
+			return "", err
 		}
 	}
 	if err := checkTrustedParents(c.Workspace, c.Agent); err != nil {
@@ -97,6 +92,21 @@ func Bootstrap(c guestapi.Config) (string, error) {
 		return "", err
 	}
 	return token, nil
+}
+
+func validateDebugHome(path string, debug guestapi.Identity) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("debug host home: %w", err)
+	}
+	owner, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.IsDir() || uint32(owner.Uid) != debug.UID || uint32(owner.Gid) != debug.GID || info.Mode().Perm()&0300 != 0300 {
+		return errors.New("debug host home must be a writable directory owned by the debug identity")
+	}
+	if info.Mode().Perm()&0077 != 0 {
+		return errors.New("debug host home must be private: set its permissions to 0700 before mounting it")
+	}
+	return nil
 }
 
 func checkTrustedParents(path string, agent guestapi.Identity) error {

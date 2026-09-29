@@ -68,6 +68,9 @@ func validateConfig(c guestapi.Config) (map[string]compiledTool, error) {
 		if len(t.InputPatterns) > 32 {
 			return nil, fmt.Errorf("too many arguments for tool %q", t.ID)
 		}
+		if t.PassThroughArgs && len(t.InputPatterns) != 0 {
+			return nil, fmt.Errorf("tool %q cannot combine passThroughArgs with inputPatterns", t.ID)
+		}
 		ct := compiledTool{spec: t}
 		for _, p := range t.InputPatterns {
 			if len(p) > 512 {
