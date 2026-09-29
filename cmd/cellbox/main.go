@@ -33,6 +33,10 @@ func run(args []string) error {
 	configPath := flags.String("config", "", "path to the Cellbox JSON configuration")
 	kubeconfig := flags.String("kubeconfig", "", "explicit kubeconfig path (default: in-cluster credentials)")
 	dockerBinary := flags.String("docker", "docker", "Docker CLI executable")
+	buildkitAddress := flags.String("buildkit-addr", "", "Unix BuildKit socket for REST image builds")
+	imageRepository := flags.String("image-repository", "", "registry repository for prepared images")
+	guestBinary := flags.String("guest-binary", "", "static Cellbox guest binary for image builds")
+	buildctlBinary := flags.String("buildctl", "", "BuildKit client executable")
 	showVersion := flags.Bool("version", false, "print build version and exit")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -58,6 +62,9 @@ func run(args []string) error {
 	}
 	if closeErr != nil {
 		return errors.New("cannot close Cellbox configuration")
+	}
+	if *buildkitAddress != "" || *imageRepository != "" || *guestBinary != "" || *buildctlBinary != "" {
+		config.ImageBuild = service.ImageBuildConfig{Address: *buildkitAddress, Repository: *imageRepository, GuestBinary: *guestBinary, BuildctlBinary: *buildctlBinary}
 	}
 
 	providers := make(map[string]boxprovider.Provider)

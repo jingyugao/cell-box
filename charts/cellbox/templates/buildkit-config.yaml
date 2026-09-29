@@ -1,0 +1,15 @@
+{{- if and .Values.api.enabled .Values.buildkit.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cellbox-buildkit-config
+  namespace: {{ .Values.api.namespace }}
+data:
+  buildkitd.toml: |
+    {{- if .Values.buildkit.registryHost }}
+    [registry.{{ .Values.buildkit.registryHost | quote }}]
+      http = {{ .Values.buildkit.registryHTTP }}
+    {{- else }}
+    # BuildKit uses the normal registry TLS settings.
+    {{- end }}
+{{- end }}
