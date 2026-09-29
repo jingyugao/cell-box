@@ -4,7 +4,7 @@ controller:
 
 api:
   enabled: true
-  namespace: co-cell
+  namespace: cell-box
   image: 192.168.133.1:5001/cellbox-api@sha256:eaeca75862d75f996381661c6a0c02831bce2cd3e614cd6b437bb3dfeca8fbd4
   nodeSelector:
     kubernetes.io/hostname: ubuntu-server
