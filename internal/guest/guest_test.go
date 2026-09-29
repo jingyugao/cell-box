@@ -130,6 +130,25 @@ func TestScratchAccountFileAndDirectories(t *testing.T) {
 	}
 }
 
+func TestDebugHostHomeMustBePrivate(t *testing.T) {
+	home := t.TempDir()
+	debug := guestapi.Identity{UID: uint32(os.Getuid()), GID: uint32(os.Getgid())}
+	for _, mode := range []os.FileMode{0755, 0710} {
+		if err := os.Chmod(home, mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateDebugHome(home, debug); err == nil || !strings.Contains(err.Error(), "0700") {
+			t.Fatalf("mode %o accepted or unclear error: %v", mode, err)
+		}
+	}
+	if err := os.Chmod(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDebugHome(home, debug); err != nil {
+		t.Fatalf("private debug home rejected: %v", err)
+	}
+}
+
 func TestCredentialWriteIsPrivateAndAtomic(t *testing.T) {
 	root := t.TempDir()
 	id := guestapi.Identity{UID: uint32(os.Getuid()), GID: uint32(os.Getgid())}

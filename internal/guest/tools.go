@@ -117,7 +117,11 @@ func (s *Server) runTool(ctx context.Context, t compiledTool, req guestapi.ToolR
 	if s.cfg.DebugHome != "" {
 		home = s.cfg.DebugHome
 	}
-	result, err = runWithGroups(ctx, s.self, s.cfg.Debug, groups, argv, s.cfg.Workspace, home, env, req.TimeoutMS)
+	workingDir := home
+	if t.spec.WorkspaceRead {
+		workingDir = s.cfg.Workspace
+	}
+	result, err = runWithGroups(ctx, s.self, s.cfg.Debug, groups, argv, workingDir, home, env, req.TimeoutMS)
 	return result, err
 }
 
