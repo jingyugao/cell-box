@@ -46,6 +46,9 @@ spec:
         runAsUser: 10001
         runAsGroup: 10001
         fsGroup: 10001
+        {{- if .Values.buildkit.enabled }}
+        supplementalGroups: [1000]
+        {{- end }}
         seccompProfile:
           type: RuntimeDefault
       initContainers:
@@ -63,12 +66,40 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/cellbox
+        {{- if .Values.buildkit.enabled }}
+        - name: prepare-buildkit-socket
+          image: busybox:1.36
+          command: [/bin/sh, -ec, 'chown 1000:1000 /run/cellbox-buildkit && chmod 0770 /run/cellbox-buildkit']
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [CHOWN, FOWNER]
+          volumeMounts:
+            - name: buildkit-socket
+              mountPath: /run/cellbox-buildkit
+        {{- end }}
       containers:
         - name: api
           image: {{ .Values.api.image | quote }}
           imagePullPolicy: {{ .Values.api.imagePullPolicy }}
           command: [/usr/local/bin/cellbox]
-          args: [--config, /etc/cellbox/config.json]
+          args:
+            - --config
+            - /etc/cellbox/config.json
+            {{- if .Values.buildkit.enabled }}
+            - --buildkit-addr
+            - unix:///run/cellbox-buildkit/buildkitd.sock
+            - --image-repository
+            - {{ required "buildkit.repository is required when enabled" .Values.buildkit.repository | quote }}
+            - --guest-binary
+            - /usr/local/bin/cellbox-guest
+            - --buildctl
+            - /usr/local/bin/buildctl
+            {{- end }}
           envFrom:
             - secretRef:
                 name: {{ .Values.api.clientTokensSecret }}
@@ -111,6 +142,45 @@ spec:
               mountPath: /var/lib/cellbox
             - name: temp
               mountPath: /tmp
+            {{- if .Values.buildkit.enabled }}
+            - name: buildkit-socket
+              mountPath: /run/cellbox-buildkit
+            {{- end }}
+        {{- if .Values.buildkit.enabled }}
+        - name: buildkit
+          image: {{ .Values.buildkit.image | quote }}
+          imagePullPolicy: {{ .Values.buildkit.imagePullPolicy }}
+          args:
+            - --addr=unix:///run/cellbox-buildkit/buildkitd.sock
+            - --group=0
+            - --oci-worker-no-process-sandbox
+            - --config=/etc/buildkit/buildkitd.toml
+          readinessProbe:
+            exec:
+              command: [buildctl, --addr, unix:///run/cellbox-buildkit/buildkitd.sock, debug, workers]
+            periodSeconds: 10
+          resources:
+            requests:
+              {{- toYaml .Values.buildkit.requests | nindent 14 }}
+            limits:
+              {{- toYaml .Values.buildkit.limits | nindent 14 }}
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            seccompProfile:
+              type: Unconfined
+            appArmorProfile:
+              type: Unconfined
+          volumeMounts:
+            - name: buildkit-socket
+              mountPath: /run/cellbox-buildkit
+            - name: buildkit-cache
+              mountPath: /home/user/.local/share/buildkit
+            - name: buildkit-config
+              mountPath: /etc/buildkit
+              readOnly: true
+        {{- end }}
       volumes:
         - name: config
           secret:
@@ -124,7 +194,17 @@ spec:
             claimName: {{ .Values.api.dataClaim }}
         - name: temp
           emptyDir:
-            sizeLimit: 64Mi
+            sizeLimit: {{ ternary "1Gi" "64Mi" .Values.buildkit.enabled }}
+        {{- if .Values.buildkit.enabled }}
+        - name: buildkit-socket
+          emptyDir: {}
+        - name: buildkit-cache
+          emptyDir:
+            sizeLimit: {{ .Values.buildkit.cacheSize }}
+        - name: buildkit-config
+          configMap:
+            name: cellbox-buildkit-config
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

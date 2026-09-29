@@ -22,6 +22,21 @@ api:
   storageClassName: ""
   storageSize: 10Gi
 
+buildkit:
+  enabled: false
+  image: moby/buildkit:v0.33.0-rootless
+  imagePullPolicy: IfNotPresent
+  repository: ""
+  registryHost: ""
+  registryHTTP: false
+  cacheSize: 10Gi
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
 gatewayAccess:
   enabled: false
   serviceAccountName: cellbox-gateway

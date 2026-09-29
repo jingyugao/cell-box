@@ -26,13 +26,20 @@ type Profile struct {
 	Clients                []string        `json:"clients"`
 }
 type Config struct {
-	Listen                string    `json:"listen"`
-	DataDir               string    `json:"dataDir"`
-	PublicURL             string    `json:"publicUrl,omitempty"`
-	ServiceDomain         string    `json:"serviceDomain,omitempty"`
-	Clients               []Client  `json:"clients"`
-	Profiles              []Profile `json:"profiles"`
-	StartupTimeoutSeconds int       `json:"startupTimeoutSeconds,omitempty"`
+	Listen                string           `json:"listen"`
+	DataDir               string           `json:"dataDir"`
+	PublicURL             string           `json:"publicUrl,omitempty"`
+	ServiceDomain         string           `json:"serviceDomain,omitempty"`
+	Clients               []Client         `json:"clients"`
+	Profiles              []Profile        `json:"profiles"`
+	StartupTimeoutSeconds int              `json:"startupTimeoutSeconds,omitempty"`
+	ImageBuild            ImageBuildConfig `json:"imageBuild,omitempty"`
+}
+type ImageBuildConfig struct {
+	Address        string `json:"address,omitempty"`
+	Repository     string `json:"repository,omitempty"`
+	GuestBinary    string `json:"guestBinary,omitempty"`
+	BuildctlBinary string `json:"buildctlBinary,omitempty"`
 }
 type APIError struct {
 	Code    string `json:"code"`
