@@ -17,6 +17,8 @@ CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags "$ldflags" 
 CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -o "$out/server" ./test/counter
 cp test/counter/Dockerfile "$out/"
 cp -r charts examples images hack "$out/"
+mkdir -p "$out/test"
+cp -r test/scripts "$out/test/"
 cp LICENSE VERSION "$out/"
 mkdir -p "$out/config"
 cp config/sample.json "$out/config/"
