@@ -1,0 +1,62 @@
+{{- if .Values.gatewayAccess.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.gatewayAccess.serviceAccountName }}
+  namespace: {{ .Values.gatewayAccess.namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cellbox-gateway
+  namespace: {{ .Values.gatewayAccess.namespace }}
+spec:
+  replicas: {{ .Values.gatewayAccess.replicas }}
+  selector:
+    matchLabels:
+      app: cellbox-gateway
+  template:
+    metadata:
+      labels:
+        app: cellbox-gateway
+    spec:
+      serviceAccountName: {{ .Values.gatewayAccess.serviceAccountName }}
+      containers:
+        - name: gateway
+          image: {{ .Values.gatewayAccess.image | quote }}
+          imagePullPolicy: {{ .Values.gatewayAccess.imagePullPolicy }}
+          args:
+            {{- toYaml .Values.gatewayAccess.args | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 2
+          resources:
+            requests:
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cellbox-gateway
+  namespace: {{ .Values.gatewayAccess.namespace }}
+spec:
+  selector:
+    app: cellbox-gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+{{- end }}

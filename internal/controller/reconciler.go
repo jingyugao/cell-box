@@ -154,7 +154,7 @@ func validate(w *api.ResumablePod) error {
 }
 func owned(w *api.ResumablePod, o client.Object) bool {
 	ref := meta.GetControllerOf(o)
-	return ref != nil && ref.UID == w.UID && ref.Kind == "ResumablePod" && ref.APIVersion == api.GroupVersion.String()
+	return ref != nil && ref.UID == w.UID && ref.Kind == api.Kind && ref.APIVersion == api.GroupVersion.String()
 }
 func (r *Reconciler) pod(ctx context.Context, w *api.ResumablePod) (*core.Pod, error) {
 	if w.Status.PodName == "" {
@@ -216,7 +216,7 @@ func (r *Reconciler) startupFailure(ctx context.Context, p *core.Pod) string {
 }
 func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (ctrl.Result, error) {
 	w.Status.Cycle++
-	w.Status.PodName = fmt.Sprintf("rp-%s-%d", string(w.UID)[:8], w.Status.Cycle)
+	w.Status.PodName = fmt.Sprintf("cb-%s-%d", string(w.UID)[:8], w.Status.Cycle)
 	w.Status.PodUID = ""
 	phase := "Creating"
 	if w.Status.Snapshot != "" {
@@ -230,7 +230,7 @@ func (r *Reconciler) service(ctx context.Context, w *api.ResumablePod) error {
 	}
 	s := &core.Service{}
 	err := r.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: w.Name}, s)
-	selector := map[string]string{api.OwnerLabel: string(w.UID), "recovery.gvisor.dev/serving": "true"}
+	selector := map[string]string{api.OwnerLabel: string(w.UID), api.ServingLabel: "true"}
 	if errors.IsNotFound(err) {
 		s = &core.Service{ObjectMeta: meta.ObjectMeta{Name: w.Name, Namespace: w.Namespace}, Spec: core.ServiceSpec{Selector: selector, Ports: w.Spec.ServicePorts}}
 		if err = controllerutil.SetControllerReference(w, s, r.Scheme()); err != nil {
@@ -257,14 +257,14 @@ func (r *Reconciler) serving(ctx context.Context, p *core.Pod, on bool) error {
 	if on {
 		value = "true"
 	}
-	if p.Labels["recovery.gvisor.dev/serving"] == value {
+	if p.Labels[api.ServingLabel] == value {
 		return nil
 	}
 	old := p.DeepCopy()
 	if p.Labels == nil {
 		p.Labels = map[string]string{}
 	}
-	p.Labels["recovery.gvisor.dev/serving"] = value
+	p.Labels[api.ServingLabel] = value
 	return r.Patch(ctx, p, client.MergeFrom(old))
 }
 func (r *Reconciler) removePod(ctx context.Context, w *api.ResumablePod, p *core.Pod) (bool, error) {

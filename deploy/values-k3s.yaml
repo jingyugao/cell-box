@@ -1,0 +1,20 @@
+controller:
+  image: 192.168.133.1:5001/cellbox-controller@sha256:d2893e8325748211f308ecf07dbf6b1075b0e48f516d6340f1b0412b014ef0ff
+  adapterImage: 192.168.133.1:5001/cellbox-controller@sha256:d2893e8325748211f308ecf07dbf6b1075b0e48f516d6340f1b0412b014ef0ff
+
+api:
+  enabled: true
+  namespace: co-cell
+  image: 192.168.133.1:5001/cellbox-api@sha256:eaeca75862d75f996381661c6a0c02831bce2cd3e614cd6b437bb3dfeca8fbd4
+  nodeSelector:
+    kubernetes.io/hostname: ubuntu-server
+  storageClassName: local-path
+
+gatewayAccess:
+  enabled: true
+  image: 192.168.133.1:5001/cellbox-gateway@sha256:97b31561a93e515f12b3166e5672543b878fda5858dfc847687b9ceb972dfca7
+  imagePullPolicy: IfNotPresent
+  args:
+    - --domain=192-168-133-130.nip.io
+    - --local-domain=localhost
+    - --namespace=cell-box

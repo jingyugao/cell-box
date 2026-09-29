@@ -146,11 +146,11 @@ func TestLifecycleAndGuestIdentity(t *testing.T) {
 	if err = p.Client.Status().Update(ctx, w); err != nil {
 		t.Fatal(err)
 	}
-	pod := &core.Pod{ObjectMeta: meta.ObjectMeta{Name: "pod-a", Namespace: "boxes", UID: "pod-uid", OwnerReferences: []meta.OwnerReference{{APIVersion: api.GroupVersion.String(), Kind: "ResumablePod", Name: w.Name, UID: w.UID, Controller: boolPtr(true)}}}, Status: core.PodStatus{Phase: core.PodRunning, Conditions: []core.PodCondition{{Type: core.PodReady, Status: core.ConditionTrue}}}}
+	pod := &core.Pod{ObjectMeta: meta.ObjectMeta{Name: "pod-a", Namespace: "boxes", UID: "pod-uid", OwnerReferences: []meta.OwnerReference{{APIVersion: api.GroupVersion.String(), Kind: api.Kind, Name: w.Name, UID: w.UID, Controller: boolPtr(true)}}}, Status: core.PodStatus{Phase: core.PodRunning, Conditions: []core.PodCondition{{Type: core.PodReady, Status: core.ConditionTrue}}}}
 	if err = p.Client.Create(ctx, pod); err != nil {
 		t.Fatal(err)
 	}
-	svc := &core.Service{ObjectMeta: meta.ObjectMeta{Name: w.Name, Namespace: w.Namespace, OwnerReferences: pod.OwnerReferences}, Spec: core.ServiceSpec{Selector: map[string]string{api.OwnerLabel: string(w.UID), "recovery.gvisor.dev/serving": "true"}, Ports: w.Spec.ServicePorts}}
+	svc := &core.Service{ObjectMeta: meta.ObjectMeta{Name: w.Name, Namespace: w.Namespace, OwnerReferences: pod.OwnerReferences}, Spec: core.ServiceSpec{Selector: map[string]string{api.OwnerLabel: string(w.UID), api.ServingLabel: "true"}, Ports: w.Spec.ServicePorts}}
 	if err = p.Client.Create(ctx, svc); err != nil {
 		t.Fatal(err)
 	}

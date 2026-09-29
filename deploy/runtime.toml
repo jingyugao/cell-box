@@ -3,4 +3,4 @@
   pod_annotations = ["dev.gvisor.internal.recovery.ticket"]
   [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc-recoverable.options]
     TypeUrl = "io.containerd.runsc.v1.options"
-    ConfigPath = "/var/lib/resumablepod/runsc.toml"
+    ConfigPath = "/var/lib/cellbox/runsc.toml"
