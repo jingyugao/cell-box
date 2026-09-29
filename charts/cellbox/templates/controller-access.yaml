@@ -1,19 +1,14 @@
 apiVersion: v1
-kind: Namespace
-metadata:
-  name: cell-box
----
-apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: cellbox-controller
-  namespace: cell-box
+  name: {{ .Values.controller.serviceAccountName }}
+  namespace: {{ .Release.Namespace }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: cellbox-controller
-  namespace: cell-box
+  name: {{ .Values.controller.name }}
+  namespace: {{ .Release.Namespace }}
 rules:
   - apiGroups: [cellbox.local]
     resources: [cellboxes]
@@ -21,32 +16,26 @@ rules:
   - apiGroups: [cellbox.local]
     resources: [cellboxes/status, cellboxes/finalizers]
     verbs: [get, update, patch]
-  - apiGroups: ['']
+  - apiGroups: [""]
     resources: [pods, services]
     verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
     verbs: [get, list, watch, create, update, patch]
-  - apiGroups: ['']
+  - apiGroups: [""]
     resources: [events]
     verbs: [get, list, watch, create, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: cellbox-controller
-  namespace: cell-box
+  name: {{ .Values.controller.name }}
+  namespace: {{ .Release.Namespace }}
 subjects:
   - kind: ServiceAccount
-    name: cellbox-controller
-    namespace: cell-box
+    name: {{ .Values.controller.serviceAccountName }}
+    namespace: {{ .Release.Namespace }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: cellbox-controller
----
-apiVersion: node.k8s.io/v1
-kind: RuntimeClass
-metadata:
-  name: runsc-recoverable
-handler: runsc-recoverable
+  name: {{ .Values.controller.name }}

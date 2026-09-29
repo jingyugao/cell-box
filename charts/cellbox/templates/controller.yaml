@@ -1,26 +1,34 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: cellbox-controller
-  namespace: cellbox-system
+  name: {{ .Values.controller.name }}
+  namespace: {{ .Release.Namespace }}
 spec:
   selector:
     matchLabels:
-      app: cellbox-controller
+      app: {{ .Values.controller.name }}
   updateStrategy:
-    type: OnDelete
+    type: RollingUpdate
   template:
     metadata:
       labels:
-        app: cellbox-controller
+        app: {{ .Values.controller.name }}
     spec:
-      serviceAccountName: cellbox-controller
+      serviceAccountName: {{ .Values.controller.serviceAccountName }}
       hostPID: true
       terminationGracePeriodSeconds: 60
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       initContainers:
         - name: install-runtime-adapter
-          image: cellbox-controller:v0.1.0
-          imagePullPolicy: IfNotPresent
+          image: {{ .Values.controller.adapterImage | quote }}
+          imagePullPolicy: {{ .Values.controller.imagePullPolicy }}
           command: [/bin/sh, /usr/local/bin/install-k8s-node.sh]
           securityContext:
             privileged: true
@@ -30,12 +38,12 @@ spec:
               mountPath: /host
       containers:
         - name: controller
-          image: cellbox-controller:v0.1.0
-          imagePullPolicy: IfNotPresent
+          image: {{ .Values.controller.image | quote }}
+          imagePullPolicy: {{ .Values.controller.imagePullPolicy }}
           args:
             - --node=$(NODE_NAME)
-            - --namespace=cell-box
-            - --leader-election-namespace=cellbox-system
+            - --namespace={{ .Release.Namespace }}
+            - --leader-election-namespace={{ .Release.Namespace }}
             - --host-mount-namespace
           env:
             - name: NODE_NAME
@@ -47,7 +55,7 @@ spec:
             runAsUser: 0
           volumeMounts:
             - name: cri-directory
-              mountPath: /run/k3s/containerd
+              mountPath: {{ .Values.controller.criDirectory }}
             - name: runsc-root
               mountPath: /run/containerd/runsc/k8s.io
             - name: snapshot-store
@@ -62,7 +70,7 @@ spec:
             type: Directory
         - name: cri-directory
           hostPath:
-            path: /run/k3s/containerd
+            path: {{ .Values.controller.criDirectory }}
             type: Directory
         - name: runsc-root
           hostPath:

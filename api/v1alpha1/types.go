@@ -10,13 +10,15 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-var GroupVersion = schema.GroupVersion{Group: "recovery.gvisor.dev", Version: "v1alpha1"}
+var GroupVersion = schema.GroupVersion{Group: "cellbox.local", Version: "v1alpha1"}
 
 const (
-	Finalizer          = "recovery.gvisor.dev/cleanup"
-	OwnerLabel         = "recovery.gvisor.dev/owner"
+	Kind               = "Cellbox"
+	Finalizer          = "cellbox.local/cleanup"
+	OwnerLabel         = "cellbox.local/owner"
+	ServingLabel       = "cellbox.local/serving"
 	TicketAnnotation   = "dev.gvisor.internal.recovery.ticket"
-	Gate               = "recovery.gvisor.dev/prepared"
+	Gate               = "cellbox.local/prepared"
 	RuntimeClass       = "runsc-recoverable"
 	DebugHostMountPath = "/var/lib/cellbox/debug/host"
 	DebugHomeMountPath = "/home/debug"
@@ -85,7 +87,8 @@ func (r *ResumablePodList) DeepCopyObject() runtime.Object {
 	return &out
 }
 func AddToScheme(s *runtime.Scheme) error {
-	s.AddKnownTypes(GroupVersion, &ResumablePod{}, &ResumablePodList{})
+	s.AddKnownTypeWithName(GroupVersion.WithKind(Kind), &ResumablePod{})
+	s.AddKnownTypeWithName(GroupVersion.WithKind(Kind+"List"), &ResumablePodList{})
 	meta.AddToGroupVersion(s, GroupVersion)
 	return nil
 }

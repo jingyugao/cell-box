@@ -30,7 +30,7 @@ func run() error {
 	flag.BoolVar(&showVersion, "version", false, "print build version and exit")
 	flag.BoolVar(&hostMountNamespace, "host-mount-namespace", false, "run runsc in the host mount/root namespace (requires privileged hostPID Pod)")
 	flag.StringVar(&nodeName, "node", "", "Kubernetes node name (must equal kubernetes.io/hostname)")
-	flag.StringVar(&namespace, "namespace", "recoverable-system", "managed ResumablePod namespace")
+	flag.StringVar(&namespace, "namespace", "cell-box", "managed Cellbox namespace")
 	flag.StringVar(&leaderNamespace, "leader-election-namespace", "", "leader election namespace (defaults to managed namespace)")
 	flag.StringVar(&socket, "cri-socket", "/run/k3s/containerd/containerd.sock", "CRI Unix socket")
 	flag.Parse()
@@ -48,7 +48,7 @@ func run() error {
 	scheme := runtime.NewScheme()
 	core.AddToScheme(scheme)
 	api.AddToScheme(scheme)
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{Scheme: scheme, Cache: cache.Options{DefaultNamespaces: map[string]cache.Config{namespace: {}}}, LeaderElection: true, LeaderElectionID: "resumablepod-" + nodeName, LeaderElectionNamespace: leaderNamespace, Metrics: metrics.Options{BindAddress: "0"}, HealthProbeBindAddress: "0"})
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{Scheme: scheme, Cache: cache.Options{DefaultNamespaces: map[string]cache.Config{namespace: {}}}, LeaderElection: true, LeaderElectionID: "cellbox-" + nodeName, LeaderElectionNamespace: leaderNamespace, Metrics: metrics.Options{BindAddress: "0"}, HealthProbeBindAddress: "0"})
 	if err != nil {
 		return err
 	}

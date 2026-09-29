@@ -14,7 +14,7 @@ import (
 	"regexp"
 )
 
-const DefaultBase = "/var/lib/resumablepod"
+const DefaultBase = "/var/lib/cellbox"
 const DefaultRunsc = "/usr/local/bin/runsc"
 const DefaultRoot = "/run/containerd/runsc/k8s.io"
 

@@ -39,7 +39,7 @@ func fixture(t *testing.T) (*Reconciler, *fakeRuntime, *api.ResumablePod) {
 	s := runtime.NewScheme()
 	core.AddToScheme(s)
 	api.AddToScheme(s)
-	w := &api.ResumablePod{TypeMeta: meta.TypeMeta{APIVersion: api.GroupVersion.String(), Kind: "ResumablePod"}, ObjectMeta: meta.ObjectMeta{Name: "counter", Namespace: "test", UID: "12345678-aaaa", Finalizers: []string{api.Finalizer}}, Spec: api.Spec{NodeName: "node", DesiredState: "Running", Container: core.Container{Name: "server", Image: "image:local", ImagePullPolicy: core.PullNever}}, Status: api.Status{Phase: "Running", PodName: "old", PodUID: "old-uid", Cycle: 1, Since: meta.Now()}}
+	w := &api.ResumablePod{TypeMeta: meta.TypeMeta{APIVersion: api.GroupVersion.String(), Kind: api.Kind}, ObjectMeta: meta.ObjectMeta{Name: "counter", Namespace: "test", UID: "12345678-aaaa", Finalizers: []string{api.Finalizer}}, Spec: api.Spec{NodeName: "node", DesiredState: "Running", Container: core.Container{Name: "server", Image: "image:local", ImagePullPolicy: core.PullNever}}, Status: api.Status{Phase: "Running", PodName: "old", PodUID: "old-uid", Cycle: 1, Since: meta.Now()}}
 	w.Status.SpecHash = fingerprint(w)
 	p := &core.Pod{ObjectMeta: meta.ObjectMeta{Name: "old", Namespace: "test", UID: "old-uid"}, Spec: core.PodSpec{Containers: []core.Container{w.Spec.Container}}, Status: core.PodStatus{Phase: core.PodRunning, Conditions: []core.PodCondition{{Type: core.PodReady, Status: core.ConditionTrue}}}}
 	no := false

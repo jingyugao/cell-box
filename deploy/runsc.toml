@@ -1,5 +1,5 @@
 binary_name = "/usr/local/libexec/resumablepod-runtime"
-log_path = "/var/lib/resumablepod/logs/%ID%/shim.log"
+log_path = "/var/lib/cellbox/logs/%ID%/shim.log"
 log_level = "info"
 [runsc_config]
   restore-spec-validation = "enforce"

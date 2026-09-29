@@ -102,7 +102,7 @@ func (p *Provider) Create(ctx context.Context, spec boxprovider.Spec) (boxprovid
 		ReadinessProbe: &core.Probe{ProbeHandler: core.ProbeHandler{TCPSocket: &core.TCPSocketAction{Port: intstr.FromInt32(guestapi.Port)}}, PeriodSeconds: 2},
 	}
 	wanted := &api.ResumablePod{
-		TypeMeta:   meta.TypeMeta{APIVersion: api.GroupVersion.String(), Kind: "ResumablePod"},
+		TypeMeta:   meta.TypeMeta{APIVersion: api.GroupVersion.String(), Kind: api.Kind},
 		ObjectMeta: meta.ObjectMeta{Name: crname, Namespace: spec.Namespace, Labels: map[string]string{managedLabel: "true", boxLabel: spec.BoxID}},
 		Spec: api.Spec{NodeName: spec.NodeName, DesiredState: "Running", Container: container,
 			DebugReadOnlyHostPath:  spec.DebugReadOnlyHostPath,
@@ -226,7 +226,7 @@ func (p *Provider) readyPod(ctx context.Context, w *api.ResumablePod) (*core.Pod
 		return nil, err
 	}
 	owner := meta.GetControllerOf(pod)
-	if owner == nil || owner.UID != w.UID || owner.Kind != "ResumablePod" || owner.APIVersion != api.GroupVersion.String() || string(pod.UID) != w.Status.PodUID {
+	if owner == nil || owner.UID != w.UID || owner.Kind != api.Kind || owner.APIVersion != api.GroupVersion.String() || string(pod.UID) != w.Status.PodUID {
 		return nil, fmt.Errorf("%w: Pod ownership or UID changed", errExecutionLost)
 	}
 	if pod.DeletionTimestamp != nil || pod.Status.Phase == core.PodFailed || pod.Status.Phase == core.PodSucceeded {
@@ -313,7 +313,7 @@ func (p *Provider) Guest(ctx context.Context, h boxprovider.Handle) (boxprovider
 		return boxprovider.Connection{}, err
 	}
 	owner := meta.GetControllerOf(service)
-	if owner == nil || owner.UID != w.UID || owner.Kind != "ResumablePod" || owner.APIVersion != api.GroupVersion.String() || service.Spec.Selector[api.OwnerLabel] != string(w.UID) || service.Spec.Selector["recovery.gvisor.dev/serving"] != "true" {
+	if owner == nil || owner.UID != w.UID || owner.Kind != api.Kind || owner.APIVersion != api.GroupVersion.String() || service.Spec.Selector[api.OwnerLabel] != string(w.UID) || service.Spec.Selector[api.ServingLabel] != "true" {
 		return boxprovider.Connection{}, errors.New("guest Service ownership or selector changed")
 	}
 	validPort := false

@@ -76,7 +76,7 @@ func main() {
 	})
 	http.HandleFunc("/network", func(w http.ResponseWriter, r *http.Request) {
 		results := map[string]any{}
-		for _, host := range []string{"kubernetes.default.svc.cluster.local.", "counter.recoverable-system.svc.cluster.local.", "example.com."} {
+		for _, host := range []string{"kubernetes.default.svc.cluster.local.", "counter.cell-box.svc.cluster.local.", "example.com."} {
 			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 			ips, err := net.DefaultResolver.LookupHost(ctx, host)
 			cancel()

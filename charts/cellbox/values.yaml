@@ -1,0 +1,33 @@
+controller:
+  image: cellbox-controller:v0.1.0
+  adapterImage: cellbox-controller:v0.1.0
+  imagePullPolicy: IfNotPresent
+  name: cellbox-controller
+  serviceAccountName: cellbox-controller
+  criDirectory: /run/k3s/containerd
+  nodeSelector: {}
+  tolerations: []
+
+api:
+  enabled: false
+  namespace: cell-box
+  image: cellbox-api:v0.1.0
+  imagePullPolicy: IfNotPresent
+  replicas: 1
+  nodeSelector: {}
+  configSecret: cellbox-api-config
+  clientTokensSecret: cellbox-api-client-tokens
+  ossCredentialsSecret: cellbox-oss-credentials
+  dataClaim: cellbox-api-data
+  storageClassName: ""
+  storageSize: 10Gi
+
+gatewayAccess:
+  enabled: false
+  serviceAccountName: cellbox-gateway
+  namespace: co-cell
+  image: cellbox-gateway:v0.1.0
+  imagePullPolicy: IfNotPresent
+  replicas: 0
+  args:
+    - --namespace=cell-box
