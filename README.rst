@@ -46,8 +46,8 @@ profiles need a node name, namespace, and preloaded prepared image referenced
 as ``repository@sha256:<64-hex>``. The API uses in-cluster Kubernetes
 credentials by default; ``--kubeconfig`` selects an explicit file when run
 outside the cluster. The operator and node runtime require separate
-installation. The example API Deployment and its scoped RBAC live in
-``deploy/cellbox-api.yaml`` and are not applied by ``make build``.
+installation. The operator, API, and scoped RBAC are packaged in the
+``charts/cellbox`` Helm chart.
 
 The local Docker quickstart is in `REST quickstart <tmp/docs/rest-quickstart.md>`_.
 To run the opt-in local Docker integration test, use::

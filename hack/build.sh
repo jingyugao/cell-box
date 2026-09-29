@@ -16,7 +16,7 @@ CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags "$ldflags" 
 CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags "$ldflags" -o "$out/resumablepod-runtime" ./cmd/resumablepod-runtime
 CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -o "$out/server" ./test/counter
 cp test/counter/Dockerfile "$out/"
-cp -r deploy k8s hack "$out/"
+cp -r charts examples images hack "$out/"
 cp LICENSE VERSION "$out/"
 mkdir -p "$out/config"
 cp config/sample.json "$out/config/"
@@ -32,5 +32,7 @@ mkdir -p "$docs_out"
 for old_doc in "$docs_out"/*.md; do
   if [[ -f $old_doc ]]; then rm -- "$old_doc"; fi
 done
-cp -r tmp/docs/. "$docs_out/"
+if [[ -d tmp/docs ]]; then
+  cp -r tmp/docs/. "$docs_out/"
+fi
 printf 'Release directory: %s\n' "$out"

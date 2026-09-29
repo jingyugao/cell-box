@@ -6,6 +6,6 @@ set -euo pipefail
 release_dir=$(cd "$(dirname "$0")/.." && pwd)
 node_name=$(hostname)
 k3s kubectl get node "$node_name" >/dev/null
-k3s kubectl create --dry-run=client -f "$release_dir/deploy/example.yaml" -o json |
+k3s kubectl create --dry-run=client -f "$release_dir/examples/counter.yaml" -o json |
   jq --arg node "$node_name" '.spec.nodeName=$node' |
   k3s kubectl apply -f -
