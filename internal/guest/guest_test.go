@@ -259,6 +259,47 @@ func TestQuiesceAndToolArguments(t *testing.T) {
 	}
 }
 
+func TestPassThroughToolArguments(t *testing.T) {
+	c := testConfig(t)
+	c.Tools = []guestapi.Tool{{ID: "proxy", Executable: "/opt/cellbox/tools/proxy", PassThroughArgs: true}}
+	tools, err := validateConfig(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := tools["proxy"]
+	for _, args := range [][]string{nil, {"status"}, {"--format", `{"path":"a b"}`, "with spaces"}, {strings.Repeat("x", 8192)}} {
+		if err := validateToolArgs(proxy, args); err != nil {
+			t.Fatalf("rejected valid arguments %q: %v", args, err)
+		}
+	}
+	for _, args := range [][]string{{strings.Repeat("x", 8193)}, {strings.Repeat("x", 8192), "x"}, {"a\x00b"}, make([]string, 33)} {
+		if err := validateToolArgs(proxy, args); err == nil {
+			t.Fatalf("accepted invalid arguments %q", args)
+		}
+	}
+	c.Tools[0].InputPatterns = []string{`[a-z]+`}
+	if _, err := validateConfig(c); err == nil {
+		t.Fatal("combined pass-through and input patterns accepted")
+	}
+	c.Tools[0].PassThroughArgs = false
+	tools, err = validateConfig(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := tools["proxy"]
+	for _, args := range [][]string{nil, {"one", "two"}} {
+		if err := validateToolArgs(legacy, args); err == nil {
+			t.Fatalf("accepted incorrect pattern count %q", args)
+		}
+	}
+	if err := validateToolArgs(legacy, []string{"ok"}); err != nil {
+		t.Fatalf("rejected matching legacy argument: %v", err)
+	}
+	if err := validateToolArgs(legacy, []string{"ok;echo"}); err == nil {
+		t.Fatal("accepted nonmatching legacy argument")
+	}
+}
+
 func TestIdleGuestActivation(t *testing.T) {
 	c := testConfig(t)
 	s, err := NewServer(c, "secret", "/bin/true", false)
