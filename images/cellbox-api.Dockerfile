@@ -5,7 +5,9 @@ FROM scratch
 COPY cellbox-api /usr/local/bin/cellbox-api
 COPY cellbox-container-agent /usr/local/bin/cellbox-container-agent
 COPY --from=buildkit /usr/bin/buildctl /usr/local/bin/buildctl
+COPY --from=buildkit /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 USER 10001:10001
+ENV HOME=/tmp
 WORKDIR /var/lib/cellbox
 EXPOSE 8090
 ENTRYPOINT ["/usr/local/bin/cellbox-api"]

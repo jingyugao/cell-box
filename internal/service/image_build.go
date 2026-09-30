@@ -123,12 +123,7 @@ func (s *Service) buildImage(w http.ResponseWriter, r *http.Request) {
 	}
 	input := struct{ Base, Platform, Manifest, ProductHash string }{base, platform, manifest, productHash}
 	op, fresh, err := s.prepareOperation(clientID(r), r.Header.Get("Idempotency-Key"), "image-build", "", input, func(st *State, _ *Operation) error {
-		for _, record := range st.Operations {
-			if record.Operation.Kind == "image-build" && (record.Operation.Status == "running" || record.Operation.Status == "queued") {
-				return apiError("BUSY", "Another image build is running")
-			}
-		}
-		return nil
+		return imageBuildBusy(st)
 	})
 	if err != nil {
 		fail(w, err)

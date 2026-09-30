@@ -492,8 +492,9 @@ func (s *Service) provision(ctx context.Context, id string) (Box, error) {
 }
 
 type createRequest struct {
-	ProfileID string `json:"profileId"`
-	OwnerKey  string `json:"ownerKey"`
+	ProfileID       string `json:"profileId"`
+	OwnerKey        string `json:"ownerKey"`
+	ImportedImageID string `json:"importedImageId,omitempty"`
 }
 
 func (s *Service) create(client, key string, input createRequest, archiveID string) (Operation, error) {
@@ -503,6 +504,25 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 	profile, err := s.profile(client, input.ProfileID)
 	if err != nil {
 		return Operation{}, err
+	}
+	if archiveID != "" && input.ImportedImageID == "" {
+		err := s.store.View(func(st State) error {
+			a, ok := st.Archives[archiveID]
+			if !ok || a.ClientID != client {
+				return apiError("NOT_FOUND", "Archive not found")
+			}
+			input.ImportedImageID = st.Boxes[a.Archive.SourceBoxID].Box.ImportedImageID
+			return nil
+		})
+		if err != nil {
+			return Operation{}, err
+		}
+	}
+	if input.ImportedImageID != "" {
+		profile, err = s.importedProfile(client, input.ImportedImageID, profile)
+		if err != nil {
+			return Operation{}, err
+		}
 	}
 	kind := "create"
 	if archiveID != "" {
@@ -522,6 +542,9 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 			if source.Agent != profile.Guest.Agent {
 				return apiError("ARCHIVE_INCOMPATIBLE", "Archive agent UID/GID differs from target profile")
 			}
+			if source.ImageID != profile.Image && profile.Provider == "resumable-k8s-pod" {
+				return apiError("ARCHIVE_INCOMPATIBLE", "Archive image differs from target image")
+			}
 		}
 		id := randomID("box-")
 		op.TargetID = id
@@ -533,6 +556,9 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 			state = "restoring"
 		}
 		st.Boxes[id] = boxRecord{Box: Box{ID: id, OwnerKey: input.OwnerKey, ProfileID: profile.ID, Phase: state, Version: 1, Image: profile.Image, Workspace: profile.Guest.Workspace, Capabilities: profileCapabilities(profile), OperationID: op.ID, CreatedAt: time.Now().UTC()}, ClientID: client, Profile: profile, Staged: archiveID != "", RestoreArchiveID: archiveID}
+		record := st.Boxes[id]
+		record.Box.ImportedImageID = input.ImportedImageID
+		st.Boxes[id] = record
 		return nil
 	})
 	if err != nil || !fresh {

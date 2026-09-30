@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"cellbox.local/cellbox/internal/service"
 	"cellbox.local/cellbox/internal/guestapi"
+	"cellbox.local/cellbox/internal/service"
 	"sigs.k8s.io/yaml"
 )
 
@@ -23,6 +23,14 @@ func TestOpenAPIResponseShapesAndReferences(t *testing.T) {
 	}
 	if doc["openapi"] != "3.1.0" {
 		t.Fatal("unexpected OpenAPI version")
+	}
+	paths := doc["paths"].(map[string]any)
+	for endpoint, methods := range map[string][]string{"/v1/images": {"post", "get"}, "/v1/images:import": {"post"}, "/v1/images/{id}": {"get"}} {
+		for _, method := range methods {
+			if path, ok := paths[endpoint].(map[string]any); !ok || path[method] == nil {
+				t.Errorf("missing image API contract: %s %s", method, endpoint)
+			}
+		}
 	}
 	var walk func(any)
 	walk = func(v any) {
@@ -58,7 +66,7 @@ func TestOpenAPIResponseShapesAndReferences(t *testing.T) {
 	}
 	walk(doc)
 	schemas := doc["components"].(map[string]any)["schemas"].(map[string]any)
-	types := map[string]any{"Box": service.Box{}, "Operation": service.Operation{}, "Execution": service.Execution{}, "Capabilities": service.Capabilities{}, "Lease": service.Lease{}, "Route": service.Route{}, "Grant": service.Grant{}, "AccessRequest": service.AccessRequest{}, "Archive": service.Archive{}, "Identity": guestapi.Identity{}, "ExecResult": guestapi.ExecResult{}, "FileEntry": guestapi.FileEntry{}}
+	types := map[string]any{"ImportedImage": service.ImportedImage{}, "Box": service.Box{}, "Operation": service.Operation{}, "Execution": service.Execution{}, "Capabilities": service.Capabilities{}, "Lease": service.Lease{}, "Route": service.Route{}, "Grant": service.Grant{}, "AccessRequest": service.AccessRequest{}, "Archive": service.Archive{}, "Identity": guestapi.Identity{}, "ExecResult": guestapi.ExecResult{}, "FileEntry": guestapi.FileEntry{}}
 	for name, value := range types {
 		t.Run(name, func(t *testing.T) {
 			schema := schemas[name].(map[string]any)

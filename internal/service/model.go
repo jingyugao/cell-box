@@ -36,10 +36,11 @@ type Config struct {
 	ImageBuild            ImageBuildConfig `json:"imageBuild,omitempty"`
 }
 type ImageBuildConfig struct {
-	Address        string `json:"address,omitempty"`
-	Repository     string `json:"repository,omitempty"`
-	GuestBinary    string `json:"guestBinary,omitempty"`
-	BuildctlBinary string `json:"buildctlBinary,omitempty"`
+	Address          string `json:"address,omitempty"`
+	Repository       string `json:"repository,omitempty"`
+	GuestBinary      string `json:"guestBinary,omitempty"`
+	BuildctlBinary   string `json:"buildctlBinary,omitempty"`
+	InsecureRegistry string `json:"insecureRegistry,omitempty"`
 }
 type APIError struct {
 	Code    string `json:"code"`
@@ -62,19 +63,20 @@ type Capabilities struct {
 	ProtectedTools bool   `json:"protectedTools"`
 }
 type Box struct {
-	ID           string       `json:"id"`
-	OwnerKey     string       `json:"ownerKey"`
-	ProfileID    string       `json:"profileId"`
-	Phase        string       `json:"phase"`
-	Generation   uint64       `json:"generation"`
-	Version      uint64       `json:"resourceVersion"`
-	Image        string       `json:"image"`
-	ImageID      string       `json:"imageId,omitempty"`
-	Workspace    string       `json:"workspace"`
-	Capabilities Capabilities `json:"capabilities"`
-	OperationID  string       `json:"operationId,omitempty"`
-	Error        *APIError    `json:"error,omitempty"`
-	CreatedAt    time.Time    `json:"createdAt"`
+	ID              string       `json:"id"`
+	OwnerKey        string       `json:"ownerKey"`
+	ProfileID       string       `json:"profileId"`
+	Phase           string       `json:"phase"`
+	Generation      uint64       `json:"generation"`
+	Version         uint64       `json:"resourceVersion"`
+	Image           string       `json:"image"`
+	ImageID         string       `json:"imageId,omitempty"`
+	ImportedImageID string       `json:"importedImageId,omitempty"`
+	Workspace       string       `json:"workspace"`
+	Capabilities    Capabilities `json:"capabilities"`
+	OperationID     string       `json:"operationId,omitempty"`
+	Error           *APIError    `json:"error,omitempty"`
+	CreatedAt       time.Time    `json:"createdAt"`
 }
 type boxRecord struct {
 	Box              Box                `json:"box"`
@@ -171,19 +173,20 @@ type keyRecord struct {
 	OperationID string `json:"operationId"`
 }
 type State struct {
-	Schema     int                        `json:"schema"`
-	Boxes      map[string]boxRecord       `json:"boxes"`
-	Operations map[string]operationRecord `json:"operations"`
-	Executions map[string]Execution       `json:"executions"`
-	Leases     map[string]Lease           `json:"leases"`
-	Routes     map[string]Route           `json:"routes"`
-	Grants     map[string]grantRecord     `json:"grants"`
-	Access     map[string]accessRecord    `json:"access"`
-	Sessions   map[string]sessionRecord   `json:"sessions"`
-	Archives   map[string]archiveRecord   `json:"archives"`
-	Keys       map[string]keyRecord       `json:"keys"`
+	ImportedImages map[string]importedImageRecord `json:"importedImages"`
+	Schema         int                            `json:"schema"`
+	Boxes          map[string]boxRecord           `json:"boxes"`
+	Operations     map[string]operationRecord     `json:"operations"`
+	Executions     map[string]Execution           `json:"executions"`
+	Leases         map[string]Lease               `json:"leases"`
+	Routes         map[string]Route               `json:"routes"`
+	Grants         map[string]grantRecord         `json:"grants"`
+	Access         map[string]accessRecord        `json:"access"`
+	Sessions       map[string]sessionRecord       `json:"sessions"`
+	Archives       map[string]archiveRecord       `json:"archives"`
+	Keys           map[string]keyRecord           `json:"keys"`
 }
 
 func newState() State {
-	return State{Schema: 2, Boxes: map[string]boxRecord{}, Operations: map[string]operationRecord{}, Executions: map[string]Execution{}, Leases: map[string]Lease{}, Routes: map[string]Route{}, Grants: map[string]grantRecord{}, Access: map[string]accessRecord{}, Sessions: map[string]sessionRecord{}, Archives: map[string]archiveRecord{}, Keys: map[string]keyRecord{}}
+	return State{ImportedImages: map[string]importedImageRecord{}, Schema: 2, Boxes: map[string]boxRecord{}, Operations: map[string]operationRecord{}, Executions: map[string]Execution{}, Leases: map[string]Lease{}, Routes: map[string]Route{}, Grants: map[string]grantRecord{}, Access: map[string]accessRecord{}, Sessions: map[string]sessionRecord{}, Archives: map[string]archiveRecord{}, Keys: map[string]keyRecord{}}
 }

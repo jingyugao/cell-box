@@ -33,6 +33,7 @@ build:
 	cp config/sample.json "$$out/config/"
 	cp api/openapi.yaml "$$out/api/"
 	cp LICENSE VERSION README.md "$$out/"
+	if [[ -d doc ]]; then cp -r doc "$$out/"; fi
 	docs_out="$$out/tmp/docs"
 	[[ ! -L $$docs_out ]] || { echo "Refusing to replace symlinked documentation directory: $$docs_out" >&2; exit 1; }
 	mkdir -p "$$docs_out"

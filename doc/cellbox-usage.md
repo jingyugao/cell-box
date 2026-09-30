@@ -2,7 +2,7 @@
 
 本文面向已通过 Helm 部署 Cellbox 的使用者，按“连接 API → 选择配置 → 创建沙箱 → 执行命令和访问文件 → 暂停恢复 → 销毁”的顺序介绍操作。适用于 Kubernetes，包括本机 k3s。
 
-部署方法见 [README](../README.md)，完整请求与响应见 [OpenAPI](../api/openapi.yaml)。本文对应 master `6f59a29`。
+部署方法见 [README](../README.md)，完整请求与响应见 [OpenAPI](../api/openapi.yaml)。镜像导入功能需要部署包含 `POST /v1/images:import` 的新版本 API；此前 master `6f59a29` 不包含该接口。
 
 ## 1. 使用前需要知道的对象
 
@@ -168,6 +168,62 @@ helm upgrade --install cellbox ./charts/cellbox \
 ```
 
 API Pod 更新后，终端 A 的 port-forward 可能断开，重新执行即可。Profile 配置变更作用于随后创建的 Box；已有 Box 保留创建时的 Profile 配置。
+
+### 动态导入用户镜像
+
+启用 BuildKit 后，用户可以直接提交 `docker pull` 使用的镜像引用。支持 tag，例如 `docker.io/team/app:v1`；导入时解析为固定 digest，原 tag 随后变化不会影响已导入镜像。这里只接收镜像仓库引用，不接收 HTTP 下载地址。
+
+```bash
+IMPORT_KEY=$(new_key)
+IMPORT_OP=$(api POST /v1/images:import \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $IMPORT_KEY" \
+  --data '{
+    "url":"docker.io/team/app:v1",
+    "runCommand":"docker run -e MODE=demo -w /workspace -p 127.0.0.1:18080:8080 docker.io/team/app:v1 /bin/sh -c '\''echo ready; sleep 3600'\''"
+  }')
+IMPORT_DONE=$(wait_operation "$IMPORT_OP")
+IMPORTED_IMAGE_ID=$(jq -er '.result.importedImageId' <<< "$IMPORT_DONE")
+api GET "/v1/images/$IMPORTED_IMAGE_ID" | jq .
+api GET /v1/images | jq .
+```
+
+将示例镜像替换为实际镜像；`url` 与 `runCommand` 中的镜像必须相同。不传 `runCommand` 时，沿用镜像中的 ENTRYPOINT 和 CMD。平台保留镜像的 ENV 和 WorkingDir，命令中的 `-e` / `-w` 可以覆盖它们。工作目录不会因 `-w` 改变；文件 API 仍以 Profile 的 workspace 为根。
+
+需要在镜像里安装依赖或打包平台内容时，增加可选的 `buildCommand` 字符串。例如以下请求会先把平台文件写入镜像，再注入 Cellbox guest：
+
+```json
+{
+  "url": "docker.io/library/alpine:3.22",
+  "buildCommand": "mkdir -p /opt/product && printf '%s' 'platform-ready' > /opt/product/platform.txt",
+  "runCommand": "docker run -w /workspace docker.io/library/alpine:3.22 /bin/sh -c 'cat /opt/product/platform.txt; sleep 3600'"
+}
+```
+
+`buildCommand` 在 BuildKit 构建容器内以 root 执行 `/bin/sh -c`，可使用管道、重定向和多行脚本；源镜像必须包含 `/bin/sh` 及命令需要的工具。构建使用源镜像原有的 ENV 和 WorkingDir，`runCommand` 的 `-e` / `-w` 只影响沙箱启动。构建命令最多 65536 字节，会保存在导入记录中并参与缓存标识；修改它会产生不同的镜像身份。打包出的文件需允许 Profile 的 agent UID/GID 读取或执行。构建失败时 Operation 为 `failed`，不会注册可用的导入镜像。未传该字段时保持原有导入流程。
+
+导入不会运行用户提交的 Docker 命令。支持的参数为 `-e` / `--env`、`-w` / `--workdir`、`--entrypoint` 和 TCP `-p` / `--publish`。端口只作为导入元数据保存，访问服务仍需创建 Route；不会在宿主机绑定命令里的端口。`--name`、`-d` 和 `--rm` 的差异在响应 `warnings` 中说明，生命周期由 Cellbox 管理。主机目录挂载、特权、host network、交互终端及其他未支持参数会返回错误；外层 shell 的变量展开、命令替换、管道和重定向也不接受，带引号的 `/bin/sh -c` 参数作为业务命令保存。
+
+当前导入支持 `linux/amd64`，可选 `platform` 字段也只接受该值。镜像 USER 由 Profile 的 agent UID/GID 替代，相关说明在 `warnings` 中返回；需要 root 启动的应用应先适配为非 root。镜像的 ONBUILD 指令不支持。
+
+私有源仓库可以通过额外字段 `registryAuth` 提交 `username` 和 `password`；不要将凭证拼入 URL。凭证只用于本次解析和构建，不会出现在导入记录或持久化状态中。管理员也可使用 `buildkit.registryCredentialsSecret` 配置平台仓库认证。
+
+创建时引用这个 Client 自己导入的镜像：
+
+```bash
+CREATE_IMPORTED_KEY=$(new_key)
+CREATE_IMPORTED_BODY=$(jq -nc --arg profile "$PROFILE_ID" \
+  --arg imported "$IMPORTED_IMAGE_ID" \
+  '{profileId:$profile, ownerKey:"import-demo", importedImageId:$imported}')
+CREATE_IMPORTED_OP=$(api POST /v1/boxes \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $CREATE_IMPORTED_KEY" --data "$CREATE_IMPORTED_BODY")
+CREATE_IMPORTED_DONE=$(wait_operation "$CREATE_IMPORTED_OP")
+IMPORTED_BOX_ID=$(jq -er '.targetId' <<< "$CREATE_IMPORTED_DONE")
+api GET "/v1/boxes/$IMPORTED_BOX_ID" | jq .
+```
+
+Profile 继续决定资源、节点、workspace 和 agent 身份，镜像与默认业务启动命令由导入记录提供。Profile 显式配置的环境变量优先于导入环境。用户镜像创建的 Box 不继承 Profile 的受控 debug tools 或 debug 宿主机目录挂载，`protectedTools` 为 false。导入记录在 API 重启后保留，只能由所属 Client 查询和引用。归档恢复不传 `importedImageId` 时，自动沿用源 Box 的导入镜像。构建可以复用 BuildKit 缓存；再次创建同一导入镜像的 Box 不需要再次构建。
 
 ## 5. 创建工作空间
 
@@ -408,7 +464,7 @@ kubectl --context "$CELLBOX_CONTEXT" -n "$CELLBOX_NAMESPACE" \
 kubectl --context "$CELLBOX_CONTEXT" -n "$CELLBOX_NAMESPACE" \
   logs ds/cellbox-controller -c install-runtime-adapter --tail=100
 kubectl --context "$CELLBOX_CONTEXT" -n "$CELLBOX_NAMESPACE" \
-  get resumablepods -l "cellbox.local/box-id=$BOX_ID" -o yaml
+  get cellboxes -l "cellbox.local/box-id=$BOX_ID" -o yaml
 kubectl --context "$CELLBOX_CONTEXT" -n "$CELLBOX_NAMESPACE" \
   get events --sort-by=.metadata.creationTimestamp
 ```

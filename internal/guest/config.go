@@ -19,6 +19,7 @@ const (
 )
 
 var namePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,63}$`)
+var environmentPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
 
 type compiledTool struct {
 	spec     guestapi.Tool
@@ -26,6 +27,9 @@ type compiledTool struct {
 }
 
 func validateConfig(c guestapi.Config) (map[string]compiledTool, error) {
+	if c.CommandDir != "" && (!filepath.IsAbs(c.CommandDir) || filepath.Clean(c.CommandDir) != c.CommandDir || strings.ContainsRune(c.CommandDir, 0)) {
+		return nil, errors.New("commandDir must be a clean absolute directory")
+	}
 	if c.DebugHome != "" && c.DebugHome != "/home/debug" {
 		return nil, errors.New("debugHome must be the admitted host mount")
 	}
@@ -43,8 +47,16 @@ func validateConfig(c guestapi.Config) (map[string]compiledTool, error) {
 	if c.Agent.UID == 0 || c.Agent.GID == 0 || (c.Debug.UID == 0) != (c.Debug.GID == 0) || c.Agent.UID == c.Debug.UID || c.Agent.GID == c.Debug.GID {
 		return nil, errors.New("agent identity must be non-root and distinct from debug identity")
 	}
-	if len(c.Command) > 0 && (!filepath.IsAbs(c.Command[0]) || strings.ContainsRune(c.Command[0], 0)) {
-		return nil, errors.New("command executable must be absolute")
+	if len(c.Command) > 128 {
+		return nil, errors.New("command has too many arguments")
+	}
+	for _, arg := range c.Command {
+		if strings.ContainsRune(arg, 0) || len(arg) > 8192 {
+			return nil, errors.New("invalid command argument")
+		}
+	}
+	if len(c.Command) > 0 && c.Command[0] == "" {
+		return nil, errors.New("command executable is required")
 	}
 	for k, v := range c.Env {
 		if !validEnv(k, v) {
@@ -98,7 +110,7 @@ func validateConfig(c guestapi.Config) (map[string]compiledTool, error) {
 }
 
 func validEnv(k, v string) bool {
-	return namePattern.MatchString(k) && !strings.ContainsRune(v, 0) && len(v) <= 8192
+	return environmentPattern.MatchString(k) && !strings.ContainsRune(v, 0) && len(v) <= 8192
 }
 
 // checkImmutable verifies every component of a configured launcher path. Symlinks

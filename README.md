@@ -138,6 +138,10 @@ curl --noproxy '*' -H "Authorization: Bearer $CELLBOX_CLIENT_TOKEN" \
 
 完整 REST 契约见 [api/openapi.yaml](api/openapi.yaml)。预览路由、grant 和授权代理由 API 服务提供。
 
+启用 BuildKit 后，可调用 `POST /v1/images:import`，提交镜像仓库地址（tag 或 digest）及可选 `runCommand`。平台解析并固定源 digest、加入 guest、发布准备好的镜像；创建工作空间时传入返回的 `importedImageId`，无需修改 Profile 的默认镜像。导入支持 Linux amd64，具体参数和限制见 [使用说明](doc/cellbox-usage.md#动态导入用户镜像)。
+
+可选 `buildCommand` 在 BuildKit 内以 root 执行 `/bin/sh -c`，用于安装依赖或打包平台文件，然后再注入 guest。源镜像需要包含 shell；构建命令参与缓存身份，`runCommand` 仍决定沙箱启动方式。
+
 ### 可选 BuildKit
 
 需要通过 `POST /v1/images` 构建准备好的沙箱镜像时，启用 BuildKit：
@@ -151,6 +155,10 @@ buildkit:
 ```
 
 `repository` 是构建产物的完整仓库路径，`imageRegistry` 不会自动给它添加前缀。平台镜像发布包含 API 和 Controller；BuildKit 默认使用上游镜像，沙箱镜像由使用方准备。
+
+私有仓库可通过 `buildkit.registryCredentialsSecret` 挂载 `kubernetes.io/dockerconfigjson` Secret，供 API 和 buildctl 读取认证配置。单次导入也可通过 `registryAuth` 提交源仓库的用户名和密码；该凭证不写入持久化状态。
+
+集群访问外部仓库需要代理时，通过 `api.extraEnv` 和 `buildkit.extraEnv` 配置 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY`。代理地址放在本地覆盖文件；`NO_PROXY` 应包含集群 Service / Pod 网段、`.svc`、`.cluster.local` 和直接访问的仓库地址。
 
 BuildKit 使用 overlayfs 和 GC 预算，避免 native snapshotter 对多层镜像进行完整复制。可根据节点磁盘调整 `buildkit.cacheSize`、`buildkit.gc` 和临时存储资源配额。
 
@@ -201,6 +209,8 @@ docker push "$CELLBOX_REGISTRY/cellbox-controller:$CELLBOX_IMAGE_TAG"
 | 测试 | 命令与要求 |
 | --- | --- |
 | Docker REST | `CELLBOX_DOCKER_SMOKE=1 go test -v ./test/cellbox-smoke`；需要本地 Docker，会移除自己创建的容器和镜像 |
+| 镜像导入 | `CELLBOX_CLIENT_TOKEN=... test/scripts/e2e-image-import.sh <API-URL> <profile-id> <source-image>`；API 已启用 BuildKit，源镜像包含 sh / sleep；验证导入、创建、执行、暂停恢复和归档恢复，清理本次沙箱与归档，保留导入镜像记录 |
+| Counter 镜像导入 | `CELLBOX_CLIENT_TOKEN=... test/scripts/e2e-counter-import.sh <API-URL> <profile-id> <counter-image>`；使用 `test/counter` 构建的普通镜像，验证计数、32 MiB 内存暂停恢复及文件归档恢复；保留源沙箱暂停、恢复沙箱运行。可设置 `CELLBOX_K8S_CONTEXT` 检查 Pod 更换和 Service 保留 |
 | Helm install / upgrade | `test/scripts/e2e-helm.sh <context> <test-values-file>`；已有 CRD、RuntimeClass 和节点适配，在独立命名空间安装、升级并清理测试资源 |
 | 节点重复安装 | `test/scripts/e2e-bootstrap.sh <context> [node-name]`；已部署 `cell-box` 中的 Controller，重建 DaemonSet Pod 并验证节点服务启动时间不变 |
 | suspend / resume | `test/scripts/e2e-k8s.sh <context>`；`cell-box` 中已有 Running 的 `counter` CR 及计数器测试镜像，会挂起并恢复该工作空间 |

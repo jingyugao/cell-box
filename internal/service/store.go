@@ -59,6 +59,10 @@ func OpenStore(dir string) (*Store, error) {
 			s.Close()
 			return nil, fmt.Errorf("unsupported state schema")
 		}
+		// Additive schema-2 collection; older lifecycle state remains readable.
+		if s.state.ImportedImages == nil {
+			s.state.ImportedImages = map[string]importedImageRecord{}
+		}
 		if s.state.Boxes == nil || s.state.Operations == nil || s.state.Keys == nil || s.state.Executions == nil || s.state.Leases == nil || s.state.Routes == nil || s.state.Grants == nil || s.state.Access == nil || s.state.Sessions == nil || s.state.Archives == nil {
 			s.Close()
 			return nil, fmt.Errorf("state contains null collections")

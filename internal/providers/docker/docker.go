@@ -98,6 +98,12 @@ type container struct {
 func (p *Provider) image(ctx context.Context, ref string) (imageInfo, error) {
 	var infos []imageInfo
 	b, err := p.run(ctx, []string{"image", "inspect", ref})
+	if err != nil && (strings.Contains(err.Error(), "No such image") || strings.Contains(err.Error(), "No such object")) && image.ValidRegistryImage(ref) {
+		if _, pullErr := p.run(ctx, []string{"image", "pull", ref}); pullErr != nil {
+			return imageInfo{}, pullErr
+		}
+		b, err = p.run(ctx, []string{"image", "inspect", ref})
+	}
 	if err != nil {
 		return imageInfo{}, err
 	}
