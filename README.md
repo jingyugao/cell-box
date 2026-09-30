@@ -2,6 +2,8 @@
 
 Cellbox 是一个通过 REST API 创建和管理隔离工作空间的通用平台，提供执行命令、文件访问、生命周期控制、归档和受控预览访问。产品应用与沙箱镜像由使用方配置。
 
+安装后的操作步骤与 API 调用示例见 [使用说明](doc/cellbox-usage.md)。
+
 | 运行方式 | 生命周期能力 |
 | --- | --- |
 | `docker-normal` | 本地 Docker 工作空间，支持 freeze / unfreeze |
