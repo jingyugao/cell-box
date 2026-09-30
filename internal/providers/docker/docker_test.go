@@ -10,8 +10,8 @@ import (
 	"testing"
 
 	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/image"
 	"cellbox.local/cellbox/internal/guestapi"
+	"cellbox.local/cellbox/internal/image"
 )
 
 const testImageID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -116,7 +116,7 @@ func TestCreateLifecycle(t *testing.T) {
 		t.Fatalf("created %d times", count)
 	}
 	obs, err := p.Inspect(ctx, h)
-	if err != nil || obs.State != "ready" || obs.ExecutionID != h.ID+"/2026-09-26T01:02:03.123456789Z" {
+	if err != nil || obs.Phase != "running" || obs.ExecutionID != h.ID+"/2026-09-26T01:02:03.123456789Z" {
 		t.Fatalf("inspect: %+v %v", obs, err)
 	}
 	conn, err := p.Guest(ctx, h)
@@ -127,7 +127,7 @@ func TestCreateLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	obs, _ = p.Inspect(ctx, h)
-	if obs.State != "frozen" {
+	if obs.Phase != "frozen" {
 		t.Fatal(obs)
 	}
 	if err = p.Action(ctx, h, "unfreeze"); err != nil {
@@ -143,7 +143,7 @@ func TestCreateLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	obs, err = p.Inspect(ctx, h)
-	if err != nil || obs.State != "deleted" {
+	if err != nil || obs.Phase != "deleted" {
 		t.Fatalf("deleted: %+v %v", obs, err)
 	}
 }
@@ -173,7 +173,7 @@ func TestExecutionIdentityChangesOnContainerRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.ExecutionID == first.ExecutionID || second.ExecutionID == "" || second.State != "ready" {
+	if second.ExecutionID == first.ExecutionID || second.ExecutionID == "" || second.Phase != "running" {
 		t.Fatalf("restart did not change execution identity: first=%+v second=%+v", first, second)
 	}
 	f.state = "paused"
@@ -185,6 +185,31 @@ func TestExecutionIdentityChangesOnContainerRestart(t *testing.T) {
 		t.Fatal("pause changed execution identity")
 	}
 }
+
+func TestInspectMapsDockerLifecyclePhases(t *testing.T) {
+	f := newFake()
+	p := NewWithRunner(f)
+	h, err := p.Create(context.Background(), spec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ status, want string }{
+		{"created", "creating"},
+		{"restarting", "creating"},
+		{"running", "running"},
+		{"paused", "frozen"},
+		{"exited", "failed"},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			f.state = tc.status
+			obs, inspectErr := p.Inspect(context.Background(), h)
+			if inspectErr != nil || obs.Phase != tc.want {
+				t.Fatalf("Inspect(%s) = %#v, %v; want phase %q", tc.status, obs, inspectErr, tc.want)
+			}
+		})
+	}
+}
+
 func TestCanceledContextSkipsCommands(t *testing.T) {
 	f := newFake()
 	p := NewWithRunner(f)

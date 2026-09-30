@@ -258,8 +258,8 @@ func TestCaptureSurvivesBoxDeletionAndRestores(t *testing.T) {
 	status, body = f.call(t, "GET", "/v1/boxes/"+restore.TargetID, testClientToken, "", nil)
 	wantStatus(t, status, 200, body)
 	box := decodeResponse[Box](t, body)
-	if box.State != "staged" {
-		t.Fatalf("restored box state: %s", box.State)
+	if box.Phase != "staged" {
+		t.Fatalf("restored box state: %s", box.Phase)
 	}
 }
 

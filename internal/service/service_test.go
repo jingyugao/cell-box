@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +29,8 @@ type fakeCoreProvider struct {
 	createCalls  int
 	destroyCalls int
 	executionID  string
+	guestCalls   int
+	inspectErr   error
 }
 
 func (*fakeCoreProvider) Name() string { return "docker" }
@@ -41,10 +44,13 @@ func (p *fakeCoreProvider) Create(_ context.Context, s boxprovider.Spec) (boxpro
 func (p *fakeCoreProvider) Inspect(_ context.Context, h boxprovider.Handle) (boxprovider.Observation, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !p.created {
-		return boxprovider.Observation{State: "deleted"}, nil
+	if p.inspectErr != nil {
+		return boxprovider.Observation{}, p.inspectErr
 	}
-	return boxprovider.Observation{State: "ready", ExecutionID: p.executionID}, nil
+	if !p.created {
+		return boxprovider.Observation{Phase: "deleted"}, nil
+	}
+	return boxprovider.Observation{Phase: "running", ExecutionID: p.executionID}, nil
 }
 func (*fakeCoreProvider) Action(context.Context, boxprovider.Handle, string) error { return nil }
 func (p *fakeCoreProvider) Destroy(_ context.Context, _ boxprovider.Handle) error {
@@ -57,11 +63,13 @@ func (p *fakeCoreProvider) Destroy(_ context.Context, _ boxprovider.Handle) erro
 func (p *fakeCoreProvider) Guest(_ context.Context, _ boxprovider.Handle) (boxprovider.Connection, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.guestCalls++
 	if !p.created {
 		return boxprovider.Connection{}, boxprovider.ErrNotFound
 	}
 	return boxprovider.Connection{URL: p.guestURL, Token: testGuestToken}, nil
 }
+func (p *fakeCoreProvider) guestCount() int          { p.mu.Lock(); defer p.mu.Unlock(); return p.guestCalls }
 func (p *fakeCoreProvider) setExecutionID(id string) { p.mu.Lock(); p.executionID = id; p.mu.Unlock() }
 func (p *fakeCoreProvider) counts() (int, int) {
 	p.mu.Lock()
@@ -178,11 +186,54 @@ func (f *coreFixture) createBox(t *testing.T, key string) (Operation, Box) {
 	status, body = f.call(t, "GET", "/v1/boxes/"+op.TargetID, testClientToken, "", nil)
 	wantStatus(t, status, 200, body)
 	box := decodeResponse[Box](t, body)
-	if box.State != "ready" || box.Generation == 0 {
+	if box.Phase != "running" || box.Generation == 0 {
 		t.Fatalf("created box is not ready: %+v", box)
 	}
 	return op, box
 }
+
+func TestBoxQueriesObserveLifecycleWithoutGuestAndFilterOwnedIDs(t *testing.T) {
+	f := newCoreFixture(t)
+	_, first := f.createBox(t, "query-first")
+	_, second := f.createBox(t, "query-second")
+	guestCalls := f.provider.guestCount()
+	f.guest.Close()
+	status, body := f.call(t, "GET", "/v1/boxes?id="+first.ID+"&id="+second.ID, testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	boxes := decodeResponse[[]Box](t, body)
+	if len(boxes) != 2 || boxes[0].Phase != "running" || boxes[1].Phase != "running" {
+		t.Fatalf("filtered lifecycle query: %+v", boxes)
+	}
+	status, body = f.call(t, "GET", "/v1/boxes/"+first.ID, testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	if got := f.provider.guestCount(); got != guestCalls {
+		t.Fatalf("box queries called Guest %d times; want no additional calls", got-guestCalls)
+	}
+	status, body = f.call(t, "GET", "/v1/boxes?id="+first.ID, otherClientToken, "", nil)
+	wantStatus(t, status, 404, body)
+}
+
+func TestBoxQueryProviderFailureDoesNotChangeSavedLifecycle(t *testing.T) {
+	f := newCoreFixture(t)
+	_, box := f.createBox(t, "query-inspect-error")
+	before, err := f.service.rawBox(box.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.provider.mu.Lock()
+	f.provider.inspectErr = errors.New("provider unavailable")
+	f.provider.mu.Unlock()
+	status, body := f.call(t, "GET", "/v1/boxes/"+box.ID, testClientToken, "", nil)
+	wantStatus(t, status, 502, body)
+	after, err := f.service.rawBox(box.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Box.Phase != before.Box.Phase || after.Box.Version != before.Box.Version {
+		t.Fatalf("failed observation changed lifecycle: before=%+v after=%+v", before.Box, after.Box)
+	}
+}
+
 func (f *coreFixture) waitOperation(t *testing.T, id, want string) Operation {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -343,14 +394,19 @@ func TestFailedRestoreCandidateCannotActivate(t *testing.T) {
 	if err := f.service.store.Update(func(st *State) error {
 		b := st.Boxes[box.ID]
 		b.Staged = true
-		b.Box.State = "failed"
+		b.Box.Phase = "failed"
 		b.Box.Error = &APIError{Code: "RESTORE_FAILED", Message: "Archive checksum mismatch"}
 		st.Boxes[box.ID] = b
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	status, body := f.call(t, "POST", "/v1/boxes/"+box.ID+":activate", testClientToken, "activate-failed-restore", nil)
+	status, body := f.call(t, "GET", "/v1/boxes/"+box.ID, testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	if got := decodeResponse[Box](t, body); got.Phase != "failed" {
+		t.Fatalf("query revived failed restore candidate: %+v", got)
+	}
+	status, body = f.call(t, "POST", "/v1/boxes/"+box.ID+":activate", testClientToken, "activate-failed-restore", nil)
 	wantStatus(t, status, 409, body)
 	if f.activateCalls.Load() != 0 {
 		t.Fatalf("failed restore activated %d times", f.activateCalls.Load())

@@ -55,7 +55,7 @@ func OpenStore(dir string) (*Store, error) {
 			s.Close()
 			return nil, fmt.Errorf("invalid state file: %w", err)
 		}
-		if s.state.Schema != 1 {
+		if s.state.Schema != 2 {
 			s.Close()
 			return nil, fmt.Errorf("unsupported state schema")
 		}
@@ -65,6 +65,100 @@ func OpenStore(dir string) (*Store, error) {
 		}
 	}
 	return s, nil
+}
+
+var errBoxObservationConflict = fmt.Errorf("box changed during observation")
+
+func cloneBoxRecord(record boxRecord) (boxRecord, error) {
+	b, err := json.Marshal(record)
+	if err != nil {
+		return boxRecord{}, err
+	}
+	var copy boxRecord
+	err = json.Unmarshal(b, &copy)
+	return copy, err
+}
+
+// BoxRecords returns isolated copies of only the requested records. An empty
+// ID list means all records owned by client.
+func (s *Store) BoxRecords(client string, ids []string) ([]boxRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(ids) == 0 {
+		out := make([]boxRecord, 0)
+		for _, record := range s.state.Boxes {
+			if record.ClientID == client {
+				copy, err := cloneBoxRecord(record)
+				if err != nil {
+					return nil, err
+				}
+				out = append(out, copy)
+			}
+		}
+		return out, nil
+	}
+	out := make([]boxRecord, 0, len(ids))
+	for _, id := range ids {
+		record, ok := s.state.Boxes[id]
+		if !ok || record.ClientID != client {
+			return nil, apiError("NOT_FOUND", "Box not found")
+		}
+		copy, err := cloneBoxRecord(record)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, copy)
+	}
+	return out, nil
+}
+
+func (s *Store) BoxRecord(id string) (boxRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.state.Boxes[id]
+	if !ok {
+		return boxRecord{}, apiError("NOT_FOUND", "Box not found")
+	}
+	return cloneBoxRecord(record)
+}
+
+func sameObservationBase(a, b boxRecord) bool {
+	return a.Box.Version == b.Box.Version && a.Box.Generation == b.Box.Generation &&
+		a.Box.Phase == b.Box.Phase && a.Box.OperationID == b.Box.OperationID &&
+		a.Handle == b.Handle && a.ExecutionID == b.ExecutionID &&
+		a.Staged == b.Staged && a.RestoreArchiveID == b.RestoreArchiveID &&
+		a.RestoreComplete == b.RestoreComplete
+}
+
+// UpdateObservedBox performs the compare even when update reports no changes.
+// It persists only when the observation changed the box.
+func (s *Store) UpdateObservedBox(base boxRecord, update func(*boxRecord) (bool, error)) (boxRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.state.Boxes[base.Box.ID]
+	if !ok || !sameObservationBase(base, current) {
+		return boxRecord{}, errBoxObservationConflict
+	}
+	next, err := cloneBoxRecord(current)
+	if err != nil {
+		return boxRecord{}, err
+	}
+	changed, err := update(&next)
+	if err != nil {
+		return boxRecord{}, err
+	}
+	if !changed {
+		return cloneBoxRecord(current)
+	}
+	state, err := cloneState(s.state)
+	if err != nil {
+		return boxRecord{}, err
+	}
+	state.Boxes[base.Box.ID] = next
+	if err = s.persistLocked(state); err != nil {
+		return boxRecord{}, err
+	}
+	return cloneBoxRecord(next)
 }
 func (s *Store) Close() error {
 	if s.lock == nil {
@@ -99,7 +193,21 @@ func (s *Store) Update(fn func(*State) error) error {
 	if err = fn(&next); err != nil {
 		return err
 	}
-	b, err = json.MarshalIndent(next, "", "  ")
+	return s.persistLocked(next)
+}
+
+func cloneState(state State) (State, error) {
+	b, err := json.Marshal(state)
+	if err != nil {
+		return State{}, err
+	}
+	var next State
+	err = json.Unmarshal(b, &next)
+	return next, err
+}
+
+func (s *Store) persistLocked(next State) error {
+	b, err := json.MarshalIndent(next, "", "  ")
 	if err != nil {
 		return err
 	}

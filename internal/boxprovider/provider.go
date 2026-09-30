@@ -33,7 +33,7 @@ type Handle struct {
 }
 
 type Observation struct {
-	State       string // provisioning, ready, frozen, suspended, resuming, failed, deleted
+	Phase       string // creating, running, freezing, frozen, unfreezing, suspending, suspended, resuming, restoring, staged, deleting, deleted, failed
 	ExecutionID string // immutable runtime identity; changes after Pod replacement
 	Message     string
 }

@@ -200,7 +200,7 @@ func (s *Service) captureArchive(w http.ResponseWriter, r *http.Request) {
 		if activeExec(st, id) {
 			return apiError("BUSY", "Box has an active execution")
 		}
-		if box.Box.State != "ready" && box.Box.State != "staged" {
+		if box.Box.Phase != "running" && box.Box.Phase != "staged" {
 			return apiError("CONFLICT", "Archive requires an accessible box")
 		}
 		if box.Box.ImageID == "" {
@@ -307,7 +307,7 @@ func (s *Service) restoreArchive(ctx context.Context, boxID string, source Archi
 	if source.ID != b.RestoreArchiveID || source.ImageID == "" || b.Box.ImageID == "" || source.ImageID != b.Box.ImageID || source.Agent != b.Profile.Guest.Agent {
 		return apiError("ARCHIVE_INCOMPATIBLE", "Archive image or agent identity differs from target box")
 	}
-	if b.Box.State != "restoring" || !b.Staged || b.RestoreComplete {
+	if b.Box.Phase != "restoring" || !b.Staged || b.RestoreComplete {
 		return apiError("CONFLICT", "Box is not awaiting archive restore")
 	}
 	dir, err := s.archivesDir()
@@ -338,7 +338,7 @@ func (s *Service) restoreArchive(ctx context.Context, boxID string, source Archi
 	}
 	return s.store.Update(func(st *State) error {
 		current, ok := st.Boxes[boxID]
-		if !ok || current.RestoreArchiveID != source.ID || current.Box.State != "restoring" {
+		if !ok || current.RestoreArchiveID != source.ID || current.Box.Phase != "restoring" {
 			return apiError("CONFLICT", "Restore target changed")
 		}
 		current.RestoreComplete = true
