@@ -7,6 +7,28 @@ import (
 	"testing"
 )
 
+func TestReadyRequiresCompleteRuntimeSettings(t *testing.T) {
+	for _, version := range []string{"2", "3"} {
+		input := []byte("version = " + version + "\n")
+		config, _ := Decode(input)
+		if Ready(config) {
+			t.Fatal("missing runtime handler considered ready")
+		}
+		result, err := Plan(config, input, "config", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		config, _ = Decode(result)
+		if !Ready(config) {
+			t.Fatal("installed runtime handler requires restart")
+		}
+		delete(Handler(config), "pod_annotations")
+		if Ready(config) {
+			t.Fatal("missing recovery annotation considered ready")
+		}
+	}
+}
+
 func TestPreservesNodeConfigAndIsIdempotent(t *testing.T) {
 	for _, version := range []string{"2", "3"} {
 		input := []byte("# node-owned settings\nversion = " + version + "\nimports = [\"/etc/containerd/other/*.toml\"]\n[grpc]\naddress = '/custom/containerd.sock'\n[plugins.'vendor.plugin']\nsetting = 'preserve me'\n")

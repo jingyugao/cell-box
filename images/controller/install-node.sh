@@ -58,6 +58,7 @@ elif test -d "$base" && test -n "$(find "$base" -mindepth 1 -print -quit)"; then
 fi
 
 version=$($helper --host "$host" --config "$host$config" --version-only $adopt)
+ready=$($helper --host "$host" --config "$host$config" --ready-only $adopt)
 kind=config
 target="$host$config"
 if test "$mode" = k3s; then
@@ -84,17 +85,14 @@ $helper --host "$host" --config "$host$config" --target "$target" --kind "$kind"
 cat /opt/cellbox/runsc.toml > "$work/runsc.toml"
 printf '  platform = "%s"\n' "$platform" >> "$work/runsc.toml"
 
-changed=0
 install_if_changed() {
   source=$1 destination=$2 permissions=$3
   if ! cmp -s "$source" "$destination"; then
-    touch "$base/restart-pending"
     if test -e "$destination" && ! test -f "$destination.cellbox-backup"; then
       cp -p "$destination" "$destination.cellbox-backup"
     fi
     install -m "$permissions" "$source" "$destination.cellbox-next"
     mv -f "$destination.cellbox-next" "$destination"
-    changed=1
   fi
 }
 
@@ -103,9 +101,21 @@ install -d -m 755 "$host/usr/local/libexec"
 touch "$base/installed-by-cellbox"
 install_if_changed /usr/local/bin/cellbox-runsc-wrapper "$host/usr/local/libexec/cellbox-runsc-wrapper" 755
 install_if_changed "$work/runsc.toml" "$base/runsc.toml" 600
+# Save the service generation before changing runtime config. If the restart
+# interrupts this init container, a subsequent run can recognize its completion.
+if test "$ready" != true && ! test -f "$base/restart-pending"; then
+  chroot "$host" /bin/systemctl show "$unit" --property=ActiveEnterTimestampMonotonic --value > "$base/restart-pending"
+fi
 install_if_changed "$work/runtime.toml" "$target" 644
 
-if test "$changed" -eq 1 || test -f "$base/restart-pending"; then
+if test -f "$base/restart-pending"; then
+  started=$(chroot "$host" /bin/systemctl show "$unit" --property=ActiveEnterTimestampMonotonic --value)
+  previous=$(cat "$base/restart-pending")
+  if test "$ready" = true && test -n "$previous" && test "$started" != "$previous"; then
+    rm -f -- "$base/restart-pending"
+  fi
+fi
+if test -f "$base/restart-pending"; then
   echo "Cellbox runtime configured for $mode (containerd config v$version); restarting $unit once"
   # systemd survives the init container; identical files prevent a restart loop.
   chroot "$host" /bin/systemctl --no-block restart "$unit"
