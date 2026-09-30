@@ -44,7 +44,7 @@ func TestDockerREST(t *testing.T) {
 		}
 		return strings.TrimSpace(string(out))
 	}
-	run("go", "build", "-o", filepath.Join(dir, "guest"), "./cmd/cellbox-guest")
+	run("go", "build", "-o", filepath.Join(dir, "guest"), "./cmd/cellbox-container-agent")
 	run("go", "build", "-o", filepath.Join(dir, "workload"), "./test/smoke-workload")
 	dockerfile := "FROM scratch\nCOPY workload /workload\nCOPY --chmod=0755 workload /opt/cellbox/tools/demo\n"
 	if err = os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfile), 0600); err != nil {

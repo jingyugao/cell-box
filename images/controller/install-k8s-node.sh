@@ -7,7 +7,7 @@ base="$host/var/lib/cellbox"
 dropin="$host/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d/91-cellbox.toml"
 legacy_base="$host/var/lib/resumablepod"
 legacy_dropin="$host/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d/91-resumablepod.toml"
-adapter="$host/usr/local/libexec/resumablepod-runtime"
+adapter="$host/usr/local/libexec/cellbox-runsc-wrapper"
 
 test -x "$host/usr/local/bin/runsc" || { echo 'gVisor runsc is missing on this node' >&2; exit 1; }
 test -x "$host/usr/local/bin/containerd-shim-runsc-v1" || { echo 'gVisor shim is missing on this node' >&2; exit 1; }
@@ -51,7 +51,7 @@ install_if_changed() {
     changed=1
   fi
 }
-install_if_changed /usr/local/bin/resumablepod-runtime "$adapter" 755
+install_if_changed /usr/local/bin/cellbox-runsc-wrapper "$adapter" 755
 install_if_changed /opt/resumablepod/runsc.toml "$base/runsc.toml" 600
 install_if_changed /opt/resumablepod/runtime.toml "$dropin" 644
 if test -e "$legacy_dropin"; then
