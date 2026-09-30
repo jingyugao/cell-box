@@ -57,7 +57,7 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: prepare-data-dir
-          image: busybox:1.36
+          image: {{ include "cellbox.image" (dict "root" . "image" .Values.api.initImage) | quote }}
           command: [/bin/sh, -ec, 'chown 10001:10001 /var/lib/cellbox && chmod 0700 /var/lib/cellbox']
           securityContext:
             runAsUser: 0
@@ -72,7 +72,7 @@ spec:
               mountPath: /var/lib/cellbox
         {{- if .Values.buildkit.enabled }}
         - name: prepare-buildkit-dirs
-          image: busybox:1.36
+          image: {{ include "cellbox.image" (dict "root" . "image" .Values.api.initImage) | quote }}
           # fsGroup leaves a setgid group outside RootlessKit's UID/GID mapping.
           # Overlayfs needs the cache directories owned by mapped IDs.
           command: [/bin/sh, -ec, 'chown 1000:1000 /run/cellbox-buildkit /home/user/.local/share/buildkit && chmod 0770 /run/cellbox-buildkit && chmod 0700 /home/user/.local/share/buildkit && chmod g-s /home/user/.local/share/buildkit']
@@ -92,7 +92,7 @@ spec:
         {{- end }}
       containers:
         - name: api
-          image: {{ .Values.api.image | quote }}
+          image: {{ include "cellbox.image" (dict "root" . "image" .Values.api.image) | quote }}
           imagePullPolicy: {{ .Values.api.imagePullPolicy }}
           command: [/usr/local/bin/cellbox-api]
           args:
@@ -156,7 +156,7 @@ spec:
             {{- end }}
         {{- if .Values.buildkit.enabled }}
         - name: buildkit
-          image: {{ .Values.buildkit.image | quote }}
+          image: {{ include "cellbox.image" (dict "root" . "image" .Values.buildkit.image) | quote }}
           imagePullPolicy: {{ .Values.buildkit.imagePullPolicy }}
           args:
             - --addr=unix:///run/cellbox-buildkit/buildkitd.sock

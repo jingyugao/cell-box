@@ -35,7 +35,7 @@ spec:
       initContainers:
         {{- if .Values.controller.runtimeInstaller.gvisor.enabled }}
         - name: install-gvisor
-          image: {{ .Values.controller.adapterImage | quote }}
+          image: {{ include "cellbox.image" (dict "root" . "image" .Values.controller.adapterImage) | quote }}
           imagePullPolicy: {{ .Values.controller.imagePullPolicy }}
           command: [/bin/sh, /usr/local/bin/install-gvisor.sh]
           env:
@@ -51,7 +51,7 @@ spec:
               mountPath: /host
         {{- end }}
         - name: install-runtime-adapter
-          image: {{ .Values.controller.adapterImage | quote }}
+          image: {{ include "cellbox.image" (dict "root" . "image" .Values.controller.adapterImage) | quote }}
           imagePullPolicy: {{ .Values.controller.imagePullPolicy }}
           command:
             {{- if .Values.controller.runtimeInstaller.command }}
@@ -78,7 +78,7 @@ spec:
       {{- end }}
       containers:
         - name: controller
-          image: {{ .Values.controller.image | quote }}
+          image: {{ include "cellbox.image" (dict "root" . "image" .Values.controller.image) | quote }}
           imagePullPolicy: {{ .Values.controller.imagePullPolicy }}
           args:
             - --node=$(NODE_NAME)
