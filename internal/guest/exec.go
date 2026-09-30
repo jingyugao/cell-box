@@ -45,8 +45,18 @@ func (w *boundedBuffer) Write(p []byte) (int, error) {
 // credential switch happens when the supervisor starts this binary; this mode
 // sets no-new-privileges before replacing itself with the fixed target.
 func RunChild(argv []string) error {
-	if len(argv) == 0 || !filepath.IsAbs(argv[0]) {
-		return errors.New("child executable must be absolute")
+	if len(argv) == 0 {
+		return errors.New("child executable is required")
+	}
+	if !filepath.IsAbs(argv[0]) {
+		resolved, err := exec.LookPath(argv[0])
+		if err != nil {
+			return err
+		}
+		argv[0], err = filepath.Abs(resolved)
+		if err != nil {
+			return err
+		}
 	}
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return err

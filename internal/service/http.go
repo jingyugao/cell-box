@@ -84,6 +84,9 @@ func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/profiles", s.listProfiles)
 	mux.HandleFunc("POST /v1/images", s.buildImage)
+	mux.HandleFunc("POST /v1/images:import", s.importImage)
+	mux.HandleFunc("GET /v1/images", s.listImportedImages)
+	mux.HandleFunc("GET /v1/images/{id}", s.getImportedImage)
 	mux.HandleFunc("POST /v1/boxes", func(w http.ResponseWriter, r *http.Request) {
 		var input createRequest
 		if err := decode(w, r, &input); err != nil {

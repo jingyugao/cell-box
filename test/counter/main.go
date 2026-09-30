@@ -46,7 +46,11 @@ func main() {
 	}
 	initialHash := fmt.Sprintf("%x", sha256.Sum256(memory))
 	instance := hex.EncodeToString(memory[:16])
-	if err := os.WriteFile("/marker", []byte(instance), 0600); err != nil {
+	markerPath := os.Getenv("COUNTER_MARKER_PATH")
+	if markerPath == "" {
+		markerPath = "/marker"
+	}
+	if err := os.WriteFile(markerPath, []byte(instance), 0600); err != nil {
 		log.Fatal(err)
 	}
 	var count atomic.Int64
@@ -56,7 +60,7 @@ func main() {
 	})
 	http.HandleFunc("/state", func(w http.ResponseWriter, r *http.Request) {
 		hash := fmt.Sprintf("%x", sha256.Sum256(memory))
-		marker, err := os.ReadFile("/marker")
+		marker, err := os.ReadFile(markerPath)
 		if err != nil || string(marker) != instance || hash != initialHash {
 			http.Error(w, fmt.Sprintf("state mismatch: marker=%q err=%v hash=%s expected=%s", marker, err, hash, initialHash), 500)
 			return

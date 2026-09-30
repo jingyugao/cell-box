@@ -37,6 +37,7 @@ func run(args []string) error {
 	imageRepository := flags.String("image-repository", "", "registry repository for prepared images")
 	guestBinary := flags.String("guest-binary", "", "static Cellbox guest binary for image builds")
 	buildctlBinary := flags.String("buildctl", "", "BuildKit client executable")
+	insecureRegistry := flags.String("image-insecure-registry", "", "explicit registry host allowed to use HTTP for image import")
 	showVersion := flags.Bool("version", false, "print build version and exit")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -65,6 +66,9 @@ func run(args []string) error {
 	}
 	if *buildkitAddress != "" || *imageRepository != "" || *guestBinary != "" || *buildctlBinary != "" {
 		config.ImageBuild = service.ImageBuildConfig{Address: *buildkitAddress, Repository: *imageRepository, GuestBinary: *guestBinary, BuildctlBinary: *buildctlBinary}
+	}
+	if *insecureRegistry != "" {
+		config.ImageBuild.InsecureRegistry = *insecureRegistry
 	}
 
 	providers := make(map[string]boxprovider.Provider)

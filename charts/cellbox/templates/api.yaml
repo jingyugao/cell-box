@@ -114,12 +114,22 @@ spec:
             - /usr/local/bin/cellbox-container-agent
             - --buildctl
             - /usr/local/bin/buildctl
+            {{- if and .Values.buildkit.registryHTTP .Values.buildkit.registryHost }}
+            - --image-insecure-registry
+            - {{ .Values.buildkit.registryHost | quote }}
+            {{- end }}
             {{- end }}
           envFrom:
             - secretRef:
                 name: {{ .Values.api.clientTokensSecret }}
-          {{- if .Values.api.ossCredentialsSecret }}
           env:
+            - name: HOME
+              value: /tmp
+            {{- if and .Values.buildkit.enabled .Values.buildkit.registryCredentialsSecret }}
+            - name: DOCKER_CONFIG
+              value: /etc/cellbox-registry
+            {{- end }}
+            {{- if .Values.api.ossCredentialsSecret }}
             - name: OSS_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
@@ -130,7 +140,10 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.api.ossCredentialsSecret }}
                   key: OSS_SECRET_KEY
-          {{- end }}
+            {{- end }}
+            {{- with .Values.api.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - name: http
               containerPort: 8090
@@ -162,11 +175,20 @@ spec:
             {{- if .Values.buildkit.enabled }}
             - name: buildkit-socket
               mountPath: /run/cellbox-buildkit
+            {{- if .Values.buildkit.registryCredentialsSecret }}
+            - name: registry-credentials
+              mountPath: /etc/cellbox-registry
+              readOnly: true
+            {{- end }}
             {{- end }}
         {{- if .Values.buildkit.enabled }}
         - name: buildkit
           image: {{ include "cellbox.image" (dict "root" . "image" .Values.buildkit.image) | quote }}
           imagePullPolicy: {{ .Values.buildkit.imagePullPolicy }}
+          {{- with .Values.buildkit.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           args:
             - --addr=unix:///run/cellbox-buildkit/buildkitd.sock
             - --group=0
@@ -213,6 +235,15 @@ spec:
           emptyDir:
             sizeLimit: {{ ternary "1Gi" "64Mi" .Values.buildkit.enabled }}
         {{- if .Values.buildkit.enabled }}
+        {{- if .Values.buildkit.registryCredentialsSecret }}
+        - name: registry-credentials
+          secret:
+            secretName: {{ .Values.buildkit.registryCredentialsSecret }}
+            defaultMode: 0440
+            items:
+              - key: .dockerconfigjson
+                path: config.json
+        {{- end }}
         - name: buildkit-socket
           emptyDir: {}
         - name: buildkit-cache

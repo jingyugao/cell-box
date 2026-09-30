@@ -23,14 +23,26 @@ func ValidRepository(value string) bool    { return registryRepository.MatchStri
 func ValidPlatform(value string) bool      { return value == "" || validPlatform(value) }
 
 type BuildKitOptions struct {
-	Address     string
-	Binary      string
-	Repository  string
-	Base        string
-	GuestBinary string
-	ProductDir  string
-	Manifest    string
-	Platform    string
+	Address      string
+	Binary       string
+	Repository   string
+	Base         string
+	GuestBinary  string
+	ProductDir   string
+	Manifest     string
+	Platform     string
+	DockerConfig string
+	BuildCommand string
+}
+
+func ValidateBuildCommand(command string) error {
+	if len(command) > 64<<10 || strings.ContainsRune(command, 0) {
+		return errors.New("buildCommand must be at most 65536 bytes and contain no NUL")
+	}
+	if command != "" && strings.TrimSpace(command) == "" {
+		return errors.New("buildCommand must contain a shell command")
+	}
+	return nil
 }
 
 type BuildKitResult struct {
@@ -61,6 +73,9 @@ func (b *boundedOutput) Write(p []byte) (int, error) {
 // The returned manifest digest can be used directly by Kubernetes profiles.
 func PrepareBuildKit(ctx context.Context, opts BuildKitOptions) (BuildKitResult, error) {
 	var zero BuildKitResult
+	if err := ValidateBuildCommand(opts.BuildCommand); err != nil {
+		return zero, err
+	}
 	if !strings.HasPrefix(opts.Address, "unix:///") || strings.ContainsAny(opts.Address, "\x00\n\r") {
 		return zero, errors.New("a Unix BuildKit socket is required")
 	}
@@ -95,7 +110,12 @@ func PrepareBuildKit(ctx context.Context, opts BuildKitOptions) (BuildKitResult,
 			return zero, errors.New("product payload already contains manifest.json")
 		}
 	}
-	keyBytes := sha256.Sum256([]byte(strings.Join([]string{ImageVersion, opts.Base, opts.Platform, guestHash, productHash, manifestHash}, "\n")))
+	keyParts := []string{ImageVersion, opts.Base, opts.Platform, guestHash, productHash, manifestHash}
+	if opts.BuildCommand != "" {
+		commandHash := sha256.Sum256([]byte(opts.BuildCommand))
+		keyParts = append(keyParts, hex.EncodeToString(commandHash[:]))
+	}
+	keyBytes := sha256.Sum256([]byte(strings.Join(keyParts, "\n")))
 	key := hex.EncodeToString(keyBytes[:])
 	tag := opts.Repository + ":cellbox-" + key
 	dir, err := os.MkdirTemp("", "cellbox-buildkit-")
@@ -154,8 +174,22 @@ func PrepareBuildKit(ctx context.Context, opts BuildKitOptions) (BuildKitResult,
 			}
 		}
 	}
-	dockerfile := "FROM " + opts.Base + "\nLABEL " + ManagedLabel + "=\"" + ImageVersion + "\" " + IdentityLabel + "=\"" + key + "\"\nCOPY --chmod=0755 guest /opt/cellbox/bin/cellbox-container-agent\n"
-	if opts.ProductDir != "" || opts.Manifest != "" {
+	dockerfile := "FROM " + opts.Base + "\n"
+	product := opts.ProductDir != "" || opts.Manifest != ""
+	if opts.BuildCommand != "" {
+		if product {
+			dockerfile += "COPY product/ /opt/product/\n"
+		}
+		// JSON exec form keeps newlines and Dockerfile instructions inside the
+		// shell argument. Execute only in BuildKit, before installing our guest.
+		command, err := json.Marshal([]string{"/bin/sh", "-c", opts.BuildCommand})
+		if err != nil {
+			return zero, err
+		}
+		dockerfile += "USER 0:0\nRUN " + string(command) + "\n"
+	}
+	dockerfile += "LABEL " + ManagedLabel + "=\"" + ImageVersion + "\" " + IdentityLabel + "=\"" + key + "\"\nCOPY --chmod=0755 guest /opt/cellbox/bin/cellbox-container-agent\n"
+	if product && opts.BuildCommand == "" {
 		dockerfile += "COPY product/ /opt/product/\n"
 	}
 	if err = os.WriteFile(filepath.Join(contextDir, "Dockerfile"), []byte(dockerfile), 0600); err != nil {
@@ -170,6 +204,9 @@ func PrepareBuildKit(ctx context.Context, opts BuildKitOptions) (BuildKitResult,
 		args = append(args, "--opt", "platform="+opts.Platform)
 	}
 	cmd := exec.CommandContext(ctx, opts.Binary, args...)
+	if opts.DockerConfig != "" {
+		cmd.Env = append(os.Environ(), "DOCKER_CONFIG="+opts.DockerConfig)
+	}
 	output := &boundedOutput{}
 	cmd.Stdout, cmd.Stderr = output, output
 	err = cmd.Run()

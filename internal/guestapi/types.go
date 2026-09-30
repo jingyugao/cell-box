@@ -28,13 +28,14 @@ type Tool struct {
 }
 
 type Config struct {
-	Workspace string            `json:"workspace"`
-	Agent     Identity          `json:"agent"`
-	Debug     Identity          `json:"debug"`
-	DebugHome string            `json:"debugHome,omitempty"`
-	Command   []string          `json:"command,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
-	Tools     []Tool            `json:"tools,omitempty"`
+	Workspace  string            `json:"workspace"`
+	Agent      Identity          `json:"agent"`
+	Debug      Identity          `json:"debug"`
+	DebugHome  string            `json:"debugHome,omitempty"`
+	Command    []string          `json:"command,omitempty"`
+	CommandDir string            `json:"commandDir,omitempty"`
+	Env        map[string]string `json:"env,omitempty"`
+	Tools      []Tool            `json:"tools,omitempty"`
 }
 
 func DefaultConfig() Config {

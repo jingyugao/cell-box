@@ -40,6 +40,8 @@ api:
   initImage: docker.io/library/busybox:1.36
   imagePullPolicy: IfNotPresent
   replicas: 1
+  # Additional container environment variables, e.g. HTTPS_PROXY and NO_PROXY.
+  extraEnv: []
   nodeSelector: {}
   configSecret: cellbox-api-config
   clientTokensSecret: cellbox-api-client-tokens
@@ -57,11 +59,14 @@ api:
 
 buildkit:
   enabled: false
+  extraEnv: []
   image: docker.io/moby/buildkit:v0.33.0-rootless
   imagePullPolicy: IfNotPresent
   repository: ""
   registryHost: ""
   registryHTTP: false
+  # Optional kubernetes.io/dockerconfigjson Secret used by the API/buildctl client.
+  registryCredentialsSecret: ""
   # Require overlayfs rather than silently falling back to full-copy snapshots.
   snapshotter: overlayfs
   cacheSize: 10Gi

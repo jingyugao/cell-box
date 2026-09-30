@@ -157,6 +157,9 @@ func chownWorkspaceTree(root string, owner guestapi.Identity) error {
 func startWorkload(self string, c guestapi.Config) (*os.Process, error) {
 	cmd := exec.Command(self, append([]string{"__child"}, c.Command...)...)
 	cmd.Dir = c.Workspace
+	if c.CommandDir != "" {
+		cmd.Dir = c.CommandDir
+	}
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=/home/agent", "LANG=C.UTF-8"}
 	for k, v := range c.Env {
 		cmd.Env = append(cmd.Env, k+"="+v)
