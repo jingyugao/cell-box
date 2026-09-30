@@ -21,7 +21,7 @@ cleanup() {
 trap cleanup EXIT
 settings=( -f "$values" --set api.namespace="$namespace" --set api.manageSecrets=true
   --set crd.create=false --set runtimeClass.create=false
-  --set controller.runtimeInstaller.enabled=false --set buildkit.enabled=false )
+  --set buildkit.enabled=false )
 "${h[@]}" install "$release" charts/cellbox --create-namespace "${settings[@]}" --wait --timeout 5m
 "${k[@]}" port-forward --address 127.0.0.1 svc/cellbox-api "$port:8090" > "$evidence/port-forward.log" 2>&1 &
 forward_pid=$!

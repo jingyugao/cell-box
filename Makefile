@@ -15,7 +15,7 @@ build:
 	module=$$(go list -m)
 	if [[ -n $$(git status --porcelain) ]]; then revision=$$revision-dirty; fi
 	mkdir -p "$$out"
-	for obsolete in box-service cellbox cellbox-guest cellbox-image cellbox-gateway resumablepod-controller resumablepod-runtime resumablepod-gateway server Dockerfile GatewayDockerfile README.rst; do
+	for obsolete in cellbox-runtime-config box-service cellbox cellbox-guest cellbox-image cellbox-gateway resumablepod-controller resumablepod-runtime resumablepod-gateway server Dockerfile GatewayDockerfile README.rst; do
 		if [[ -f "$$out/$$obsolete" ]]; then rm -- "$$out/$$obsolete"; fi
 	done
 	ldflags="-s -w -X $$module/internal/version.Version=$$version -X $$module/internal/version.Revision=$$revision"
@@ -23,11 +23,11 @@ build:
 	CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -o "$$out/cellbox-container-agent" ./cmd/cellbox-container-agent
 	CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags "$$ldflags" -o "$$out/cellbox-node-controller" ./cmd/cellbox-node-controller
 	CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags "$$ldflags" -o "$$out/cellbox-runsc-wrapper" ./cmd/cellbox-runsc-wrapper
-	CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -o "$$out/cellbox-runtime-config" ./cmd/cellbox-runtime-config
 	cp -r charts examples images "$$out/"
 	rm -f -- "$$out/charts/cellbox/values_local.yaml" "$$out/charts/cellbox/values-k3s.yaml" "$$out/images/controller/install-k8s-node.sh"
 	rm -f -- "$$out/charts/cellbox/templates/gateway.yaml" "$$out/charts/cellbox/templates/gateway-access.yaml"
-	rm -f -- "$$out/images/controller/install-k3s-node.sh" "$$out/images/controller/runtime.toml"
+	rm -f -- "$$out/images/controller/install-k3s-node.sh" "$$out/images/controller/runtime.toml" "$$out/images/controller/install-node.sh" "$$out/images/controller/install-gvisor.sh" "$$out/images/controller/runsc.toml"
+	rm -f -- "$$out/test/scripts/test-node-install.sh" "$$out/test/scripts/e2e-bootstrap.sh"
 	mkdir -p "$$out/test" "$$out/config" "$$out/api"
 	cp -r test/scripts "$$out/test/"
 	cp config/sample.json "$$out/config/"
@@ -48,7 +48,7 @@ vet:
 	go vet ./...
 
 check: test vet
-	@for script in test/scripts/*.sh images/controller/*.sh; do bash -n "$$script"; done
+	@for script in test/scripts/*.sh; do bash -n "$$script"; done
 
 fmt:
 	gofmt -w api cmd internal pkg test
@@ -65,7 +65,7 @@ package:
 	$(MAKE) build OUT="$$staging/$$name"
 	epoch=$${SOURCE_DATE_EPOCH:-$$(git log -1 --format=%ct)}
 	mkdir -p dist
-	(cd "$$staging/$$name" && sha256sum cellbox-api cellbox-container-agent cellbox-node-controller cellbox-runsc-wrapper cellbox-runtime-config > SHA256SUMS)
+	(cd "$$staging/$$name" && sha256sum cellbox-api cellbox-container-agent cellbox-node-controller cellbox-runsc-wrapper > SHA256SUMS)
 	tar --sort=name --mtime="@$$epoch" --owner=0 --group=0 --numeric-owner -C "$$staging" -cf - "$$name" | gzip -n > "dist/$$name.tar.gz"
 	(cd dist && sha256sum "$$name.tar.gz" > "$$name.tar.gz.sha256")
 	printf 'Package: dist/%s.tar.gz\n' "$$name"

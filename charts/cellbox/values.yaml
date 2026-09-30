@@ -8,26 +8,12 @@ runtimeClass:
 controller:
   enabled: true
   image: gaojingyu628/cellbox-controller@sha256:519e622384ffc1227847ec30b575343ba80552a18036c6d13be31cf259ec422e
-  # Defaults to image, so controller upgrades also upgrade the node adapter.
-  adapterImage: ""
   imagePullPolicy: IfNotPresent
   name: cellbox-controller
   serviceAccountName: cellbox-controller
   criDirectory: /run/containerd
   criSocket: /run/containerd/containerd.sock
-  # Install through Kubernetes on systemd-managed Linux/containerd nodes.
-  # Set enabled=false when the node runtime is provisioned externally.
-  runtimeInstaller:
-    enabled: true
-    mode: auto
-    containerdConfig: ""
-    service: ""
-    platform: systrap
-    command: []
-    gvisor:
-      enabled: false
-      version: "20260914.0"
-      releaseURL: https://storage.googleapis.com/gvisor/releases/release
+  # Provision gVisor, the wrapper, and runtime configuration manually on each node.
   nodeSelector:
     kubernetes.io/os: linux
     kubernetes.io/arch: amd64

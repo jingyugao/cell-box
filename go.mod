@@ -5,7 +5,6 @@ go 1.26.0
 require (
 	github.com/google/go-containerregistry v0.22.1
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
-	github.com/pelletier/go-toml/v2 v2.2.4
 	golang.org/x/sys v0.47.0
 	google.golang.org/grpc v1.79.3
 	k8s.io/api v0.36.0
