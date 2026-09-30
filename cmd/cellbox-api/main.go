@@ -29,7 +29,7 @@ func main() {
 }
 
 func run(args []string) error {
-	flags := flag.NewFlagSet("cellbox", flag.ContinueOnError)
+	flags := flag.NewFlagSet("cellbox-api", flag.ContinueOnError)
 	configPath := flags.String("config", "", "path to the Cellbox JSON configuration")
 	kubeconfig := flags.String("kubeconfig", "", "explicit kubeconfig path (default: in-cluster credentials)")
 	dockerBinary := flags.String("docker", "docker", "Docker CLI executable")
@@ -45,7 +45,7 @@ func run(args []string) error {
 		return errors.New("unexpected positional arguments")
 	}
 	if *showVersion {
-		fmt.Println(version.String("cellbox"))
+		fmt.Println(version.String("cellbox-api"))
 		return nil
 	}
 	if *configPath == "" {

@@ -35,7 +35,7 @@ func run() error {
 	flag.StringVar(&socket, "cri-socket", "/run/k3s/containerd/containerd.sock", "CRI Unix socket")
 	flag.Parse()
 	if showVersion {
-		fmt.Println(version.String("resumablepod-controller"))
+		fmt.Println(version.String("cellbox-node-controller"))
 		return nil
 	}
 	if nodeName == "" {

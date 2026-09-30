@@ -154,7 +154,7 @@ func PrepareBuildKit(ctx context.Context, opts BuildKitOptions) (BuildKitResult,
 			}
 		}
 	}
-	dockerfile := "FROM " + opts.Base + "\nLABEL " + ManagedLabel + "=\"" + ImageVersion + "\" " + IdentityLabel + "=\"" + key + "\"\nCOPY --chmod=0755 guest /opt/cellbox/bin/cellbox-guest\n"
+	dockerfile := "FROM " + opts.Base + "\nLABEL " + ManagedLabel + "=\"" + ImageVersion + "\" " + IdentityLabel + "=\"" + key + "\"\nCOPY --chmod=0755 guest /opt/cellbox/bin/cellbox-container-agent\n"
 	if opts.ProductDir != "" || opts.Manifest != "" {
 		dockerfile += "COPY product/ /opt/product/\n"
 	}

@@ -23,7 +23,7 @@ func main() {
 
 func mainErr() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: cellbox-guest serve|token|tool")
+		return errors.New("usage: cellbox-container-agent serve|token|tool")
 	}
 	switch os.Args[1] {
 	case "__child":
@@ -40,7 +40,7 @@ func mainErr() error {
 		return err
 	case "tool":
 		if len(os.Args) < 3 {
-			return errors.New("usage: cellbox-guest tool <id> [args...]")
+			return errors.New("usage: cellbox-container-agent tool <id> [args...]")
 		}
 		r, err := guest.ToolClient(os.Args[2], os.Args[3:])
 		if err != nil {

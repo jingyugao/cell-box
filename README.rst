@@ -19,8 +19,8 @@ Build
 -----
 
 Use Go 1.26 or later. ``make build`` writes Linux binaries into
-``dist/release/``: ``cellbox``, ``cellbox-guest``, the
-ResumablePod controller and runtime adapter. ``make check``
+``dist/release/``: ``cellbox-api``, ``cellbox-container-agent``,
+``cellbox-node-controller``, and ``cellbox-runsc-wrapper``. ``make check``
 runs Go race tests, vet, and shell syntax checks.
 
 Configuration and local start
@@ -37,7 +37,7 @@ The service defaults to ``127.0.0.1:8090`` and stores state under ``data/``.
 After filling the sample configuration and token environment, start the API
 with::
 
-    ./dist/release/cellbox --config config/sample.json
+    ./dist/release/cellbox-api --config config/sample.json
 
 Only configured providers are initialized. A Docker-only configuration does
 not contact Kubernetes. ``--docker`` selects a Docker CLI binary. Kubernetes

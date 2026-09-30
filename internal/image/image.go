@@ -23,7 +23,7 @@ import (
 const (
 	ManagedLabel  = "cellbox.managed-image"
 	IdentityLabel = "cellbox.image-key"
-	ImageVersion  = "1"
+	ImageVersion  = "2"
 )
 
 var imageIDPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
@@ -224,7 +224,7 @@ func (b *Builder) Prepare(ctx context.Context, opts Options) (result Result, err
 		}
 	}()
 	// Fixed instructions prevent payload or base image names from injecting Dockerfile commands.
-	dockerfile := "FROM " + localBaseTag + "\nLABEL " + ManagedLabel + "=\"" + ImageVersion + "\" " + IdentityLabel + "=\"" + key + "\"\nCOPY --chmod=0755 guest /opt/cellbox/bin/cellbox-guest\n"
+	dockerfile := "FROM " + localBaseTag + "\nLABEL " + ManagedLabel + "=\"" + ImageVersion + "\" " + IdentityLabel + "=\"" + key + "\"\nCOPY --chmod=0755 guest /opt/cellbox/bin/cellbox-container-agent\n"
 	if opts.ProductDir != "" || opts.Manifest != "" {
 		dockerfile += "COPY product/ /opt/product/\n"
 	}

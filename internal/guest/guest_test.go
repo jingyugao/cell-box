@@ -412,8 +412,8 @@ func TestRunTimeoutAndOutput(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds guest executable")
 	}
-	bin := filepath.Join(t.TempDir(), "cellbox-guest")
-	b := exec.Command("go", "build", "-o", bin, "cellbox.local/cellbox/cmd/cellbox-guest")
+	bin := filepath.Join(t.TempDir(), "cellbox-container-agent")
+	b := exec.Command("go", "build", "-o", bin, "cellbox.local/cellbox/cmd/cellbox-container-agent")
 	if out, err := b.CombinedOutput(); err != nil {
 		t.Fatalf("build guest: %v: %s", err, out)
 	}

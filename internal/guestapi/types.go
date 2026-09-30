@@ -2,7 +2,7 @@
 package guestapi
 
 const Port = 40000
-const Binary = "/opt/cellbox/bin/cellbox-guest"
+const Binary = "/opt/cellbox/bin/cellbox-container-agent"
 const TokenPath = "/run/cellbox/control-token"
 
 type Identity struct {
