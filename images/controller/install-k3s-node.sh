@@ -1,5 +1,5 @@
 #!/bin/sh
-# Runs as a privileged DaemonSet init container. gVisor itself is preinstalled.
+# Configures K3s from a privileged DaemonSet init container. gVisor is preinstalled.
 set -eu
 
 host=/host

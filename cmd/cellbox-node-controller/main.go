@@ -32,7 +32,7 @@ func run() error {
 	flag.StringVar(&nodeName, "node", "", "Kubernetes node name (must equal kubernetes.io/hostname)")
 	flag.StringVar(&namespace, "namespace", "cell-box", "managed Cellbox namespace")
 	flag.StringVar(&leaderNamespace, "leader-election-namespace", "", "leader election namespace (defaults to managed namespace)")
-	flag.StringVar(&socket, "cri-socket", "/run/k3s/containerd/containerd.sock", "CRI Unix socket")
+	flag.StringVar(&socket, "cri-socket", "/run/containerd/containerd.sock", "CRI Unix socket")
 	flag.Parse()
 	if showVersion {
 		fmt.Println(version.String("cellbox-node-controller"))

@@ -1,15 +1,21 @@
 controller:
-  image: docker.io/gaojingyu628/cellbox-controller@sha256:0a5ba6afc1dce586cd7d2af94d845507013c148c7edd4938249371819d18cd90
-  adapterImage: docker.io/gaojingyu628/cellbox-controller@sha256:0a5ba6afc1dce586cd7d2af94d845507013c148c7edd4938249371819d18cd90
+  image: docker.io/gaojingyu628/cellbox-controller@sha256:4eb9afdecf8e88fc552693685a6699a4a9e2a4e0458d30d15c5e83035eadf4d3
+  adapterImage: docker.io/gaojingyu628/cellbox-controller@sha256:4eb9afdecf8e88fc552693685a6699a4a9e2a4e0458d30d15c5e83035eadf4d3
   imagePullPolicy: IfNotPresent
   name: cellbox-controller
   serviceAccountName: cellbox-controller
-  criDirectory: /run/k3s/containerd
+  criDirectory: /run/containerd
+  criSocket: /run/containerd/containerd.sock
+  # Generic Kubernetes nodes must have gVisor and the Cellbox runtime handler
+  # configured. Enable an installer only for a supported node environment.
+  runtimeInstaller:
+    enabled: false
+    command: []
   nodeSelector: {}
   tolerations: []
 
 api:
-  enabled: false
+  enabled: true
   namespace: cell-box
   image: docker.io/gaojingyu628/cellbox-api@sha256:689557f6ad817647e590498a0718e73d272597e9b7e71dfb76f96c9a4d637e0b
   imagePullPolicy: IfNotPresent

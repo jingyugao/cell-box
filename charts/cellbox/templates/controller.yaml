@@ -1,3 +1,6 @@
+{{- if and .Values.controller.runtimeInstaller.enabled (empty .Values.controller.runtimeInstaller.command) }}
+{{- fail "controller.runtimeInstaller.command is required when its installer is enabled" }}
+{{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -25,17 +28,20 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.controller.runtimeInstaller.enabled }}
       initContainers:
         - name: install-runtime-adapter
           image: {{ .Values.controller.adapterImage | quote }}
           imagePullPolicy: {{ .Values.controller.imagePullPolicy }}
-          command: [/bin/sh, /usr/local/bin/install-k8s-node.sh]
+          command:
+            {{- toYaml .Values.controller.runtimeInstaller.command | nindent 12 }}
           securityContext:
             privileged: true
             runAsUser: 0
           volumeMounts:
             - name: host-root
               mountPath: /host
+      {{- end }}
       containers:
         - name: controller
           image: {{ .Values.controller.image | quote }}
@@ -45,6 +51,7 @@ spec:
             - --namespace={{ .Release.Namespace }}
             - --leader-election-namespace={{ .Release.Namespace }}
             - --host-mount-namespace
+            - --cri-socket={{ .Values.controller.criSocket }}
           env:
             - name: NODE_NAME
               valueFrom:
@@ -64,10 +71,12 @@ spec:
               mountPath: /usr/local/bin/runsc
               readOnly: true
       volumes:
+        {{- if .Values.controller.runtimeInstaller.enabled }}
         - name: host-root
           hostPath:
             path: /
             type: Directory
+        {{- end }}
         - name: cri-directory
           hostPath:
             path: {{ .Values.controller.criDirectory }}

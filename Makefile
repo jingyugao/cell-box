@@ -24,7 +24,7 @@ build:
 	CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags "$$ldflags" -o "$$out/cellbox-node-controller" ./cmd/cellbox-node-controller
 	CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags "$$ldflags" -o "$$out/cellbox-runsc-wrapper" ./cmd/cellbox-runsc-wrapper
 	cp -r charts examples images "$$out/"
-	rm -f -- "$$out/charts/cellbox/values_local.yaml"
+	rm -f -- "$$out/charts/cellbox/values_local.yaml" "$$out/charts/cellbox/values-k3s.yaml" "$$out/images/controller/install-k8s-node.sh"
 	mkdir -p "$$out/test" "$$out/config" "$$out/api"
 	cp -r test/scripts "$$out/test/"
 	cp config/sample.json "$$out/config/"

@@ -1,9 +1,0 @@
-# Portable k3s settings. Supply node selection and secrets for your cluster.
-api:
-  enabled: true
-  namespace: cell-box
-  storageClassName: local-path
-
-# Enable image building with buildkit.enabled=true and a writable
-# buildkit.repository belonging to the deployment's operator.
-# Sandbox images and registry credentials belong to the operator.
