@@ -1,10 +1,11 @@
 {{- if .Values.api.enabled }}
-{{- $existingClaim := lookup "v1" "PersistentVolumeClaim" .Values.api.namespace .Values.api.dataClaim }}
+{{- $apiNamespace := include "cellbox.apiNamespace" . }}
+{{- $existingClaim := lookup "v1" "PersistentVolumeClaim" $apiNamespace .Values.api.dataClaim }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: {{ .Values.api.dataClaim }}
-  namespace: {{ .Values.api.namespace }}
+  namespace: {{ $apiNamespace }}
   annotations:
     helm.sh/resource-policy: keep
 spec:
@@ -23,7 +24,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: cellbox-api
-  namespace: {{ .Values.api.namespace }}
+  namespace: {{ $apiNamespace }}
 spec:
   replicas: {{ .Values.api.replicas }}
   strategy:
@@ -35,9 +36,15 @@ spec:
     metadata:
       labels:
         app: cellbox-api
-      {{- if .Values.buildkit.enabled }}
+      {{- if or .Values.buildkit.enabled .Values.api.manageSecrets }}
       annotations:
+        {{- if .Values.api.manageSecrets }}
+        checksum/api-config: {{ toJson .Values.api.config | sha256sum }}
+        checksum/client-tokens: {{ toJson .Values.api.clientTokens | sha256sum }}
+        {{- end }}
+        {{- if .Values.buildkit.enabled }}
         checksum/buildkit-config: {{ include (print $.Template.BasePath "/buildkit-config.yaml") . | sha256sum }}
+        {{- end }}
       {{- end }}
     spec:
       serviceAccountName: cellbox-api
@@ -57,7 +64,7 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: prepare-data-dir
-          image: busybox:1.36
+          image: {{ include "cellbox.image" (dict "root" . "image" .Values.api.initImage) | quote }}
           command: [/bin/sh, -ec, 'chown 10001:10001 /var/lib/cellbox && chmod 0700 /var/lib/cellbox']
           securityContext:
             runAsUser: 0
@@ -72,7 +79,7 @@ spec:
               mountPath: /var/lib/cellbox
         {{- if .Values.buildkit.enabled }}
         - name: prepare-buildkit-dirs
-          image: busybox:1.36
+          image: {{ include "cellbox.image" (dict "root" . "image" .Values.api.initImage) | quote }}
           # fsGroup leaves a setgid group outside RootlessKit's UID/GID mapping.
           # Overlayfs needs the cache directories owned by mapped IDs.
           command: [/bin/sh, -ec, 'chown 1000:1000 /run/cellbox-buildkit /home/user/.local/share/buildkit && chmod 0770 /run/cellbox-buildkit && chmod 0700 /home/user/.local/share/buildkit && chmod g-s /home/user/.local/share/buildkit']
@@ -92,7 +99,7 @@ spec:
         {{- end }}
       containers:
         - name: api
-          image: {{ .Values.api.image | quote }}
+          image: {{ include "cellbox.image" (dict "root" . "image" .Values.api.image) | quote }}
           imagePullPolicy: {{ .Values.api.imagePullPolicy }}
           command: [/usr/local/bin/cellbox-api]
           args:
@@ -111,6 +118,7 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ .Values.api.clientTokensSecret }}
+          {{- if .Values.api.ossCredentialsSecret }}
           env:
             - name: OSS_ACCESS_KEY
               valueFrom:
@@ -122,6 +130,7 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.api.ossCredentialsSecret }}
                   key: OSS_SECRET_KEY
+          {{- end }}
           ports:
             - name: http
               containerPort: 8090
@@ -156,7 +165,7 @@ spec:
             {{- end }}
         {{- if .Values.buildkit.enabled }}
         - name: buildkit
-          image: {{ .Values.buildkit.image | quote }}
+          image: {{ include "cellbox.image" (dict "root" . "image" .Values.buildkit.image) | quote }}
           imagePullPolicy: {{ .Values.buildkit.imagePullPolicy }}
           args:
             - --addr=unix:///run/cellbox-buildkit/buildkitd.sock
@@ -218,7 +227,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: cellbox-api
-  namespace: {{ .Values.api.namespace }}
+  namespace: {{ $apiNamespace }}
 spec:
   selector:
     app: cellbox-api

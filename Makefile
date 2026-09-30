@@ -15,7 +15,7 @@ build:
 	module=$$(go list -m)
 	if [[ -n $$(git status --porcelain) ]]; then revision=$$revision-dirty; fi
 	mkdir -p "$$out"
-	for obsolete in box-service cellbox cellbox-guest cellbox-image cellbox-gateway resumablepod-controller resumablepod-runtime resumablepod-gateway server Dockerfile GatewayDockerfile; do
+	for obsolete in box-service cellbox cellbox-guest cellbox-image cellbox-gateway resumablepod-controller resumablepod-runtime resumablepod-gateway server Dockerfile GatewayDockerfile README.rst; do
 		if [[ -f "$$out/$$obsolete" ]]; then rm -- "$$out/$$obsolete"; fi
 	done
 	ldflags="-s -w -X $$module/internal/version.Version=$$version -X $$module/internal/version.Revision=$$revision"
@@ -32,7 +32,7 @@ build:
 	cp -r test/scripts "$$out/test/"
 	cp config/sample.json "$$out/config/"
 	cp api/openapi.yaml "$$out/api/"
-	cp LICENSE VERSION README.rst "$$out/"
+	cp LICENSE VERSION README.md "$$out/"
 	docs_out="$$out/tmp/docs"
 	[[ ! -L $$docs_out ]] || { echo "Refusing to replace symlinked documentation directory: $$docs_out" >&2; exit 1; }
 	mkdir -p "$$docs_out"

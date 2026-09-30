@@ -1,9 +1,10 @@
 {{- if .Values.api.enabled }}
+{{- $apiNamespace := include "cellbox.apiNamespace" . }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: cellbox-api
-  namespace: {{ .Values.api.namespace }}
+  namespace: {{ $apiNamespace }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -29,7 +30,7 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: cellbox-api
-    namespace: {{ .Values.api.namespace }}
+    namespace: {{ $apiNamespace }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role

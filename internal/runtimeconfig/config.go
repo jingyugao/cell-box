@@ -5,6 +5,7 @@ package runtimeconfig
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
@@ -29,20 +30,39 @@ func Version(config map[string]any) (int64, error) {
 
 func Handler(config map[string]any) map[string]any {
 	for _, plugin := range []string{"io.containerd.grpc.v1.cri", "io.containerd.cri.v1.runtime"} {
-		value := config
-		for _, key := range []string{"plugins", plugin, "containerd", "runtimes", "runsc-recoverable"} {
-			value, _ = value[key].(map[string]any)
-		}
-		if value != nil {
+		if value := handlerAt(config, plugin); value != nil {
 			return value
 		}
 	}
 	return nil
 }
 
+func handlerAt(config map[string]any, plugin string) map[string]any {
+	value := config
+	for _, key := range []string{"plugins", plugin, "containerd", "runtimes", "runsc-recoverable"} {
+		value, _ = value[key].(map[string]any)
+	}
+	return value
+}
+
 func IsCellbox(handler map[string]any) bool {
 	options, _ := handler["options"].(map[string]any)
 	return handler["runtime_type"] == "io.containerd.runsc.v1" && options["ConfigPath"] == "/var/lib/cellbox/runsc.toml"
+}
+
+// Ready reports whether the loaded handler has exactly the settings we install.
+// Wrapper and runsc.toml changes are read by new shims, without a daemon restart.
+func Ready(config map[string]any) bool {
+	v, err := Version(config)
+	if err != nil {
+		return false
+	}
+	plugin := "io.containerd.cri.v1.runtime"
+	if v == 2 {
+		plugin = "io.containerd.grpc.v1.cri"
+	}
+	expected, _ := Decode([]byte(runtimeBlock(plugin)))
+	return reflect.DeepEqual(handlerAt(config, plugin), handlerAt(expected, plugin))
 }
 
 func stripManaged(data string) (string, error) {

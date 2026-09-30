@@ -1,6 +1,15 @@
+# Registry for relative image names; fully qualified references take precedence.
+imageRegistry: docker.io
+
+crd:
+  create: true
+runtimeClass:
+  create: true
 controller:
-  image: docker.io/gaojingyu628/cellbox-controller@sha256:f31ff1bb57f108318b08e0f2048dd635dfbd7a9ba87bb7a4557c4f8df1cb6c87
-  adapterImage: docker.io/gaojingyu628/cellbox-controller@sha256:f31ff1bb57f108318b08e0f2048dd635dfbd7a9ba87bb7a4557c4f8df1cb6c87
+  enabled: true
+  image: gaojingyu628/cellbox-controller@sha256:519e622384ffc1227847ec30b575343ba80552a18036c6d13be31cf259ec422e
+  # Defaults to image, so controller upgrades also upgrade the node adapter.
+  adapterImage: ""
   imagePullPolicy: IfNotPresent
   name: cellbox-controller
   serviceAccountName: cellbox-controller
@@ -16,7 +25,7 @@ controller:
     platform: systrap
     command: []
     gvisor:
-      enabled: true
+      enabled: false
       version: "20260914.0"
       releaseURL: https://storage.googleapis.com/gvisor/releases/release
   nodeSelector:
@@ -26,21 +35,29 @@ controller:
 
 api:
   enabled: true
-  namespace: cell-box
-  image: docker.io/gaojingyu628/cellbox-api@sha256:689557f6ad817647e590498a0718e73d272597e9b7e71dfb76f96c9a4d637e0b
+  namespace: ""
+  image: gaojingyu628/cellbox-api@sha256:37cec04f62d63b4c43a1366cf24394713c73f8e111a7da751dfbe327510fdf2c
+  initImage: docker.io/library/busybox:1.36
   imagePullPolicy: IfNotPresent
   replicas: 1
   nodeSelector: {}
   configSecret: cellbox-api-config
   clientTokensSecret: cellbox-api-client-tokens
-  ossCredentialsSecret: cellbox-oss-credentials
+  # Set false to use the existing configSecret and clientTokensSecret.
+  manageSecrets: true
+  # Overrides for the API JSON configuration; defaults start with no profiles.
+  config: {}
+  # Map of tokenEnv names to tokens (>=32 bytes); omitted tokens are generated.
+  clientTokens: {}
+  # Optional external credentials for configured archive tools.
+  ossCredentialsSecret: ""
   dataClaim: cellbox-api-data
   storageClassName: ""
   storageSize: 10Gi
 
 buildkit:
   enabled: false
-  image: moby/buildkit:v0.33.0-rootless
+  image: docker.io/moby/buildkit:v0.33.0-rootless
   imagePullPolicy: IfNotPresent
   repository: ""
   registryHost: ""

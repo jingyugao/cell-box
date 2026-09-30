@@ -26,8 +26,12 @@ func run() error {
 	host := flag.String("host", "/host", "host filesystem mount")
 	adopt := flag.Bool("adopt", false, "adopt a legacy Cellbox-owned drop-in")
 	versionOnly := flag.Bool("version-only", false, "print active config version")
+	readyOnly := flag.Bool("ready-only", false, "print whether the loaded runtime handler needs no restart")
 	flag.Parse()
 	seen := map[string]bool{}
+	ready := false
+	var activeVersion int64
+	handlers := 0
 	var load func(string) (map[string]any, error)
 	load = func(path string) (map[string]any, error) {
 		if seen[path] {
@@ -42,11 +46,28 @@ func run() error {
 		if err != nil {
 			return nil, err
 		}
+		if path == *configPath {
+			activeVersion, err = runtimeconfig.Version(config)
+			if err != nil {
+				return nil, err
+			}
+		}
 		if handler := runtimeconfig.Handler(config); handler != nil && (!*adopt || !runtimeconfig.IsCellbox(handler)) {
 			// Our own marked section is safe to reconcile on subsequent runs.
 			if !runtimeconfig.IsCellbox(handler) || !containsManaged(data) {
 				return nil, fmt.Errorf("unmanaged runsc-recoverable handler in %s", path)
 			}
+		}
+		if runtimeconfig.Handler(config) != nil {
+			handlers++
+			if handlers > 1 {
+				return nil, fmt.Errorf("multiple runsc-recoverable handlers in containerd config")
+			}
+			// Imported fragments may omit their version; inherit the root version.
+			if _, ok := config["version"]; !ok {
+				config["version"] = activeVersion
+			}
+			ready = runtimeconfig.Ready(config)
 		}
 		if disabled, ok := config["disabled_plugins"].([]any); ok {
 			for _, item := range disabled {
@@ -82,6 +103,10 @@ func run() error {
 	config, err := load(*configPath)
 	if err != nil {
 		return err
+	}
+	if *readyOnly {
+		fmt.Println(ready)
+		return nil
 	}
 	if *versionOnly {
 		v, err := runtimeconfig.Version(config)

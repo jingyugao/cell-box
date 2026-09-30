@@ -14,7 +14,7 @@ controller_pod() {
   "${k[@]}" get pods -l app=cellbox-controller --field-selector="spec.nodeName=$node" -o json | \
     jq -er '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name'
 }
-unit=$(jq -r '.spec.template.spec.initContainers[] | select(.name == "install-runtime-adapter") | .env[] | select(.name == "CELLBOX_RUNTIME_SERVICE") | .value' "$evidence/daemonset.json")
+unit=$(jq -r '.spec.template.spec.initContainers[] | select(.name == "install-runtime-adapter") | .env[] | select(.name == "CELLBOX_RUNTIME_SERVICE") | .value // ""' "$evidence/daemonset.json")
 if [[ -z $unit ]]; then
   unit=$("${k[@]}" exec "$(controller_pod)" -c controller -- nsenter --target=1 --mount --root -- /bin/sh -c '
     if test -f /var/lib/rancher/k3s/agent/etc/containerd/config.toml; then
@@ -22,10 +22,14 @@ if [[ -z $unit ]]; then
     else echo containerd.service; fi')
 fi
 runtime_started() {
+
+  "${k[@]}" exec "$(controller_pod)" -c controller -- nsenter --target=1 --mount --root -- \
+    /bin/systemctl is-active --quiet "$unit"
   "${k[@]}" exec "$(controller_pod)" -c controller -- nsenter --target=1 --mount --root -- \
     /bin/systemctl show "$unit" --property=ActiveEnterTimestampMonotonic --value
 }
 runtime_started > "$evidence/runtime-start-before.txt"
+[[ $(cat "$evidence/runtime-start-before.txt") =~ ^[1-9][0-9]*$ ]]
 "${k[@]}" exec "$(controller_pod)" -c controller -- nsenter --target=1 --mount --root -- \
   /usr/local/bin/runsc --version > "$evidence/runsc-version.txt"
 "${k[@]}" logs "$(controller_pod)" -c install-runtime-adapter > "$evidence/install-before.log"
