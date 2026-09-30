@@ -5,10 +5,17 @@ controller:
 api:
   enabled: true
   namespace: cell-box
-  image: 192.168.133.1:5001/cellbox-api@sha256:eaeca75862d75f996381661c6a0c02831bce2cd3e614cd6b437bb3dfeca8fbd4
+  image: 192.168.133.1:5001/cellbox-api@sha256:a31f321fa16dbf9d31134dc3b68446a7a8fd1627abf9a467c6abb0c6ab8827db
   nodeSelector:
     kubernetes.io/hostname: ubuntu-server
   storageClassName: local-path
+
+buildkit:
+  enabled: true
+  image: 192.168.133.1:5001/cellbox-buildkit@sha256:b23c7d92ac7956eb94334f21a6904751c4fed3df76bbc894399618706e421894
+  repository: 192.168.133.1:5001/cellbox-prepared
+  registryHost: 192.168.133.1:5001
+  registryHTTP: true
 
 gatewayAccess:
   enabled: true

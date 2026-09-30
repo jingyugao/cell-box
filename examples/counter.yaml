@@ -4,7 +4,7 @@ metadata:
   name: counter
   namespace: cell-box
 spec:
-  nodeName: replace-with-node-name # Or use hack/create-example.sh on the target node.
+  nodeName: replace-with-node-name # Set to the target node's kubernetes.io/hostname label.
   desiredState: Running
   startupTimeoutSeconds: 45
   container:

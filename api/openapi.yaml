@@ -743,6 +743,43 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       summary: Create a box asynchronously
+  /v1/images:
+    post:
+      operationId: buildImage
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [baseImage]
+              additionalProperties: false
+              properties:
+                baseImage:
+                  description: Immutable repository@sha256:digest base image.
+                  type: string
+                platform:
+                  description: Optional Linux platform such as linux/amd64.
+                  type: string
+                manifest:
+                  description: Optional JSON installed at /opt/product/manifest.json.
+                  type: string
+                product:
+                  description: Optional plain tar archive of regular product files.
+                  type: string
+                  format: binary
+        required: true
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+          description: Build queued; the operation result contains image, digest, tag and key.
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Build and publish a Cellbox image with BuildKit
   /v1/boxes/{id}:
     get:
       operationId: getBox

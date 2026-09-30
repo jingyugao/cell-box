@@ -2,6 +2,7 @@ package service
 
 import (
 	"cellbox.local/cellbox/internal/guestapi"
+	"cellbox.local/cellbox/internal/image"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -42,6 +43,11 @@ func (c *Config) Validate() error {
 	}
 	if c.StartupTimeoutSeconds < 1 || c.StartupTimeoutSeconds > 600 {
 		return fmt.Errorf("startupTimeoutSeconds must be 1..600")
+	}
+	if c.ImageBuild != (ImageBuildConfig{}) {
+		if !strings.HasPrefix(c.ImageBuild.Address, "unix:///") || !image.ValidRepository(c.ImageBuild.Repository) || c.ImageBuild.GuestBinary == "" {
+			return fmt.Errorf("imageBuild requires a Unix BuildKit address, registry repository, and guest binary")
+		}
 	}
 	if c.PublicURL != "" {
 		u, e := url.Parse(c.PublicURL)

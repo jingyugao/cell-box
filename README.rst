@@ -19,7 +19,7 @@ Build
 -----
 
 Use Go 1.26 or later. ``make build`` writes Linux binaries into
-``dist/release/``: ``cellbox``, ``cellbox-guest``, ``cellbox-image``, the
+``dist/release/``: ``cellbox``, ``cellbox-guest``, the
 ResumablePod controller and runtime adapter, and a test server. ``make check``
 runs Go race tests, vet, and shell syntax checks.
 
@@ -32,7 +32,6 @@ client token environment variables named by each ``clients[].tokenEnv``;
 provide distinct random tokens of at least 32 bytes. Configure at least one
 profile and select an immutable prepared image reference. Docker profiles use
 a local ``sha256:<64-hex>`` image ID or ``repository@sha256:<64-hex>``. The
-``cellbox-image`` helper prepares an image and returns its local image ID.
 The service defaults to ``127.0.0.1:8090`` and stores state under ``data/``.
 
 After filling the sample configuration and token environment, start the API

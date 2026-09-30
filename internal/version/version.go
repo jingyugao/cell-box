@@ -8,7 +8,7 @@ import (
 	"runtime"
 )
 
-// Version and Revision are supplied by hack/build.sh. Direct go builds are dev builds.
+// Version and Revision are supplied by make build. Direct go builds are dev builds.
 var Version = "dev"
 var Revision = "unknown"
 
