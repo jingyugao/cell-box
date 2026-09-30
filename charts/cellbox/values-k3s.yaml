@@ -1,11 +1,11 @@
 controller:
-  image: 192.168.133.1:5001/cellbox-controller@sha256:d2893e8325748211f308ecf07dbf6b1075b0e48f516d6340f1b0412b014ef0ff
-  adapterImage: 192.168.133.1:5001/cellbox-controller@sha256:d2893e8325748211f308ecf07dbf6b1075b0e48f516d6340f1b0412b014ef0ff
+  image: 192.168.133.1:5001/cellbox-controller@sha256:feba48817d6134eae986483460e97be2e6b8fe9c78a9b8718c29f74a7e12bcde
+  adapterImage: 192.168.133.1:5001/cellbox-controller@sha256:feba48817d6134eae986483460e97be2e6b8fe9c78a9b8718c29f74a7e12bcde
 
 api:
   enabled: true
   namespace: cell-box
-  image: 192.168.133.1:5001/cellbox-api@sha256:a31f321fa16dbf9d31134dc3b68446a7a8fd1627abf9a467c6abb0c6ab8827db
+  image: 192.168.133.1:5001/cellbox-api@sha256:77b03167111c221a6d2b163e5fe5e4427ca4102dfc420ded4dd34ba62e57f0db
   nodeSelector:
     kubernetes.io/hostname: ubuntu-server
   storageClassName: local-path
