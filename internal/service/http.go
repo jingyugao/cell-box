@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -118,6 +119,7 @@ func (s *Service) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET /v1/boxes", s.listBoxes)
 	mux.HandleFunc("GET /v1/boxes/{id}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
 		b, err := s.box(clientID(r), r.PathValue("id"))
 		if err != nil {
 			fail(w, err)
@@ -236,21 +238,74 @@ func (s *Service) listProfiles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 func (s *Service) listBoxes(w http.ResponseWriter, r *http.Request) {
-	out := []Box{}
-	err := s.store.View(func(st State) error {
-		for _, b := range st.Boxes {
-			if b.ClientID == clientID(r) {
-				out = append(out, b.Box)
+	w.Header().Set("Cache-Control", "no-store")
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	ids := r.URL.Query()["id"]
+	if len(ids) > 0 {
+		seen := make(map[string]bool, len(ids))
+		unique := make([]string, 0, len(ids))
+		for _, id := range ids {
+			if !seen[id] {
+				seen[id] = true
+				unique = append(unique, id)
 			}
 		}
-		return nil
-	})
+		ids = unique
+	}
+	records, err := s.store.BoxRecords(clientID(r), ids)
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
-	writeJSON(w, 200, out)
+	boxes := make([]Box, len(records))
+	workers := 8
+	if len(records) < workers {
+		workers = len(records)
+	}
+	if workers > 0 {
+		jobs := make(chan int, len(records))
+		for i := range records {
+			jobs <- i
+		}
+		close(jobs)
+		var wg sync.WaitGroup
+		var once sync.Once
+		var observeErr error
+		for n := 0; n < workers; n++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := range jobs {
+					if ctx.Err() != nil {
+						return
+					}
+					box, err := s.observe(ctx, records[i])
+					if err != nil {
+						once.Do(func() { observeErr = err; cancel() })
+						return
+					}
+					boxes[i] = box
+				}
+			}()
+		}
+		wg.Wait()
+		if observeErr != nil {
+			fail(w, observeErr)
+			return
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		fail(w, err)
+		return
+	}
+	sort.Slice(boxes, func(i, j int) bool {
+		if boxes[i].CreatedAt.Equal(boxes[j].CreatedAt) {
+			return boxes[i].ID < boxes[j].ID
+		}
+		return boxes[i].CreatedAt.Before(boxes[j].CreatedAt)
+	})
+	writeJSON(w, 200, boxes)
 }
 func (s *Service) operation(client, id string) (Operation, error) {
 	var op Operation
@@ -363,7 +418,7 @@ func (s *Service) createLease(w http.ResponseWriter, r *http.Request) {
 		if err = busy(st, b, false); err != nil {
 			return err
 		}
-		if b.Box.State != "ready" {
+		if b.Box.Phase != "running" {
 			return apiError("CONFLICT", "Lease requires a ready box; request resume explicitly")
 		}
 		st.Leases[lease.ID] = lease
@@ -395,7 +450,7 @@ func (s *Service) renewLease(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if !lease.ExpiresAt.After(time.Now()) || b.Box.State != "ready" {
+		if !lease.ExpiresAt.After(time.Now()) || b.Box.Phase != "running" {
 			return apiError("CONFLICT", "Expired or inactive lease cannot be renewed")
 		}
 		lease.ExpiresAt = time.Now().Add(time.Duration(in.TTLSeconds) * time.Second)
@@ -442,7 +497,7 @@ func (s *Service) beginIO(client, id string) (boxRecord, func(), error) {
 		if err = busy(&st, b, false); err != nil {
 			return err
 		}
-		if b.Box.State != "ready" && b.Box.State != "staged" {
+		if b.Box.Phase != "running" && b.Box.Phase != "staged" {
 			return apiError("CONFLICT", "Box is not ready")
 		}
 		return nil

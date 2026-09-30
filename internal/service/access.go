@@ -71,7 +71,7 @@ func (s *Service) createRoute(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if b.Box.State == "deleted" || b.Box.State == "deleting" {
+		if b.Box.Phase == "deleted" || b.Box.Phase == "deleting" {
 			return apiError("CONFLICT", "Box is deleted")
 		}
 		for _, existing := range st.Routes {
@@ -440,7 +440,7 @@ func (s *Service) gateway(w http.ResponseWriter, r *http.Request, routeID, tail 
 				return err
 			}
 		}
-		if b.Box.State != "ready" {
+		if b.Box.Phase != "running" {
 			return apiError("CONFLICT", "Box is not ready; request resume explicitly")
 		}
 		return nil

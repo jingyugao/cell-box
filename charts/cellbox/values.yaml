@@ -1,17 +1,33 @@
 controller:
-  image: cellbox-controller:v0.1.0
-  adapterImage: cellbox-controller:v0.1.0
+  image: docker.io/gaojingyu628/cellbox-controller@sha256:f31ff1bb57f108318b08e0f2048dd635dfbd7a9ba87bb7a4557c4f8df1cb6c87
+  adapterImage: docker.io/gaojingyu628/cellbox-controller@sha256:f31ff1bb57f108318b08e0f2048dd635dfbd7a9ba87bb7a4557c4f8df1cb6c87
   imagePullPolicy: IfNotPresent
   name: cellbox-controller
   serviceAccountName: cellbox-controller
-  criDirectory: /run/k3s/containerd
-  nodeSelector: {}
+  criDirectory: /run/containerd
+  criSocket: /run/containerd/containerd.sock
+  # Install through Kubernetes on systemd-managed Linux/containerd nodes.
+  # Set enabled=false when the node runtime is provisioned externally.
+  runtimeInstaller:
+    enabled: true
+    mode: auto
+    containerdConfig: ""
+    service: ""
+    platform: systrap
+    command: []
+    gvisor:
+      enabled: true
+      version: "20260914.0"
+      releaseURL: https://storage.googleapis.com/gvisor/releases/release
+  nodeSelector:
+    kubernetes.io/os: linux
+    kubernetes.io/arch: amd64
   tolerations: []
 
 api:
-  enabled: false
+  enabled: true
   namespace: cell-box
-  image: cellbox-api:v0.1.0
+  image: docker.io/gaojingyu628/cellbox-api@sha256:689557f6ad817647e590498a0718e73d272597e9b7e71dfb76f96c9a4d637e0b
   imagePullPolicy: IfNotPresent
   replicas: 1
   nodeSelector: {}
@@ -29,20 +45,16 @@ buildkit:
   repository: ""
   registryHost: ""
   registryHTTP: false
+  # Require overlayfs rather than silently falling back to full-copy snapshots.
+  snapshotter: overlayfs
   cacheSize: 10Gi
+  gc:
+    reservedSpace: 512MB
+    maxUsedSpace: 8GB
+    minFreeSpace: 4GB
   requests:
     cpu: 250m
     memory: 512Mi
   limits:
     cpu: "2"
     memory: 2Gi
-
-gatewayAccess:
-  enabled: false
-  serviceAccountName: cellbox-gateway
-  namespace: co-cell
-  image: cellbox-gateway:v0.1.0
-  imagePullPolicy: IfNotPresent
-  replicas: 0
-  args:
-    - --namespace=cell-box

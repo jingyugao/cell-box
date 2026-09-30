@@ -26,6 +26,21 @@ func (c uidClient) Create(ctx context.Context, obj client.Object, opts ...client
 	return c.Client.Create(ctx, obj, opts...)
 }
 
+type podGetHookClient struct {
+	client.Client
+	afterPodGet func()
+}
+
+func (c podGetHookClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	err := c.Client.Get(ctx, key, obj, opts...)
+	if err == nil {
+		if _, ok := obj.(*core.Pod); ok && c.afterPodGet != nil {
+			c.afterPodGet()
+		}
+	}
+	return err
+}
+
 type tokenExec struct {
 	calls int
 	after func()
@@ -63,6 +78,9 @@ func TestCreateAndImmutableOwnership(t *testing.T) {
 	if h.Name != "cellbox-box-1" || h.ID != "cr-uid" || h.Namespace != "boxes" || h.NodeName != "node-a" {
 		t.Fatalf("bad handle: %#v", h)
 	}
+	if h.ImageID != s.Image {
+		t.Fatalf("archive image identity missing from handle: got %q, want %q", h.ImageID, s.Image)
+	}
 	w := &api.ResumablePod{}
 	if err = p.Client.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
 		t.Fatal(err)
@@ -80,8 +98,12 @@ func TestCreateAndImmutableOwnership(t *testing.T) {
 	if w.Spec.Container.Resources.Limits.Cpu().MilliValue() != 500 || w.Spec.Container.Resources.Limits.Memory().Value() != 256*1024*1024 {
 		t.Fatal("resource limits missing")
 	}
-	if _, err = p.Create(ctx, s); err != nil {
+	repeated, err := p.Create(ctx, s)
+	if err != nil {
 		t.Fatalf("idempotent create: %v", err)
+	}
+	if repeated.ImageID != h.ImageID {
+		t.Fatalf("idempotent create changed archive image identity: got %q, want %q", repeated.ImageID, h.ImageID)
 	}
 	s.Image = "registry.example.invalid/other@sha256:" + strings.Repeat("b", 64)
 	if _, err = p.Create(ctx, s); err == nil {
@@ -131,7 +153,7 @@ func TestLifecycleAndGuestIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	obs, err := p.Inspect(ctx, h)
-	if err != nil || obs.State != "suspended" || obs.ExecutionID != "" {
+	if err != nil || obs.Phase != "suspended" || obs.ExecutionID != "" {
 		t.Fatalf("suspended: %#v %v", obs, err)
 	}
 	if err = p.Action(ctx, h, "resume"); err != nil {
@@ -154,9 +176,27 @@ func TestLifecycleAndGuestIdentity(t *testing.T) {
 	if err = p.Client.Create(ctx, svc); err != nil {
 		t.Fatal(err)
 	}
+	pod.Status.Conditions[0].Status = core.ConditionFalse
+	if err = p.Client.Status().Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
 	obs, err = p.Inspect(ctx, h)
-	if err != nil || obs.State != "ready" || obs.ExecutionID != "pod-uid" {
-		t.Fatalf("ready: %#v %v", obs, err)
+	if err != nil || obs.Phase != "running" || obs.ExecutionID != "pod-uid" {
+		t.Fatalf("not-ready Pod changed lifecycle: %#v %v", obs, err)
+	}
+	if _, err = p.Guest(ctx, h); !errors.Is(err, errNotReady) {
+		t.Fatalf("Guest accepted a not-ready Pod: %v", err)
+	}
+	if calls := p.Exec.(*tokenExec).calls; calls != 0 {
+		t.Fatalf("not-ready Guest invoked token exec %d times", calls)
+	}
+	pod.Status.Conditions[0].Status = core.ConditionTrue
+	if err = p.Client.Status().Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	obs, err = p.Inspect(ctx, h)
+	if err != nil || obs.Phase != "running" || obs.ExecutionID != "pod-uid" {
+		t.Fatalf("running: %#v %v", obs, err)
 	}
 	conn, err := p.Guest(ctx, h)
 	if err != nil {
@@ -175,7 +215,23 @@ func TestLifecycleAndGuestIdentity(t *testing.T) {
 	if _, err = p.Guest(ctx, h); err == nil || !strings.Contains(err.Error(), "UID changed") {
 		t.Fatalf("Pod replacement during token retrieval was accepted: %v", err)
 	}
+	obs, err = p.Inspect(ctx, h)
+	if err != nil || obs.Phase != "failed" {
+		t.Fatalf("changed Pod identity was not observed as failed: %#v %v", obs, err)
+	}
 	exec.after = nil
+	pod.UID = "pod-uid"
+	if err = p.Client.Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	pod.Status.Phase = core.PodFailed
+	if err = p.Client.Status().Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	obs, err = p.Inspect(ctx, h)
+	if err != nil || obs.Phase != "failed" {
+		t.Fatalf("exited Pod was not observed as failed: %#v %v", obs, err)
+	}
 	if err = p.Client.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +243,7 @@ func TestLifecycleAndGuestIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	obs, err = p.Inspect(ctx, h)
-	if err != nil || obs.State != "deleting" {
+	if err != nil || obs.Phase != "deleting" {
 		t.Fatalf("deleting: %#v %v", obs, err)
 	}
 	if err = p.Client.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
@@ -198,11 +254,48 @@ func TestLifecycleAndGuestIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	obs, err = p.Inspect(ctx, h)
-	if err != nil || obs.State != "deleted" {
+	if err != nil || obs.Phase != "deleted" {
 		t.Fatalf("deleted: %#v %v", obs, err)
 	}
 	if err = p.Destroy(ctx, h); err != nil {
 		t.Fatalf("idempotent destroy: %v", err)
+	}
+}
+
+func TestInspectRejectsExecutionSwitchDuringPodRead(t *testing.T) {
+	p, s, ctx := fixture(t)
+	h, err := p.Create(ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &api.ResumablePod{}
+	if err = p.Client.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
+		t.Fatal(err)
+	}
+	w.Status.Phase = "Running"
+	w.Status.PodName = "pod-a"
+	w.Status.PodUID = "pod-old"
+	if err = p.Client.Status().Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	pod := &core.Pod{ObjectMeta: meta.ObjectMeta{Name: "pod-a", Namespace: h.Namespace, UID: "pod-old", OwnerReferences: []meta.OwnerReference{{APIVersion: api.GroupVersion.String(), Kind: api.Kind, Name: w.Name, UID: w.UID, Controller: boolPtr(true)}}}, Status: core.PodStatus{Phase: core.PodRunning}}
+	if err = p.Client.Create(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	base := p.Client
+	p.Client = podGetHookClient{Client: base, afterPodGet: func() {
+		latest := &api.ResumablePod{}
+		if getErr := base.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, latest); getErr != nil {
+			t.Fatal(getErr)
+		}
+		latest.Status.PodName = "pod-b"
+		latest.Status.PodUID = "pod-new"
+		if updateErr := base.Status().Update(ctx, latest); updateErr != nil {
+			t.Fatal(updateErr)
+		}
+	}}
+	if _, err = p.Inspect(ctx, h); err == nil || !strings.Contains(err.Error(), "changed during lifecycle inspection") {
+		t.Fatalf("Inspect accepted a switched execution: %v", err)
 	}
 }
 func boolPtr(v bool) *bool { return &v }

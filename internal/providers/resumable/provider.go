@@ -132,7 +132,7 @@ func (p *Provider) Create(ctx context.Context, spec boxprovider.Spec) (boxprovid
 	if wanted.UID == "" {
 		return boxprovider.Handle{}, errors.New("created ResumablePod has no UID")
 	}
-	return boxprovider.Handle{Provider: name, ID: string(wanted.UID), Name: wanted.Name, Namespace: wanted.Namespace, NodeName: spec.NodeName}, nil
+	return boxprovider.Handle{Provider: name, ID: string(wanted.UID), Name: wanted.Name, ImageID: spec.Image, Namespace: wanted.Namespace, NodeName: spec.NodeName}, nil
 }
 
 func matchExisting(actual, wanted *api.ResumablePod) error {
@@ -166,48 +166,74 @@ func (p *Provider) get(ctx context.Context, h boxprovider.Handle) (*api.Resumabl
 func (p *Provider) Inspect(ctx context.Context, h boxprovider.Handle) (boxprovider.Observation, error) {
 	w, err := p.get(ctx, h)
 	if errors.Is(err, boxprovider.ErrNotFound) {
-		return boxprovider.Observation{State: "deleted"}, nil
+		return boxprovider.Observation{Phase: "deleted"}, nil
 	}
 	if err != nil {
 		return boxprovider.Observation{}, err
 	}
 	obs := boxprovider.Observation{ExecutionID: w.Status.PodUID, Message: w.Status.Message}
 	if w.DeletionTimestamp != nil {
-		obs.State = "deleting"
+		obs.Phase = "deleting"
 		return obs, nil
 	}
 	switch w.Status.Phase {
 	case "", "Creating":
-		obs.State = "provisioning"
+		obs.Phase = "creating"
 	case "Restoring":
-		obs.State = "resuming"
+		obs.Phase = "resuming"
 	case "Running":
-		_, err = p.readyPod(ctx, w)
-		if err == nil {
-			obs.State = "ready"
-		} else if errors.Is(err, errNotReady) {
-			obs.State = "provisioning"
-			obs.Message = err.Error()
-		} else if errors.Is(err, errExecutionLost) {
-			obs.State = "failed"
-			obs.Message = err.Error()
-		} else {
+		obs.Phase, err = p.inspectRunning(ctx, h, w)
+		if err != nil {
 			return boxprovider.Observation{}, err
 		}
 	case "Checkpointing", "Suspending":
-		obs.State = "provisioning"
+		obs.Phase = "suspending"
 	case "Suspended":
-		obs.State = "suspended"
+		obs.Phase = "suspended"
 		obs.ExecutionID = ""
 	case "Failing", "Failed":
-		obs.State = "failed"
+		obs.Phase = "failed"
 	case "Deleting":
-		obs.State = "deleting"
+		obs.Phase = "deleting"
 	default:
-		obs.State = "failed"
+		obs.Phase = "failed"
 		obs.Message = "unknown operator phase: " + w.Status.Phase
 	}
 	return obs, nil
+}
+
+// inspectRunning observes execution identity and terminal Pod state only. Pod
+// readiness is intentionally left to readyPod so a readiness probe failure
+// does not change the box lifecycle phase.
+func (p *Provider) inspectRunning(ctx context.Context, h boxprovider.Handle, w *api.ResumablePod) (string, error) {
+	if w.Status.PodName == "" || w.Status.PodUID == "" {
+		return "failed", nil
+	}
+	pod := &core.Pod{}
+	err := p.Client.Get(ctx, client.ObjectKey{Namespace: w.Namespace, Name: w.Status.PodName}, pod)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return "", err
+	}
+	// The CR may have switched to a new Pod while the previous Pod was read.
+	// Confirm the observed identity before treating a missing or stale Pod as lost.
+	current, getErr := p.get(ctx, h)
+	if getErr != nil {
+		return "", getErr
+	}
+	if current.UID != w.UID || current.ResourceVersion != w.ResourceVersion || current.Status.Phase != w.Status.Phase || current.Status.PodName != w.Status.PodName || current.Status.PodUID != w.Status.PodUID {
+		return "", errors.New("ResumablePod changed during lifecycle inspection")
+	}
+	if apierrors.IsNotFound(err) {
+		return "failed", nil
+	}
+	owner := meta.GetControllerOf(pod)
+	if owner == nil || owner.UID != w.UID || owner.Kind != api.Kind || owner.APIVersion != api.GroupVersion.String() || string(pod.UID) != w.Status.PodUID {
+		return "failed", nil
+	}
+	if pod.DeletionTimestamp != nil || pod.Status.Phase == core.PodFailed || pod.Status.Phase == core.PodSucceeded {
+		return "failed", nil
+	}
+	return "running", nil
 }
 
 var errNotReady = errors.New("current Pod is not ready")

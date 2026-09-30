@@ -117,7 +117,22 @@ components:
           type: string
         resourceVersion:
           type: integer
-        state:
+        phase:
+          description: Runtime lifecycle phase. running does not imply guest readiness or health.
+          enum:
+          - creating
+          - running
+          - freezing
+          - frozen
+          - unfreezing
+          - suspending
+          - suspended
+          - resuming
+          - restoring
+          - staged
+          - deleting
+          - deleted
+          - failed
           type: string
         workspace:
           type: string
@@ -125,7 +140,7 @@ components:
       - id
       - ownerKey
       - profileId
-      - state
+      - phase
       - generation
       - resourceVersion
       - image
@@ -710,7 +725,23 @@ paths:
   /v1/boxes:
     get:
       operationId: listBoxes
-      parameters: []
+      description: |
+        Observes runtime lifecycle metadata without guest health checks. At most
+        eight boxes are inspected concurrently within a ten-second request deadline.
+        Each box is committed against its observed local resource version; the
+        list is not a simultaneous snapshot of all external runtimes. An inspection
+        error fails the request instead of returning a partial successful list.
+      parameters:
+      - in: query
+        name: id
+        description: Repeat to filter by multiple owned box IDs. Any missing or unowned ID returns 404.
+        required: false
+        schema:
+          items:
+            type: string
+          type: array
+        style: form
+        explode: true
       responses:
         "200":
           content:
@@ -722,7 +753,7 @@ paths:
           description: Success
         default:
           $ref: '#/components/responses/Error'
-      summary: List owned boxes (stored snapshots)
+      summary: List owned boxes and refresh provider lifecycle phases
     post:
       operationId: createBox
       parameters:
@@ -783,6 +814,10 @@ paths:
   /v1/boxes/{id}:
     get:
       operationId: getBox
+      description: |
+        Observes runtime lifecycle metadata without guest health checks. Provider
+        read errors fail the request without marking the box failed. Concurrent
+        box changes trigger bounded observation retries or a conflict response.
       parameters:
       - in: path
         name: id
@@ -798,7 +833,7 @@ paths:
           description: Success
         default:
           $ref: '#/components/responses/Error'
-      summary: Inspect owned box and refresh provider state
+      summary: Inspect owned box and refresh provider lifecycle phase
   /v1/boxes/{id}/archives:
     post:
       description: result.archiveId identifies the capture; source runtime is not

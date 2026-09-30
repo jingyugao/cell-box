@@ -1,10 +1,11 @@
 FROM alpine:3.21
 
-RUN apk add --no-cache util-linux
-COPY cellbox-node-controller /usr/local/bin/cellbox-node-controller
+RUN apk add --no-cache util-linux curl ca-certificates bzip2 coreutils
+COPY cellbox-node-controller /opt/cellbox/bin/cellbox-node-controller
 COPY cellbox-runsc-wrapper /usr/local/bin/cellbox-runsc-wrapper
-COPY images/controller/runtime.toml /opt/resumablepod/runtime.toml
-COPY images/controller/runsc.toml /opt/resumablepod/runsc.toml
-COPY images/controller/install-k8s-node.sh /usr/local/bin/install-k8s-node.sh
+COPY cellbox-runtime-config /usr/local/bin/cellbox-runtime-config
+COPY images/controller/runsc.toml /opt/cellbox/runsc.toml
+COPY images/controller/install-node.sh /usr/local/bin/install-node.sh
+COPY images/controller/install-gvisor.sh /usr/local/bin/install-gvisor.sh
 
-ENTRYPOINT ["/usr/local/bin/cellbox-node-controller"]
+ENTRYPOINT ["/opt/cellbox/bin/cellbox-node-controller"]

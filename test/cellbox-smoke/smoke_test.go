@@ -16,10 +16,10 @@ import (
 	"time"
 
 	"cellbox.local/cellbox/internal/boxprovider"
+	"cellbox.local/cellbox/internal/guestapi"
 	"cellbox.local/cellbox/internal/image"
 	"cellbox.local/cellbox/internal/providers/docker"
 	"cellbox.local/cellbox/internal/service"
-	"cellbox.local/cellbox/internal/guestapi"
 )
 
 func TestDockerREST(t *testing.T) {
@@ -132,7 +132,7 @@ func TestDockerREST(t *testing.T) {
 		return b
 	}
 	b := getBox(source)
-	if b.State != "ready" || b.Generation != 1 {
+	if b.Phase != "running" || b.Generation != 1 {
 		t.Fatalf("unexpected box %+v", b)
 	}
 	execCheck := func(argv []string, want string) {
@@ -176,7 +176,7 @@ func TestDockerREST(t *testing.T) {
 		t.Fatalf("proxy failed %d: %s", res.StatusCode, data)
 	}
 	wait(call("POST", "/v1/boxes/"+source+":freeze", nil, 202))
-	if getBox(source).State != "frozen" {
+	if getBox(source).Phase != "frozen" {
 		t.Fatal("not frozen")
 	}
 	wait(call("POST", "/v1/boxes/"+source+":unfreeze", nil, 202))
@@ -186,7 +186,7 @@ func TestDockerREST(t *testing.T) {
 	json.Unmarshal(restoreRaw, &restoring)
 	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", "cellbox-"+restoring.TargetID).Run() })
 	candidate := wait(restoreRaw).TargetID
-	if getBox(candidate).State != "staged" {
+	if getBox(candidate).Phase != "staged" {
 		t.Fatal("restore activated too early")
 	}
 	if string(call("GET", "/v1/boxes/"+candidate+"/files?path=hello.txt", nil, 200)) != "archive-roundtrip" {

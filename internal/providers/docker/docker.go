@@ -18,8 +18,8 @@ import (
 	"time"
 
 	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/image"
 	"cellbox.local/cellbox/internal/guestapi"
+	"cellbox.local/cellbox/internal/image"
 )
 
 const (
@@ -259,31 +259,31 @@ func (p *Provider) owned(ctx context.Context, h boxprovider.Handle) (container, 
 func (p *Provider) Inspect(ctx context.Context, h boxprovider.Handle) (boxprovider.Observation, error) {
 	c, err := p.owned(ctx, h)
 	if errors.Is(err, boxprovider.ErrNotFound) {
-		return boxprovider.Observation{State: "deleted"}, nil
+		return boxprovider.Observation{Phase: "deleted"}, nil
 	}
 	if err != nil {
 		return boxprovider.Observation{}, err
 	}
-	state := "failed"
+	phase := "failed"
 	switch c.State.Status {
 	case "running":
 		if c.State.Paused {
-			state = "frozen"
+			phase = "frozen"
 		} else {
-			state = "ready"
+			phase = "running"
 		}
 	case "paused":
-		state = "frozen"
+		phase = "frozen"
 	case "created", "restarting":
-		state = "provisioning"
+		phase = "creating"
 	case "exited", "dead":
-		state = "failed"
+		phase = "failed"
 	}
 	executionID, err := executionIdentity(c)
 	if err != nil {
 		return boxprovider.Observation{}, err
 	}
-	return boxprovider.Observation{State: state, ExecutionID: executionID}, nil
+	return boxprovider.Observation{Phase: phase, ExecutionID: executionID}, nil
 }
 func executionIdentity(c container) (string, error) {
 	if c.State.StartedAt == "" {

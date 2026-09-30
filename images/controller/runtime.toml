@@ -1,6 +1,0 @@
-[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc-recoverable]
-  runtime_type = "io.containerd.runsc.v1"
-  pod_annotations = ["dev.gvisor.internal.recovery.ticket"]
-  [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc-recoverable.options]
-    TypeUrl = "io.containerd.runsc.v1.options"
-    ConfigPath = "/var/lib/cellbox/runsc.toml"

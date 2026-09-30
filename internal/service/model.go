@@ -65,7 +65,7 @@ type Box struct {
 	ID           string       `json:"id"`
 	OwnerKey     string       `json:"ownerKey"`
 	ProfileID    string       `json:"profileId"`
-	State        string       `json:"state"`
+	Phase        string       `json:"phase"`
 	Generation   uint64       `json:"generation"`
 	Version      uint64       `json:"resourceVersion"`
 	Image        string       `json:"image"`
@@ -185,5 +185,5 @@ type State struct {
 }
 
 func newState() State {
-	return State{Schema: 1, Boxes: map[string]boxRecord{}, Operations: map[string]operationRecord{}, Executions: map[string]Execution{}, Leases: map[string]Lease{}, Routes: map[string]Route{}, Grants: map[string]grantRecord{}, Access: map[string]accessRecord{}, Sessions: map[string]sessionRecord{}, Archives: map[string]archiveRecord{}, Keys: map[string]keyRecord{}}
+	return State{Schema: 2, Boxes: map[string]boxRecord{}, Operations: map[string]operationRecord{}, Executions: map[string]Execution{}, Leases: map[string]Lease{}, Routes: map[string]Route{}, Grants: map[string]grantRecord{}, Access: map[string]accessRecord{}, Sessions: map[string]sessionRecord{}, Archives: map[string]archiveRecord{}, Keys: map[string]keyRecord{}}
 }

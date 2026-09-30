@@ -7,3 +7,5 @@
 /kubeconfig
 *.test
 /.cache/
+/charts/cellbox/values_local.yaml
+/config/local.json

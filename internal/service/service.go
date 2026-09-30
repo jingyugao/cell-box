@@ -66,12 +66,6 @@ func New(config Config, providers map[string]boxprovider.Provider) (*Service, er
 					if b.Box.OperationID == id {
 						b.Box.OperationID = ""
 						b.Box.Version++
-						if b.Box.State == "provisioning" || b.Box.State == "restoring" {
-							b.Box.State = "failed"
-							b.Box.Error = record.Operation.Error
-						} else {
-							b.Box.State = "unknown"
-						}
 						st.Boxes[bid] = b
 					}
 				}
@@ -149,9 +143,11 @@ func owned(st *State, client, id string) (boxRecord, error) {
 	return b, nil
 }
 func (s *Service) box(client, id string) (boxRecord, error) {
-	var b boxRecord
-	err := s.store.View(func(st State) error { var err error; b, err = owned(&st, client, id); return err })
-	return b, err
+	records, err := s.store.BoxRecords(client, []string{id})
+	if err != nil {
+		return boxRecord{}, err
+	}
+	return records[0], nil
 }
 func (s *Service) profile(client, id string) (Profile, error) {
 	for _, p := range s.config.Profiles {
@@ -262,14 +258,6 @@ func (s *Service) launch(op Operation, work func(context.Context) (map[string]st
 			if b, ok := st.Boxes[op.TargetID]; ok && b.Box.OperationID == op.ID {
 				b.Box.OperationID = ""
 				b.Box.Version++
-				if err != nil {
-					b.Box.Error = cloneError(err)
-					if op.Kind == "create" || op.Kind == "restore" {
-						b.Box.State = "failed"
-					} else if op.Kind != "exec" && op.Kind != "archive" {
-						b.Box.State = "unknown"
-					}
-				}
 				st.Boxes[op.TargetID] = b
 			}
 			return nil
@@ -287,16 +275,7 @@ func runtimeSpec(b boxRecord) boxprovider.Spec {
 	return boxprovider.Spec{BoxID: b.Box.ID, Image: b.Profile.Image, Config: config, CPU: b.Profile.CPU, MemoryMiB: b.Profile.MemoryMiB, Namespace: b.Profile.Namespace, NodeName: b.Profile.NodeName, DebugReadOnlyHostPath: b.Profile.DebugReadOnlyHostPath, DebugReadWriteHostPath: b.Profile.DebugReadWriteHostPath, Staged: b.Staged}
 }
 func (s *Service) rawBox(id string) (boxRecord, error) {
-	var b boxRecord
-	err := s.store.View(func(st State) error {
-		var ok bool
-		b, ok = st.Boxes[id]
-		if !ok {
-			return apiError("NOT_FOUND", "Box not found")
-		}
-		return nil
-	})
-	return b, err
+	return s.store.BoxRecord(id)
 }
 func (s *Service) saveHandle(id string, handle boxprovider.Handle) error {
 	return s.store.Update(func(st *State) error {
@@ -309,76 +288,85 @@ func (s *Service) saveHandle(id string, handle boxprovider.Handle) error {
 	})
 }
 func (s *Service) observe(ctx context.Context, b boxRecord) (Box, error) {
-	if b.Handle.ID == "" {
-		return b.Box, nil
-	}
-	ob, err := s.providers[b.Profile.Provider].Inspect(ctx, b.Handle)
-	if err != nil && !errors.Is(err, boxprovider.ErrNotFound) {
-		return b.Box, err
-	}
-	if errors.Is(err, boxprovider.ErrNotFound) {
-		ob.State = "deleted"
-	}
-	if ob.State == "ready" {
-		// A running container is ready only after the authenticated guest is healthy.
-		conn, e := s.providers[b.Profile.Provider].Guest(ctx, b.Handle)
-		if e == nil {
-			var req *http.Request
-			req, e = http.NewRequestWithContext(ctx, "GET", strings.TrimRight(conn.URL, "/")+"/healthz", nil)
-			if e == nil {
-				req.Header.Set("Authorization", "Bearer "+conn.Token)
-				var res *http.Response
-				res, e = s.http.Do(req)
-				if e == nil {
-					res.Body.Close()
-					if res.StatusCode != 200 {
-						e = fmt.Errorf("guest unhealthy")
-					}
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return Box{}, err
+		}
+		ob := boxprovider.Observation{Phase: b.Box.Phase}
+		var err error
+		if b.Handle.ID != "" {
+			ob, err = s.providers[b.Profile.Provider].Inspect(ctx, b.Handle)
+		}
+		if err != nil && !errors.Is(err, boxprovider.ErrNotFound) {
+			return Box{}, err
+		}
+		missing := errors.Is(err, boxprovider.ErrNotFound)
+		if missing {
+			ob.Phase = "deleted"
+		}
+		updated, err := s.store.UpdateObservedBox(b, func(current *boxRecord) (bool, error) {
+			if err := ctx.Err(); err != nil {
+				return false, err
+			}
+			previousError := current.Box.Error
+			phase := ob.Phase
+			if phase == "deleted" {
+				if current.Box.Phase == "deleting" || current.Box.Phase == "deleted" {
+					phase = "deleted"
+				} else {
+					phase = "failed"
+					current.Box.Error = &APIError{Code: "RUNTIME_LOST", Message: "Runtime disappeared; automatic cold restart is disabled"}
 				}
 			}
-		}
-		if e != nil {
-			ob.State = "unavailable"
-		}
-	}
-	var out Box
-	err = s.store.Update(func(st *State) error {
-		current := st.Boxes[b.Box.ID]
-		if current.Box.Version != b.Box.Version || current.Handle != b.Handle || current.Box.OperationID != b.Box.OperationID {
-			out = current.Box
-			return nil
-		}
-		state := ob.State
-		if current.Box.State == "deleting" && state != "deleted" {
-			state = "deleting"
-		}
-		if state == "ready" && current.Staged {
-			state = "staged"
-			if current.Box.State == "failed" {
-				state = "failed"
-			} else if !current.RestoreComplete {
-				state = "restoring"
+			if current.Staged && phase == "running" {
+				if current.Box.Phase == "failed" {
+					phase = "failed"
+				} else if current.RestoreComplete {
+					phase = "staged"
+				} else {
+					phase = "restoring"
+				}
 			}
+			if current.Box.Phase == "deleting" && phase != "deleted" {
+				phase = "deleting"
+			}
+			target := map[string]string{"freezing": "frozen", "unfreezing": "running", "suspending": "suspended", "resuming": "running"}[current.Box.Phase]
+			if current.Box.OperationID != "" && target != "" && phase != target && phase != "failed" && phase != "deleted" {
+				phase = current.Box.Phase
+			}
+			changed := current.Box.Phase != phase
+			if previousError != nil && current.Box.Error != nil {
+				changed = changed || *previousError != *current.Box.Error
+			} else {
+				changed = changed || previousError != current.Box.Error
+			}
+			if ob.ExecutionID != "" && current.ExecutionID != ob.ExecutionID {
+				current.ExecutionID = ob.ExecutionID
+				current.Box.Generation++
+				changed = true
+			}
+			current.Box.Phase = phase
+			if changed {
+				current.Box.Version++
+			}
+			return changed, nil
+		})
+		if errors.Is(err, errBoxObservationConflict) {
+			if ctx.Err() != nil {
+				return Box{}, ctx.Err()
+			}
+			b, err = s.rawBox(b.Box.ID)
+			if err != nil {
+				return Box{}, err
+			}
+			continue
 		}
-		if state == "deleted" && current.Box.State != "deleting" && current.Box.State != "deleted" {
-			state = "failed"
-			current.Box.Error = &APIError{Code: "RUNTIME_LOST", Message: "Runtime disappeared; automatic cold restart is disabled"}
+		if err != nil {
+			return Box{}, err
 		}
-		changed := current.Box.State != state
-		if ob.ExecutionID != "" && current.ExecutionID != ob.ExecutionID {
-			current.ExecutionID = ob.ExecutionID
-			current.Box.Generation++
-			changed = true
-		}
-		current.Box.State = state
-		if changed {
-			current.Box.Version++
-		}
-		st.Boxes[b.Box.ID] = current
-		out = current.Box
-		return nil
-	})
-	return out, err
+		return updated.Box, nil
+	}
+	return Box{}, apiError("CONFLICT", "Box changed repeatedly while observing runtime")
 }
 func (s *Service) connection(ctx context.Context, b boxRecord) (boxprovider.Connection, error) {
 	p := s.providers[b.Profile.Provider]
@@ -387,7 +375,7 @@ func (s *Service) connection(ctx context.Context, b boxRecord) (boxprovider.Conn
 		if err != nil {
 			return err
 		}
-		if ob.State != "ready" {
+		if ob.Phase != "running" {
 			return apiError("CONFLICT", "Runtime is not running")
 		}
 		if b.ExecutionID != "" && b.ExecutionID != ob.ExecutionID {
@@ -458,8 +446,8 @@ func (s *Service) waitState(ctx context.Context, id, want string) (Box, error) {
 			return Box{}, err
 		}
 		box, err := s.observe(ctx, b)
-		if err == nil && box.State == want {
-			if want != "ready" && want != "staged" && want != "restoring" {
+		if err == nil && box.Phase == want {
+			if want != "running" && want != "staged" && want != "restoring" {
 				return box, nil
 			}
 			updated, _ := s.rawBox(id)
@@ -471,7 +459,7 @@ func (s *Service) waitState(ctx context.Context, id, want string) (Box, error) {
 				}
 			}
 		}
-		if err == nil && box.State == "failed" {
+		if err == nil && box.Phase == "failed" {
 			return box, apiError("READINESS_FAILED", "Runtime entered failed state")
 		}
 		select {
@@ -493,7 +481,7 @@ func (s *Service) provision(ctx context.Context, id string) (Box, error) {
 	if err = s.saveHandle(id, handle); err != nil {
 		return Box{}, err
 	}
-	want := "ready"
+	want := "running"
 	if b.Staged {
 		want = "staged"
 		if !b.RestoreComplete {
@@ -540,11 +528,11 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 		if archiveID != "" {
 			op.Result = map[string]string{"archiveId": archiveID}
 		}
-		state := "provisioning"
+		state := "creating"
 		if archiveID != "" {
 			state = "restoring"
 		}
-		st.Boxes[id] = boxRecord{Box: Box{ID: id, OwnerKey: input.OwnerKey, ProfileID: profile.ID, State: state, Version: 1, Image: profile.Image, Workspace: profile.Guest.Workspace, Capabilities: profileCapabilities(profile), OperationID: op.ID, CreatedAt: time.Now().UTC()}, ClientID: client, Profile: profile, Staged: archiveID != "", RestoreArchiveID: archiveID}
+		st.Boxes[id] = boxRecord{Box: Box{ID: id, OwnerKey: input.OwnerKey, ProfileID: profile.ID, Phase: state, Version: 1, Image: profile.Image, Workspace: profile.Guest.Workspace, Capabilities: profileCapabilities(profile), OperationID: op.ID, CreatedAt: time.Now().UTC()}, ClientID: client, Profile: profile, Staged: archiveID != "", RestoreArchiveID: archiveID}
 		return nil
 	})
 	if err != nil || !fresh {
@@ -562,7 +550,7 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 			if err = s.store.Update(func(st *State) error {
 				v := st.Boxes[box.ID]
 				v.RestoreComplete = true
-				v.Box.State = "staged"
+				v.Box.Phase = "staged"
 				v.Box.Version++
 				st.Boxes[box.ID] = v
 				return nil
@@ -592,10 +580,10 @@ func (s *Service) action(client, key, id, action string) (Operation, error) {
 		if activeExec(st, id) {
 			return apiError("BUSY", "Box has an active execution")
 		}
-		if b.Box.State == "deleted" && action != "destroy" {
+		if b.Box.Phase == "deleted" && action != "destroy" {
 			return apiError("CONFLICT", "Box was deleted")
 		}
-		if b.Staged && (b.Box.State == "failed" || !b.RestoreComplete) && action != "destroy" {
+		if b.Staged && (b.Box.Phase == "failed" || !b.RestoreComplete) && action != "destroy" {
 			return apiError("CONFLICT", "Failed or incomplete restore candidate must be discarded")
 		}
 		if (action == "suspend" || action == "resume") && b.Profile.Provider != "resumable-k8s-pod" {
@@ -604,25 +592,25 @@ func (s *Service) action(client, key, id, action string) (Operation, error) {
 		if (action == "freeze" || action == "unfreeze") && b.Profile.Provider != "docker" {
 			return boxprovider.ErrUnsupported
 		}
-		if action == "activate" && (!b.Staged || !b.RestoreComplete || b.Box.State != "staged") {
+		if action == "activate" && (!b.Staged || !b.RestoreComplete || b.Box.Phase != "staged") {
 			return apiError("CONFLICT", "Box is not a staged candidate")
 		}
-		if action == "suspend" && b.Box.State != "ready" {
-			return apiError("CONFLICT", "Only a ready box can suspend")
+		if action == "suspend" && b.Box.Phase != "running" {
+			return apiError("CONFLICT", "Only a running box can suspend")
 		}
-		if action == "resume" && b.Box.State != "suspended" {
+		if action == "resume" && b.Box.Phase != "suspended" {
 			return apiError("CONFLICT", "Only a suspended box can resume")
 		}
-		if action == "freeze" && b.Box.State != "ready" {
-			return apiError("CONFLICT", "Only a ready box can freeze")
+		if action == "freeze" && b.Box.Phase != "running" {
+			return apiError("CONFLICT", "Only a running box can freeze")
 		}
-		if action == "unfreeze" && b.Box.State != "frozen" {
+		if action == "unfreeze" && b.Box.Phase != "frozen" {
 			return apiError("CONFLICT", "Only a frozen box can unfreeze")
 		}
 		b.Box.OperationID = op.ID
 		b.Box.Error = nil
-		if action == "destroy" {
-			b.Box.State = "deleting"
+		if phase := map[string]string{"destroy": "deleting", "freeze": "freezing", "unfreeze": "unfreezing", "suspend": "suspending", "resume": "resuming"}[action]; phase != "" {
+			b.Box.Phase = phase
 		}
 		b.Box.Version++
 		st.Boxes[id] = b
@@ -643,7 +631,13 @@ func (s *Service) action(client, key, id, action string) (Operation, error) {
 					return nil, err
 				}
 			} else {
-				if err := s.store.Update(func(st *State) error { v := st.Boxes[id]; v.Box.State = "deleted"; st.Boxes[id] = v; return nil }); err != nil {
+				if err := s.store.Update(func(st *State) error {
+					v := st.Boxes[id]
+					v.Box.Phase = "deleted"
+					v.Box.Version++
+					st.Boxes[id] = v
+					return nil
+				}); err != nil {
 					return nil, err
 				}
 			}
@@ -654,7 +648,8 @@ func (s *Service) action(client, key, id, action string) (Operation, error) {
 			if err := s.store.Update(func(st *State) error {
 				v := st.Boxes[id]
 				v.Staged = false
-				v.Box.State = "ready"
+				v.Box.Phase = "running"
+				v.Box.Version++
 				st.Boxes[id] = v
 				return nil
 			}); err != nil {
@@ -685,7 +680,7 @@ func (s *Service) action(client, key, id, action string) (Operation, error) {
 				}
 				return nil, err
 			}
-			want := map[string]string{"freeze": "frozen", "unfreeze": "ready", "suspend": "suspended", "resume": "ready"}[action]
+			want := map[string]string{"freeze": "frozen", "unfreeze": "running", "suspend": "suspended", "resume": "running"}[action]
 			if _, err := s.waitState(ctx, id, want); err != nil {
 				return nil, err
 			}
@@ -727,7 +722,7 @@ func (s *Service) execute(client, key, id string, input execInput) (Operation, e
 		if err = busy(st, b, false); err != nil {
 			return err
 		}
-		if b.Box.State != "ready" && b.Box.State != "staged" {
+		if b.Box.Phase != "running" && b.Box.Phase != "staged" {
 			return apiError("CONFLICT", "Box is not ready for execution")
 		}
 		if input.ExpectedGeneration == 0 || input.ExpectedGeneration != b.Box.Generation {
