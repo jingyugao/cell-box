@@ -15,7 +15,7 @@ build:
 	module=$$(go list -m)
 	if [[ -n $$(git status --porcelain) ]]; then revision=$$revision-dirty; fi
 	mkdir -p "$$out"
-	for obsolete in box-service cellbox cellbox-guest cellbox-image resumablepod-controller resumablepod-runtime resumablepod-gateway server Dockerfile GatewayDockerfile; do
+	for obsolete in box-service cellbox cellbox-guest cellbox-image cellbox-gateway resumablepod-controller resumablepod-runtime resumablepod-gateway server Dockerfile GatewayDockerfile; do
 		if [[ -f "$$out/$$obsolete" ]]; then rm -- "$$out/$$obsolete"; fi
 	done
 	ldflags="-s -w -X $$module/internal/version.Version=$$version -X $$module/internal/version.Revision=$$revision"
@@ -25,6 +25,7 @@ build:
 	CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags "$$ldflags" -o "$$out/cellbox-runsc-wrapper" ./cmd/cellbox-runsc-wrapper
 	cp -r charts examples images "$$out/"
 	rm -f -- "$$out/charts/cellbox/values_local.yaml" "$$out/charts/cellbox/values-k3s.yaml" "$$out/images/controller/install-k8s-node.sh"
+	rm -f -- "$$out/charts/cellbox/templates/gateway.yaml" "$$out/charts/cellbox/templates/gateway-access.yaml"
 	mkdir -p "$$out/test" "$$out/config" "$$out/api"
 	cp -r test/scripts "$$out/test/"
 	cp config/sample.json "$$out/config/"

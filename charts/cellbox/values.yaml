@@ -48,13 +48,3 @@ buildkit:
   limits:
     cpu: "2"
     memory: 2Gi
-
-gatewayAccess:
-  enabled: false
-  serviceAccountName: cellbox-gateway
-  namespace: cell-box
-  image: cellbox-gateway:v0.1.0
-  imagePullPolicy: IfNotPresent
-  replicas: 0
-  args:
-    - --namespace=cell-box
