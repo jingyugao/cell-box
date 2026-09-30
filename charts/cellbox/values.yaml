@@ -1,17 +1,27 @@
 controller:
-  image: docker.io/gaojingyu628/cellbox-controller@sha256:4eb9afdecf8e88fc552693685a6699a4a9e2a4e0458d30d15c5e83035eadf4d3
-  adapterImage: docker.io/gaojingyu628/cellbox-controller@sha256:4eb9afdecf8e88fc552693685a6699a4a9e2a4e0458d30d15c5e83035eadf4d3
+  image: docker.io/gaojingyu628/cellbox-controller@sha256:f31ff1bb57f108318b08e0f2048dd635dfbd7a9ba87bb7a4557c4f8df1cb6c87
+  adapterImage: docker.io/gaojingyu628/cellbox-controller@sha256:f31ff1bb57f108318b08e0f2048dd635dfbd7a9ba87bb7a4557c4f8df1cb6c87
   imagePullPolicy: IfNotPresent
   name: cellbox-controller
   serviceAccountName: cellbox-controller
   criDirectory: /run/containerd
   criSocket: /run/containerd/containerd.sock
-  # Generic Kubernetes nodes must have gVisor and the Cellbox runtime handler
-  # configured. Enable an installer only for a supported node environment.
+  # Install through Kubernetes on systemd-managed Linux/containerd nodes.
+  # Set enabled=false when the node runtime is provisioned externally.
   runtimeInstaller:
-    enabled: false
+    enabled: true
+    mode: auto
+    containerdConfig: ""
+    service: ""
+    platform: systrap
     command: []
-  nodeSelector: {}
+    gvisor:
+      enabled: true
+      version: "20260914.0"
+      releaseURL: https://storage.googleapis.com/gvisor/releases/release
+  nodeSelector:
+    kubernetes.io/os: linux
+    kubernetes.io/arch: amd64
   tolerations: []
 
 api:

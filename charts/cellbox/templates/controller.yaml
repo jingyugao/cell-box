@@ -1,5 +1,8 @@
-{{- if and .Values.controller.runtimeInstaller.enabled (empty .Values.controller.runtimeInstaller.command) }}
-{{- fail "controller.runtimeInstaller.command is required when its installer is enabled" }}
+{{- if not (has .Values.controller.runtimeInstaller.mode (list "auto" "containerd" "k3s")) }}
+{{- fail "controller.runtimeInstaller.mode must be auto, containerd, or k3s" }}
+{{- end }}
+{{- if not (has .Values.controller.runtimeInstaller.platform (list "systrap" "kvm")) }}
+{{- fail "controller.runtimeInstaller.platform must be systrap or kvm" }}
 {{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
@@ -30,11 +33,42 @@ spec:
       {{- end }}
       {{- if .Values.controller.runtimeInstaller.enabled }}
       initContainers:
+        {{- if .Values.controller.runtimeInstaller.gvisor.enabled }}
+        - name: install-gvisor
+          image: {{ .Values.controller.adapterImage | quote }}
+          imagePullPolicy: {{ .Values.controller.imagePullPolicy }}
+          command: [/bin/sh, /usr/local/bin/install-gvisor.sh]
+          env:
+            - name: GVISOR_VERSION
+              value: {{ .Values.controller.runtimeInstaller.gvisor.version | quote }}
+            - name: GVISOR_RELEASE_URL
+              value: {{ .Values.controller.runtimeInstaller.gvisor.releaseURL | quote }}
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+        {{- end }}
         - name: install-runtime-adapter
           image: {{ .Values.controller.adapterImage | quote }}
           imagePullPolicy: {{ .Values.controller.imagePullPolicy }}
           command:
+            {{- if .Values.controller.runtimeInstaller.command }}
             {{- toYaml .Values.controller.runtimeInstaller.command | nindent 12 }}
+            {{- else }}
+            - /bin/sh
+            - /usr/local/bin/install-node.sh
+            {{- end }}
+          env:
+            - name: CELLBOX_NODE_RUNTIME
+              value: {{ .Values.controller.runtimeInstaller.mode | quote }}
+            - name: CELLBOX_CONTAINERD_CONFIG
+              value: {{ .Values.controller.runtimeInstaller.containerdConfig | quote }}
+            - name: CELLBOX_RUNTIME_SERVICE
+              value: {{ .Values.controller.runtimeInstaller.service | quote }}
+            - name: CELLBOX_RUNSC_PLATFORM
+              value: {{ .Values.controller.runtimeInstaller.platform | quote }}
           securityContext:
             privileged: true
             runAsUser: 0
@@ -67,8 +101,8 @@ spec:
               mountPath: /run/containerd/runsc/k8s.io
             - name: snapshot-store
               mountPath: /var/lib/cellbox
-            - name: runsc-binary
-              mountPath: /usr/local/bin/runsc
+            - name: host-binaries
+              mountPath: /usr/local/bin
               readOnly: true
       volumes:
         {{- if .Values.controller.runtimeInstaller.enabled }}
@@ -89,7 +123,7 @@ spec:
           hostPath:
             path: /var/lib/cellbox
             type: DirectoryOrCreate
-        - name: runsc-binary
+        - name: host-binaries
           hostPath:
-            path: /usr/local/bin/runsc
-            type: File
+            path: /usr/local/bin
+            type: DirectoryOrCreate
