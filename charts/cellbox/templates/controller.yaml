@@ -1,10 +1,4 @@
 {{- if .Values.controller.enabled }}
-{{- if not (has .Values.controller.runtimeInstaller.mode (list "auto" "containerd" "k3s")) }}
-{{- fail "controller.runtimeInstaller.mode must be auto, containerd, or k3s" }}
-{{- end }}
-{{- if not (has .Values.controller.runtimeInstaller.platform (list "systrap" "kvm")) }}
-{{- fail "controller.runtimeInstaller.platform must be systrap or kvm" }}
-{{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -33,51 +27,6 @@ spec:
       {{- with .Values.controller.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- if .Values.controller.runtimeInstaller.enabled }}
-      initContainers:
-        {{- if .Values.controller.runtimeInstaller.gvisor.enabled }}
-        - name: install-gvisor
-          image: {{ include "cellbox.image" (dict "root" . "image" (default .Values.controller.image .Values.controller.adapterImage)) | quote }}
-          imagePullPolicy: {{ .Values.controller.imagePullPolicy }}
-          command: [/bin/sh, /usr/local/bin/install-gvisor.sh]
-          env:
-            - name: GVISOR_VERSION
-              value: {{ .Values.controller.runtimeInstaller.gvisor.version | quote }}
-            - name: GVISOR_RELEASE_URL
-              value: {{ .Values.controller.runtimeInstaller.gvisor.releaseURL | quote }}
-          securityContext:
-            privileged: true
-            runAsUser: 0
-          volumeMounts:
-            - name: host-root
-              mountPath: /host
-        {{- end }}
-        - name: install-runtime-adapter
-          image: {{ include "cellbox.image" (dict "root" . "image" (default .Values.controller.image .Values.controller.adapterImage)) | quote }}
-          imagePullPolicy: {{ .Values.controller.imagePullPolicy }}
-          command:
-            {{- if .Values.controller.runtimeInstaller.command }}
-            {{- toYaml .Values.controller.runtimeInstaller.command | nindent 12 }}
-            {{- else }}
-            - /bin/sh
-            - /usr/local/bin/install-node.sh
-            {{- end }}
-          env:
-            - name: CELLBOX_NODE_RUNTIME
-              value: {{ .Values.controller.runtimeInstaller.mode | quote }}
-            - name: CELLBOX_CONTAINERD_CONFIG
-              value: {{ .Values.controller.runtimeInstaller.containerdConfig | quote }}
-            - name: CELLBOX_RUNTIME_SERVICE
-              value: {{ .Values.controller.runtimeInstaller.service | quote }}
-            - name: CELLBOX_RUNSC_PLATFORM
-              value: {{ .Values.controller.runtimeInstaller.platform | quote }}
-          securityContext:
-            privileged: true
-            runAsUser: 0
-          volumeMounts:
-            - name: host-root
-              mountPath: /host
       {{- end }}
       containers:
         - name: controller
@@ -108,12 +57,6 @@ spec:
               mountPath: /usr/local/bin
               readOnly: true
       volumes:
-        {{- if .Values.controller.runtimeInstaller.enabled }}
-        - name: host-root
-          hostPath:
-            path: /
-            type: Directory
-        {{- end }}
         - name: cri-directory
           hostPath:
             path: {{ .Values.controller.criDirectory }}

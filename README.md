@@ -17,13 +17,13 @@ Cellbox 是一个通过 REST API 创建和管理隔离工作空间的通用平�
 
 ### 前提
 
-- 节点使用 systemd 管理的 Linux / containerd，安装器支持 containerd 配置版本 2 和 3。Chart 默认选择 Linux amd64 节点。
-- 已安装兼容的 gVisor，节点上存在可执行的 `/usr/local/bin/runsc` 和 `/usr/local/bin/containerd-shim-runsc-v1`。默认不会安装或替换 gVisor。
+- 节点使用 Linux / containerd，手工配置对应的 containerd 版本 2 或 3 运行时。Chart 默认选择 Linux amd64 节点。
+- 已按[节点安装文档](doc/node-installation.md)手工安装完整 gVisor、Cellbox wrapper 和 `runsc-recoverable` handler。
 - Kubernetes 凭证允许创建 Chart 中的 CRD、RuntimeClass、RBAC、Deployment、DaemonSet 和存储资源；集群允许 Controller 使用 `privileged`、`hostPID` 和 `hostPath`。
 - 有可用的默认 StorageClass，或在 values 中指定 `api.storageClassName`。
 - 节点能拉取所配置的 API、Controller、初始化容器及沙箱镜像。
 
-部署只使用 Kubernetes API，不需要 SSH 或宿主机登录凭证。首次注册运行时可能重启 containerd；在 k3s 上对应重启 `k3s` 或 `k3s-agent` 服务。
+节点准备需要宿主机管理权限，并由运维安排运行时服务重启。完成节点准备后，Helm 部署只使用 Kubernetes API，不会安装节点组件、修改 containerd 配置或重启节点服务。
 
 ### 配置 values
 
@@ -36,11 +36,6 @@ imageRegistry: registry.example.com/team
 
 controller:
   image: cellbox-controller:v0.1.0
-  runtimeInstaller:
-    enabled: true
-    mode: auto
-    gvisor:
-      enabled: false
 
 api:
   image: cellbox-api:v0.1.0
@@ -66,9 +61,7 @@ api:
 | --- | --- |
 | `imageRegistry` | 给相对镜像名添加仓库前缀；完整镜像地址保持原样 |
 | `controller.image` / `api.image` | 平台镜像，支持 tag 或 `@sha256:` digest，生产部署建议固定 digest |
-| `controller.adapterImage` | 默认使用 `controller.image`，升级 Controller 时同步升级节点安装镜像 |
 | `controller.criDirectory` / `controller.criSocket` | 节点 containerd 的 CRI 目录和 socket |
-| `controller.runtimeInstaller` | 自动安装 wrapper 和运行时配置；已有完整 Cellbox 节点适配时可设置 `enabled: false` |
 | `api.namespace` | 默认使用 Helm release namespace |
 | `api.config` | API JSON 配置的覆盖项，字段参考 [config/sample.json](config/sample.json) |
 | `api.clientTokens` | `tokenEnv: token` 映射；Token 至少 32 字节，省略时自动生成并在升级时复用 |
@@ -95,9 +88,7 @@ helm upgrade --install cellbox ./charts/cellbox \
 
 Chart 会部署 CRD、`runsc-recoverable` RuntimeClass、Controller DaemonSet、API Deployment / Service、RBAC、配置与 Token Secret，以及 API PVC。API 默认监听容器内的 `0.0.0.0:8090`，数据目录为 `/var/lib/cellbox`。
 
-Controller 的特权 init container 将 wrapper 复制到节点 `/usr/local/libexec/cellbox-runsc-wrapper`，写入 `/var/lib/cellbox/runsc.toml`，并为 containerd 配置 `runsc-recoverable` handler。节点安装器保留原有配置；运行时 handler 需要激活时才重启节点服务，单独更新 wrapper 或 shim 配置不需要重启。
-
-使用与当前源码一致的 Controller 镜像才能获得对应的安装器修复。Chart 中的 Docker Hub 默认镜像是已发布构建；自建的新版本可发布到任意仓库并通过 values 指定。
+节点组件独立维护。首次安装、wrapper 升级、配置验证和回滚步骤见[节点安装文档](doc/node-installation.md)。升级 Controller 镜像不会更新宿主机 wrapper。
 
 迁移此前手工创建的配置和 Token Secret 时，先将原值写入本地 values，再给升级命令临时添加 `--take-ownership`。完成归属迁移后，后续升级不再需要此参数。本机已完成该迁移。
 
@@ -109,8 +100,6 @@ k3s 使用以下覆盖项；普通 containerd 集群沿用公共 CRI 默认路�
 controller:
   criDirectory: /run/k3s/containerd
   criSocket: /run/k3s/containerd/containerd.sock
-  runtimeInstaller:
-    mode: k3s
 
 api:
   storageClassName: local-path
@@ -120,7 +109,7 @@ api:
 
 ```bash
 kubectl --context <context> -n cell-box get pods
-kubectl --context <context> -n cell-box logs ds/cellbox-controller -c install-runtime-adapter
+kubectl --context <context> -n cell-box logs ds/cellbox-controller -c controller
 kubectl --context <context> -n cell-box port-forward \
   --address 127.0.0.1 svc/cellbox-api 8090:8090
 ```
@@ -164,7 +153,7 @@ BuildKit 使用 overlayfs 和 GC 预算，避免 native snapshotter 对多层镜
 
 ### 卸载范围
 
-当前重点是安装与升级，没有节点卸载 hook。`helm uninstall` 不会自动移除节点上的 wrapper 和 containerd 配置。API PVC、CRD 和 RuntimeClass 标记为保留；已有工作空间也不会由 Helm 自动删除。卸载前应先处理工作空间生命周期。
+节点组件由人工安装和卸载，没有节点卸载 hook。`helm uninstall` 不会自动移除节点上的 wrapper 和 containerd 配置。API PVC、CRD 和 RuntimeClass 标记为保留；已有工作空间也不会由 Helm 自动删除。卸载前应先处理工作空间生命周期。
 
 ## 构建与自建镜像
 
@@ -175,7 +164,7 @@ make check
 make build
 ```
 
-构建产物在 `dist/release/`，包括 `cellbox-api`、`cellbox-container-agent`、`cellbox-node-controller`、`cellbox-runsc-wrapper` 和 `cellbox-runtime-config`。
+构建产物在 `dist/release/`，包括 `cellbox-api`、`cellbox-container-agent`、`cellbox-node-controller` 和 `cellbox-runsc-wrapper`。
 
 自建镜像使用构建产物目录作为 Docker context：
 
@@ -212,9 +201,7 @@ docker push "$CELLBOX_REGISTRY/cellbox-controller:$CELLBOX_IMAGE_TAG"
 | 镜像导入 | `CELLBOX_CLIENT_TOKEN=... test/scripts/e2e-image-import.sh <API-URL> <profile-id> <source-image>`；API 已启用 BuildKit，源镜像包含 sh / sleep；验证导入、创建、执行、暂停恢复和归档恢复，清理本次沙箱与归档，保留导入镜像记录 |
 | Counter 镜像导入 | `CELLBOX_CLIENT_TOKEN=... test/scripts/e2e-counter-import.sh <API-URL> <profile-id> <counter-image>`；使用 `test/counter` 构建的普通镜像，验证计数、32 MiB 内存暂停恢复及文件归档恢复；保留源沙箱暂停、恢复沙箱运行。可设置 `CELLBOX_K8S_CONTEXT` 检查 Pod 更换和 Service 保留 |
 | Helm install / upgrade | `test/scripts/e2e-helm.sh <context> <test-values-file>`；已有 CRD、RuntimeClass 和节点适配，在独立命名空间安装、升级并清理测试资源 |
-| 节点重复安装 | `test/scripts/e2e-bootstrap.sh <context> [node-name]`；已部署 `cell-box` 中的 Controller，重建 DaemonSet Pod 并验证节点服务启动时间不变 |
 | suspend / resume | `test/scripts/e2e-k8s.sh <context>`；`cell-box` 中已有 Running 的 `counter` CR 及计数器测试镜像，会挂起并恢复该工作空间 |
-| 安装器回归 | `test/scripts/test-node-install.sh <controller-image>`；在隔离 Docker 容器中模拟 systemd，验证首次安装、重复安装及中断恢复 |
 
 Helm E2E 的 values 文件只需提供测试集群的镜像、CRI 路径和存储类，API 配置与 Token 使用测试默认值。该脚本使用 `uv` 运行 Python 检查。测试证据默认写入被 Git 忽略的 `tmp/validation/`。
 

@@ -1,5 +1,0 @@
-binary_name = "/usr/local/libexec/cellbox-runsc-wrapper"
-log_path = "/var/lib/cellbox/logs/%ID%/shim.log"
-log_level = "info"
-[runsc_config]
-  restore-spec-validation = "enforce"
