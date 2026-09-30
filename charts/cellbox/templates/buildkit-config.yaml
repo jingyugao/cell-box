@@ -6,6 +6,12 @@ metadata:
   namespace: {{ .Values.api.namespace }}
 data:
   buildkitd.toml: |
+    [worker.oci]
+      snapshotter = {{ .Values.buildkit.snapshotter | quote }}
+      gc = true
+      reservedSpace = {{ .Values.buildkit.gc.reservedSpace | quote }}
+      maxUsedSpace = {{ .Values.buildkit.gc.maxUsedSpace | quote }}
+      minFreeSpace = {{ .Values.buildkit.gc.minFreeSpace | quote }}
     {{- if .Values.buildkit.registryHost }}
     [registry.{{ .Values.buildkit.registryHost | quote }}]
       http = {{ .Values.buildkit.registryHTTP }}

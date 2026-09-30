@@ -1,27 +1,9 @@
-controller:
-  image: 192.168.133.1:5001/cellbox-controller@sha256:feba48817d6134eae986483460e97be2e6b8fe9c78a9b8718c29f74a7e12bcde
-  adapterImage: 192.168.133.1:5001/cellbox-controller@sha256:feba48817d6134eae986483460e97be2e6b8fe9c78a9b8718c29f74a7e12bcde
-
+# Portable k3s settings. Supply node selection and secrets for your cluster.
 api:
   enabled: true
   namespace: cell-box
-  image: 192.168.133.1:5001/cellbox-api@sha256:77b03167111c221a6d2b163e5fe5e4427ca4102dfc420ded4dd34ba62e57f0db
-  nodeSelector:
-    kubernetes.io/hostname: ubuntu-server
   storageClassName: local-path
 
-buildkit:
-  enabled: true
-  image: 192.168.133.1:5001/cellbox-buildkit@sha256:b23c7d92ac7956eb94334f21a6904751c4fed3df76bbc894399618706e421894
-  repository: 192.168.133.1:5001/cellbox-prepared
-  registryHost: 192.168.133.1:5001
-  registryHTTP: true
-
-gatewayAccess:
-  enabled: true
-  image: 192.168.133.1:5001/cellbox-gateway@sha256:97b31561a93e515f12b3166e5672543b878fda5858dfc847687b9ceb972dfca7
-  imagePullPolicy: IfNotPresent
-  args:
-    - --domain=192-168-133-130.nip.io
-    - --local-domain=localhost
-    - --namespace=cell-box
+# Enable image building with buildkit.enabled=true and a writable
+# buildkit.repository belonging to the deployment's operator.
+# Sandbox images and registry credentials belong to the operator.

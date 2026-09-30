@@ -5,8 +5,8 @@
   "startupTimeoutSeconds": 120,
   "clients": [
     {
-      "id": "cocell",
-      "tokenEnv": "CELLBOX_COCELL_TOKEN"
+      "id": "client",
+      "tokenEnv": "CELLBOX_CLIENT_TOKEN"
     }
   ],
   "profiles": [
@@ -17,7 +17,7 @@
       "cpu": 1,
       "memoryMiB": 512,
       "clients": [
-        "cocell"
+        "client"
       ],
       "guest": {
         "workspace": "/workspace",

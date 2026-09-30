@@ -1,6 +1,6 @@
 controller:
-  image: cellbox-controller:v0.1.0
-  adapterImage: cellbox-controller:v0.1.0
+  image: docker.io/gaojingyu628/cellbox-controller@sha256:0a5ba6afc1dce586cd7d2af94d845507013c148c7edd4938249371819d18cd90
+  adapterImage: docker.io/gaojingyu628/cellbox-controller@sha256:0a5ba6afc1dce586cd7d2af94d845507013c148c7edd4938249371819d18cd90
   imagePullPolicy: IfNotPresent
   name: cellbox-controller
   serviceAccountName: cellbox-controller
@@ -11,7 +11,7 @@ controller:
 api:
   enabled: false
   namespace: cell-box
-  image: cellbox-api:v0.1.0
+  image: docker.io/gaojingyu628/cellbox-api@sha256:689557f6ad817647e590498a0718e73d272597e9b7e71dfb76f96c9a4d637e0b
   imagePullPolicy: IfNotPresent
   replicas: 1
   nodeSelector: {}
@@ -29,7 +29,13 @@ buildkit:
   repository: ""
   registryHost: ""
   registryHTTP: false
+  # Require overlayfs rather than silently falling back to full-copy snapshots.
+  snapshotter: overlayfs
   cacheSize: 10Gi
+  gc:
+    reservedSpace: 512MB
+    maxUsedSpace: 8GB
+    minFreeSpace: 4GB
   requests:
     cpu: 250m
     memory: 512Mi
@@ -40,7 +46,7 @@ buildkit:
 gatewayAccess:
   enabled: false
   serviceAccountName: cellbox-gateway
-  namespace: co-cell
+  namespace: cell-box
   image: cellbox-gateway:v0.1.0
   imagePullPolicy: IfNotPresent
   replicas: 0

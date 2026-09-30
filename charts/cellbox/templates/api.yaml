@@ -35,6 +35,10 @@ spec:
     metadata:
       labels:
         app: cellbox-api
+      {{- if .Values.buildkit.enabled }}
+      annotations:
+        checksum/buildkit-config: {{ include (print $.Template.BasePath "/buildkit-config.yaml") . | sha256sum }}
+      {{- end }}
     spec:
       serviceAccountName: cellbox-api
       automountServiceAccountToken: true
@@ -67,9 +71,11 @@ spec:
             - name: data
               mountPath: /var/lib/cellbox
         {{- if .Values.buildkit.enabled }}
-        - name: prepare-buildkit-socket
+        - name: prepare-buildkit-dirs
           image: busybox:1.36
-          command: [/bin/sh, -ec, 'chown 1000:1000 /run/cellbox-buildkit && chmod 0770 /run/cellbox-buildkit']
+          # fsGroup leaves a setgid group outside RootlessKit's UID/GID mapping.
+          # Overlayfs needs the cache directories owned by mapped IDs.
+          command: [/bin/sh, -ec, 'chown 1000:1000 /run/cellbox-buildkit /home/user/.local/share/buildkit && chmod 0770 /run/cellbox-buildkit && chmod 0700 /home/user/.local/share/buildkit && chmod g-s /home/user/.local/share/buildkit']
           securityContext:
             runAsUser: 0
             runAsNonRoot: false
@@ -81,6 +87,8 @@ spec:
           volumeMounts:
             - name: buildkit-socket
               mountPath: /run/cellbox-buildkit
+            - name: buildkit-cache
+              mountPath: /home/user/.local/share/buildkit
         {{- end }}
       containers:
         - name: api
