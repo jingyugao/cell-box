@@ -1,10 +1,11 @@
 {{- if .Values.api.enabled }}
-{{- $existingClaim := lookup "v1" "PersistentVolumeClaim" .Values.api.namespace .Values.api.dataClaim }}
+{{- $apiNamespace := include "cellbox.apiNamespace" . }}
+{{- $existingClaim := lookup "v1" "PersistentVolumeClaim" $apiNamespace .Values.api.dataClaim }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: {{ .Values.api.dataClaim }}
-  namespace: {{ .Values.api.namespace }}
+  namespace: {{ $apiNamespace }}
   annotations:
     helm.sh/resource-policy: keep
 spec:
@@ -23,7 +24,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: cellbox-api
-  namespace: {{ .Values.api.namespace }}
+  namespace: {{ $apiNamespace }}
 spec:
   replicas: {{ .Values.api.replicas }}
   strategy:
@@ -35,9 +36,15 @@ spec:
     metadata:
       labels:
         app: cellbox-api
-      {{- if .Values.buildkit.enabled }}
+      {{- if or .Values.buildkit.enabled .Values.api.manageSecrets }}
       annotations:
+        {{- if .Values.api.manageSecrets }}
+        checksum/api-config: {{ toJson .Values.api.config | sha256sum }}
+        checksum/client-tokens: {{ toJson .Values.api.clientTokens | sha256sum }}
+        {{- end }}
+        {{- if .Values.buildkit.enabled }}
         checksum/buildkit-config: {{ include (print $.Template.BasePath "/buildkit-config.yaml") . | sha256sum }}
+        {{- end }}
       {{- end }}
     spec:
       serviceAccountName: cellbox-api
@@ -111,6 +118,7 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ .Values.api.clientTokensSecret }}
+          {{- if .Values.api.ossCredentialsSecret }}
           env:
             - name: OSS_ACCESS_KEY
               valueFrom:
@@ -122,6 +130,7 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.api.ossCredentialsSecret }}
                   key: OSS_SECRET_KEY
+          {{- end }}
           ports:
             - name: http
               containerPort: 8090
@@ -218,7 +227,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: cellbox-api
-  namespace: {{ .Values.api.namespace }}
+  namespace: {{ $apiNamespace }}
 spec:
   selector:
     app: cellbox-api

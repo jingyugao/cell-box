@@ -7,4 +7,8 @@
 {{- else -}}
 {{- printf "%s/%s" (trimSuffix "/" (required "imageRegistry is required for relative image references" .root.Values.imageRegistry)) $image -}}
 {{- end -}}
+
+{{- end -}}
+{{- define "cellbox.apiNamespace" -}}
+{{- default .Release.Namespace .Values.api.namespace -}}
 {{- end -}}

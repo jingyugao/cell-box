@@ -3,7 +3,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cellbox-buildkit-config
-  namespace: {{ .Values.api.namespace }}
+  namespace: {{ include "cellbox.apiNamespace" . }}
 data:
   buildkitd.toml: |
     [worker.oci]

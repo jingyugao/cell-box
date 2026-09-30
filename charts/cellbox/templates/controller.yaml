@@ -1,3 +1,4 @@
+{{- if .Values.controller.enabled }}
 {{- if not (has .Values.controller.runtimeInstaller.mode (list "auto" "containerd" "k3s")) }}
 {{- fail "controller.runtimeInstaller.mode must be auto, containerd, or k3s" }}
 {{- end }}
@@ -19,6 +20,8 @@ spec:
     metadata:
       labels:
         app: {{ .Values.controller.name }}
+        app.kubernetes.io/part-of: cellbox
+        app.kubernetes.io/component: controller
     spec:
       serviceAccountName: {{ .Values.controller.serviceAccountName }}
       hostPID: true
@@ -35,7 +38,7 @@ spec:
       initContainers:
         {{- if .Values.controller.runtimeInstaller.gvisor.enabled }}
         - name: install-gvisor
-          image: {{ include "cellbox.image" (dict "root" . "image" .Values.controller.adapterImage) | quote }}
+          image: {{ include "cellbox.image" (dict "root" . "image" (default .Values.controller.image .Values.controller.adapterImage)) | quote }}
           imagePullPolicy: {{ .Values.controller.imagePullPolicy }}
           command: [/bin/sh, /usr/local/bin/install-gvisor.sh]
           env:
@@ -51,7 +54,7 @@ spec:
               mountPath: /host
         {{- end }}
         - name: install-runtime-adapter
-          image: {{ include "cellbox.image" (dict "root" . "image" .Values.controller.adapterImage) | quote }}
+          image: {{ include "cellbox.image" (dict "root" . "image" (default .Values.controller.image .Values.controller.adapterImage)) | quote }}
           imagePullPolicy: {{ .Values.controller.imagePullPolicy }}
           command:
             {{- if .Values.controller.runtimeInstaller.command }}
@@ -127,3 +130,4 @@ spec:
           hostPath:
             path: /usr/local/bin
             type: DirectoryOrCreate
+{{- end }}
