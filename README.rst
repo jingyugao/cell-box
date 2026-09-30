@@ -20,7 +20,7 @@ Build
 
 Use Go 1.26 or later. ``make build`` writes Linux binaries into
 ``dist/release/``: ``cellbox``, ``cellbox-guest``, the
-ResumablePod controller and runtime adapter, and a test server. ``make check``
+ResumablePod controller and runtime adapter. ``make check``
 runs Go race tests, vet, and shell syntax checks.
 
 Configuration and local start
