@@ -432,6 +432,9 @@ func (s *Service) guestRequest(ctx context.Context, b boxRecord, method, path st
 	return s.guestRequestWith(s.http, ctx, b, method, path, body)
 }
 func (s *Service) guestRequestWith(client *http.Client, ctx context.Context, b boxRecord, method, path string, body io.Reader) (*http.Response, error) {
+	return s.guestRequestHeaders(client, ctx, b, method, path, body, nil)
+}
+func (s *Service) guestRequestHeaders(client *http.Client, ctx context.Context, b boxRecord, method, path string, body io.Reader, headers http.Header) (*http.Response, error) {
 	conn, err := s.connection(ctx, b)
 	if err != nil {
 		return nil, err
@@ -440,8 +443,14 @@ func (s *Service) guestRequestWith(client *http.Client, ctx context.Context, b b
 	if err != nil {
 		return nil, err
 	}
+	r.Header = headers.Clone()
+	if r.Header == nil {
+		r.Header = make(http.Header)
+	}
 	r.Header.Set("Authorization", "Bearer "+conn.Token)
-	r.Header.Set("Content-Type", "application/json")
+	if r.Header.Get("Content-Type") == "" {
+		r.Header.Set("Content-Type", "application/json")
+	}
 	return client.Do(r)
 }
 func guestSuccess(response *http.Response) error {

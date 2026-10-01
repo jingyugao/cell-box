@@ -96,7 +96,7 @@ func (s *Server) fileHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, out)
 		return
 	}
-	if r.Method == "GET" {
+	if r.Method == "GET" || r.Method == "HEAD" {
 		f, err := openWorkspace(s.cfg.Workspace, rel, unix.O_RDONLY|unix.O_NOFOLLOW, 0)
 		if err != nil {
 			http.Error(w, "file unavailable", 404)
@@ -108,9 +108,15 @@ func (s *Server) fileHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "not a regular file", 400)
 			return
 		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
-		_, _ = io.Copy(w, f)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
+		if r.Method == "HEAD" {
+			// Range is defined for GET only; ServeContent otherwise applies it to HEAD.
+			r = r.Clone(r.Context())
+			r.Header.Del("Range")
+			r.Header.Del("If-Range")
+		}
+		http.ServeContent(w, r, path.Base(rel), info.ModTime(), f)
 		return
 	}
 	if r.Method == "PUT" {

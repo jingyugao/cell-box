@@ -1087,7 +1087,7 @@ paths:
       summary: Execute a bounded command as agent
   /v1/boxes/{id}/files:
     get:
-      description: API file transfer limit is 16 MiB; list=1 returns directory entries.
+      description: File reads stream original bytes and support byte ranges and conditional requests. No 16 MiB read limit; list=1 returns directory entries.
       operationId: readFiles
       parameters:
       - in: path
@@ -1108,6 +1108,30 @@ paths:
           enum:
           - "1"
           type: string
+      - in: header
+        name: Range
+        schema:
+          type: string
+      - in: header
+        name: If-Range
+        schema:
+          type: string
+      - in: header
+        name: If-Modified-Since
+        schema:
+          type: string
+      - in: header
+        name: If-Unmodified-Since
+        schema:
+          type: string
+      - in: header
+        name: If-Match
+        schema:
+          type: string
+      - in: header
+        name: If-None-Match
+        schema:
+          type: string
       responses:
         "200":
           content:
@@ -1121,9 +1145,48 @@ paths:
                 format: binary
                 type: string
           description: Success
+        "206":
+          description: Partial bytes; Content-Range identifies the range and full file size.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "304":
+          description: File has not changed; no body.
+        "412":
+          description: File precondition failed.
+        "416":
+          description: Unsatisfiable byte range; Content-Range contains bytes */size.
         default:
           $ref: '#/components/responses/Error'
       summary: Read a workspace file or list a directory
+    head:
+      operationId: headFile
+      summary: Inspect a workspace file without transferring its contents
+      description: Returns Content-Length, Content-Type, Last-Modified and Accept-Ranges. Range is ignored.
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - in: query
+        name: path
+        required: true
+        schema:
+          type: string
+      - in: header
+        name: If-Modified-Since
+        schema:
+          type: string
+      responses:
+        "200":
+          description: File metadata in HTTP headers; no body.
+        "304":
+          description: File has not changed; no body.
+        default:
+          $ref: '#/components/responses/Error'
     put:
       operationId: writeFile
       parameters:
