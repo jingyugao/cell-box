@@ -540,6 +540,45 @@ func (s *Service) files(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("list") == "1" {
 		query.Set("list", "1")
 	}
+	// File reads keep their lease for the entire stream, including cancellation.
+	if (r.Method == "GET" || r.Method == "HEAD") && query.Get("list") != "1" {
+		ctx, cancel := context.WithCancel(r.Context())
+		stop := context.AfterFunc(s.ctx, cancel)
+		defer stop()
+		defer cancel()
+		headers := make(http.Header)
+		headers.Set("Accept-Encoding", "identity")
+		for _, name := range []string{"Range", "If-Range", "If-Match", "If-Unmodified-Since", "If-None-Match", "If-Modified-Since"} {
+			if value := r.Header.Get(name); value != "" {
+				headers.Set(name, value)
+			}
+		}
+		res, err := s.guestRequestHeaders(s.http, ctx, b, r.Method, "/v1/files?"+query.Encode(), nil, headers)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusNotModified && res.StatusCode != http.StatusRequestedRangeNotSatisfiable && res.StatusCode != http.StatusPreconditionFailed {
+			if err := guestSuccess(res); err != nil {
+				fail(w, err)
+				return
+			}
+		}
+		for _, name := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified", "X-Content-Type-Options", "Content-Security-Policy"} {
+			if value := res.Header.Get(name); value != "" {
+				w.Header().Set(name, value)
+			}
+		}
+		w.Header().Set("Cache-Control", "private, no-cache")
+		w.WriteHeader(res.StatusCode)
+		if r.Method != "HEAD" {
+			if _, err := io.Copy(w, res.Body); err != nil {
+				panic(http.ErrAbortHandler)
+			}
+		}
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<20)
