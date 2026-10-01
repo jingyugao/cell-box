@@ -14,6 +14,15 @@ import (
 // List uses namespace-scoped Kubernetes LIST requests, including pagination.
 // No business ledger or per-box GET request is involved.
 func (p *Provider) List(ctx context.Context, namespace, clientID string) ([]inventory.Record, error) {
+	return p.list(ctx, namespace, clientID, true)
+}
+
+// ListResources trusts the CR lifecycle state and never reads Pods.
+func (p *Provider) ListResources(ctx context.Context, namespace, clientID string) ([]inventory.Record, error) {
+	return p.list(ctx, namespace, clientID, false)
+}
+
+func (p *Provider) list(ctx context.Context, namespace, clientID string, verifyPods bool) ([]inventory.Record, error) {
 	if namespace == "" || clientID == "" {
 		return nil, errors.New("inventory namespace and client are required")
 	}
@@ -37,7 +46,7 @@ func (p *Provider) List(ctx context.Context, namespace, clientID string) ([]inve
 			needPods = true
 		}
 	}
-	if needPods {
+	if verifyPods && needPods {
 		continuation = ""
 		for {
 			page := &core.PodList{}
@@ -73,6 +82,10 @@ func (p *Provider) List(ctx context.Context, namespace, clientID string) ([]inve
 		case "Deleting":
 			phase = "deleting"
 		case "Running":
+			if !verifyPods {
+				phase = "running"
+				break
+			}
 			pod, ok := pods[w.Status.PodName]
 			owner := meta.GetControllerOf(&pod)
 			if ok && w.Status.PodUID != "" && string(pod.UID) == w.Status.PodUID && owner != nil && owner.UID == w.UID && owner.Kind == api.Kind && owner.APIVersion == api.GroupVersion.String() && pod.DeletionTimestamp == nil && pod.Status.Phase != core.PodFailed && pod.Status.Phase != core.PodSucceeded {

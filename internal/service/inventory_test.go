@@ -14,6 +14,40 @@ type runtimeInventory struct {
 	calls int
 }
 
+type resourceRuntimeInventory struct {
+	runtimeInventory
+	resourceCalls int
+}
+
+func (p *resourceRuntimeInventory) ListResources(_ context.Context, _, _ string) ([]inventory.Record, error) {
+	p.resourceCalls++
+	return p.rows, nil
+}
+
+func TestResourceInventoryUsesExplicitCapabilityAndPreservesIDFiltering(t *testing.T) {
+	f := newCoreFixture(t)
+	p := &resourceRuntimeInventory{runtimeInventory: runtimeInventory{Provider: f.provider, rows: []inventory.Record{
+		{Box: mustBoxJSON(Box{ID: "one", Phase: "running"})}, {Box: mustBoxJSON(Box{ID: "two", Phase: "suspended"})},
+	}}}
+	f.service.providers["docker"] = p
+	status, body := f.call(t, "GET", "/v1/boxes?observation=resource&id=one", testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	rows := decodeResponse[[]Box](t, body)
+	if len(rows) != 1 || rows[0].ID != "one" || p.resourceCalls != 1 || p.calls != 0 {
+		t.Fatalf("wrong query path: %s", body)
+	}
+	status, body = f.call(t, "GET", "/v1/boxes?observation=resource&id=missing", testClientToken, "", nil)
+	wantStatus(t, status, 404, body)
+	status, body = f.call(t, "GET", "/v1/boxes?observation=invalid", testClientToken, "", nil)
+	wantStatus(t, status, 400, body)
+	f.service.providers["docker"] = &p.runtimeInventory
+	status, body = f.call(t, "GET", "/v1/boxes?observation=resource", testClientToken, "", nil)
+	wantStatus(t, status, 422, body)
+	if p.calls != 0 {
+		t.Fatal("resource query fell back to verified inventory")
+	}
+}
+
 func (p *runtimeInventory) List(_ context.Context, _, _ string) ([]inventory.Record, error) {
 	p.calls++
 	return p.rows, nil
