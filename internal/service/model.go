@@ -3,6 +3,7 @@ package service
 import (
 	"cellbox.local/cellbox/internal/boxprovider"
 	"cellbox.local/cellbox/internal/guestapi"
+	"cellbox.local/cellbox/internal/objectstorage"
 	"time"
 )
 
@@ -26,14 +27,15 @@ type Profile struct {
 	Clients                []string        `json:"clients"`
 }
 type Config struct {
-	Listen                string           `json:"listen"`
-	DataDir               string           `json:"dataDir"`
-	PublicURL             string           `json:"publicUrl,omitempty"`
-	ServiceDomain         string           `json:"serviceDomain,omitempty"`
-	Clients               []Client         `json:"clients"`
-	Profiles              []Profile        `json:"profiles"`
-	StartupTimeoutSeconds int              `json:"startupTimeoutSeconds,omitempty"`
-	ImageBuild            ImageBuildConfig `json:"imageBuild,omitempty"`
+	ObjectStorage         objectstorage.Config `json:"objectStorage,omitempty"`
+	Listen                string               `json:"listen"`
+	DataDir               string               `json:"dataDir"`
+	PublicURL             string               `json:"publicUrl,omitempty"`
+	ServiceDomain         string               `json:"serviceDomain,omitempty"`
+	Clients               []Client             `json:"clients"`
+	Profiles              []Profile            `json:"profiles"`
+	StartupTimeoutSeconds int                  `json:"startupTimeoutSeconds,omitempty"`
+	ImageBuild            ImageBuildConfig     `json:"imageBuild,omitempty"`
 }
 type ImageBuildConfig struct {
 	Address          string `json:"address,omitempty"`
@@ -167,6 +169,7 @@ type Archive struct {
 	CreatedAt   time.Time         `json:"createdAt"`
 }
 type archiveRecord struct {
+	Deleting bool    `json:"deleting,omitempty"`
 	Archive  Archive `json:"archive"`
 	ClientID string  `json:"clientId"`
 }
@@ -175,6 +178,7 @@ type keyRecord struct {
 	OperationID string `json:"operationId"`
 }
 type State struct {
+	Revision       string                         `json:"revision,omitempty"`
 	ImportedImages map[string]importedImageRecord `json:"importedImages"`
 	Schema         int                            `json:"schema"`
 	Boxes          map[string]boxRecord           `json:"boxes"`

@@ -1,19 +1,28 @@
 package service
 
 import (
+	"cellbox.local/cellbox/internal/objectstorage"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"golang.org/x/sys/unix"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
 )
 
 type Store struct {
-	mu    sync.Mutex
-	state State
-	dir   string
-	lock  *os.File
+	imageEtags map[string]string
+	objects    objectstorage.Objects
+	etag       string
+	failure    error
+	onFailure  func()
+	mu         sync.Mutex
+	state      State
+	dir        string
+	lock       *os.File
 }
 
 func OpenStore(dir string) (*Store, error) {
@@ -88,6 +97,9 @@ func cloneBoxRecord(record boxRecord) (boxRecord, error) {
 func (s *Store) BoxRecords(client string, ids []string) ([]boxRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.failure != nil {
+		return nil, s.failure
+	}
 	if len(ids) == 0 {
 		out := make([]boxRecord, 0)
 		for _, record := range s.state.Boxes {
@@ -119,6 +131,9 @@ func (s *Store) BoxRecords(client string, ids []string) ([]boxRecord, error) {
 func (s *Store) BoxRecord(id string) (boxRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.failure != nil {
+		return boxRecord{}, s.failure
+	}
 	record, ok := s.state.Boxes[id]
 	if !ok {
 		return boxRecord{}, apiError("NOT_FOUND", "Box not found")
@@ -139,6 +154,9 @@ func sameObservationBase(a, b boxRecord) bool {
 func (s *Store) UpdateObservedBox(base boxRecord, update func(*boxRecord) (bool, error)) (boxRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.failure != nil {
+		return boxRecord{}, s.failure
+	}
 	current, ok := s.state.Boxes[base.Box.ID]
 	if !ok || !sameObservationBase(base, current) {
 		return boxRecord{}, errBoxObservationConflict
@@ -173,6 +191,9 @@ func (s *Store) Close() error {
 func (s *Store) View(fn func(State) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.failure != nil {
+		return s.failure
+	}
 	b, err := json.Marshal(s.state)
 	if err != nil {
 		return err
@@ -186,6 +207,9 @@ func (s *Store) View(fn func(State) error) error {
 func (s *Store) Update(fn func(*State) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.failure != nil {
+		return s.failure
+	}
 	b, err := json.Marshal(s.state)
 	if err != nil {
 		return err
@@ -211,6 +235,12 @@ func cloneState(state State) (State, error) {
 }
 
 func (s *Store) persistLocked(next State) error {
+	if s.failure != nil {
+		return s.failure
+	}
+	if s.objects != nil {
+		return s.persistRemoteLocked(next)
+	}
 	b, err := json.MarshalIndent(next, "", "  ")
 	if err != nil {
 		return err
@@ -249,4 +279,47 @@ func (s *Store) persistLocked(next State) error {
 		fmt.Fprintln(os.Stderr, "Cellbox: state committed but directory sync failed; crash durability is uncertain")
 	}
 	return nil
+}
+
+const stateObjectKey = "metadata/state.json"
+const stateObjectLimit = 64 << 20
+
+// OpenObjectStore loads the durable service ledger; it never reads or writes a
+// local state file. A single API leader owns this ledger. Conditional writes
+// additionally fence stale processes and resolve ambiguous PUT responses.
+func OpenObjectStore(ctx context.Context, objects objectstorage.Objects) (*Store, error) {
+	s := &Store{objects: objects, state: newState(), imageEtags: map[string]string{}}
+	if err := recoverObjectTransaction(ctx, objects); err != nil {
+		return nil, err
+	}
+	body, size, etag, err := objects.Get(ctx, stateObjectKey)
+	if errors.Is(err, objectstorage.ErrNotFound) {
+		return s, s.loadImageObjects(ctx)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+	if size < 1 || size > stateObjectLimit || etag == "" {
+		return nil, errors.New("invalid remote service ledger")
+	}
+	data, err := io.ReadAll(io.LimitReader(body, stateObjectLimit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) != size {
+		return nil, errors.New("remote service ledger size mismatch")
+	}
+	if err = json.Unmarshal(data, &s.state); err != nil {
+		return nil, errors.New("invalid remote service ledger JSON")
+	}
+	if s.state.Schema != 2 || s.state.Boxes == nil || s.state.Operations == nil || s.state.Keys == nil || s.state.Executions == nil || s.state.Leases == nil || s.state.Routes == nil || s.state.Grants == nil || s.state.Access == nil || s.state.Sessions == nil || s.state.Archives == nil {
+		return nil, errors.New("invalid remote service ledger schema")
+	}
+	if len(s.state.ImportedImages) > 0 {
+		return nil, errors.New("aggregate image metadata is unsupported")
+	}
+	s.state.ImportedImages = map[string]importedImageRecord{}
+	s.etag = etag
+	return s, s.loadImageObjects(ctx)
 }

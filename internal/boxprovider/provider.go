@@ -3,7 +3,9 @@ package boxprovider
 
 import (
 	"cellbox.local/cellbox/internal/guestapi"
+	"cellbox.local/cellbox/internal/inventory"
 	"context"
+	"encoding/json"
 	"errors"
 )
 
@@ -11,6 +13,7 @@ var ErrNotFound = errors.New("runtime not found")
 var ErrUnsupported = errors.New("unsupported runtime operation")
 
 type Spec struct {
+	Inventory              json.RawMessage
 	BoxID                  string
 	Image                  string
 	Config                 guestapi.Config
@@ -33,7 +36,7 @@ type Handle struct {
 }
 
 type Observation struct {
-	Phase       string // creating, running, freezing, frozen, unfreezing, suspending, suspended, resuming, restoring, staged, deleting, deleted, failed
+	Phase       string // creating, running, freezing, frozen, unfreezing, checkpointing, suspending, suspended, resuming, restoring, staged, deleting, deleted, failed
 	ExecutionID string // immutable runtime identity; changes after Pod replacement
 	Message     string
 }
@@ -50,4 +53,9 @@ type Provider interface {
 	Action(context.Context, Handle, string) error // freeze, unfreeze, suspend, resume
 	Destroy(context.Context, Handle) error
 	Guest(context.Context, Handle) (Connection, error)
+}
+
+// InventoryProvider enumerates workloads from the runtime, without the service ledger.
+type InventoryProvider interface {
+	List(context.Context, string, string) ([]inventory.Record, error)
 }

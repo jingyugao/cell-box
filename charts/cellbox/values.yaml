@@ -1,6 +1,19 @@
 # Registry for relative image names; fully qualified references take precedence.
 imageRegistry: docker.io
 
+# Use the same S3-compatible service/bucket as CoCell with a separate prefix.
+# Credentials remain in an existing Secret (present in each workload namespace).
+objectStorage:
+  endpoint: ""
+  bucket: ""
+  region: us-east-1
+  prefix: cellbox
+  pathStyle: true
+  credentialsSecret: ""
+  accessKeyKey: OSS_ACCESS_KEY
+  secretKeyKey: OSS_SECRET_KEY
+
+
 crd:
   create: true
 runtimeClass:
@@ -25,6 +38,7 @@ api:
   image: gaojingyu628/cellbox-api@sha256:37cec04f62d63b4c43a1366cf24394713c73f8e111a7da751dfbe327510fdf2c
   initImage: docker.io/library/busybox:1.36
   imagePullPolicy: IfNotPresent
+  # Exactly one active API; a Kubernetes Lease fences process replacement.
   replicas: 1
   # Additional container environment variables, e.g. HTTPS_PROXY and NO_PROXY.
   extraEnv: []
@@ -37,11 +51,8 @@ api:
   config: {}
   # Map of tokenEnv names to tokens (>=32 bytes); omitted tokens are generated.
   clientTokens: {}
-  # Optional external credentials for configured archive tools.
-  ossCredentialsSecret: ""
-  dataClaim: cellbox-api-data
-  storageClassName: ""
-  storageSize: 10Gi
+  # Temporary archive staging only; durable content is stored in S3.
+  temporaryStorageSize: 4Gi
 
 buildkit:
   enabled: false

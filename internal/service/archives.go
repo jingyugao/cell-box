@@ -2,6 +2,7 @@ package service
 
 import (
 	"archive/tar"
+	"cellbox.local/cellbox/internal/objectstorage"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -290,9 +291,24 @@ func (s *Service) captureArchiveHTTP(ctx context.Context, b boxRecord) (Archive,
 	if syncErr != nil {
 		return Archive{}, syncErr
 	}
-	// A failed state write may have committed before its directory fsync failed.
-	// Keep the file in that case; an orphan is safer than metadata pointing at
-	// a deleted archive.
+	if s.objects != nil {
+		file, err := openArchive(final)
+		if err != nil {
+			return Archive{}, err
+		}
+		_, uploadErr := s.objects.Put(ctx, "archives/"+a.ID+".tar.gz", file, a.Size, "")
+		closeErr := file.Close()
+		if uploadErr != nil {
+			return Archive{}, uploadErr
+		}
+		if closeErr != nil {
+			return Archive{}, closeErr
+		}
+		// S3 is authoritative after upload. API-local content is temporary only.
+		defer os.Remove(final)
+	}
+	// Commit the content before publishing metadata. A failed ledger write may
+	// have committed remotely, so never remove the S3 object on that failure.
 	if err := s.store.Update(func(st *State) error { st.Archives[a.ID] = archiveRecord{Archive: a, ClientID: b.ClientID}; return nil }); err != nil {
 		return Archive{}, err
 	}
@@ -311,22 +327,11 @@ func (s *Service) restoreArchive(ctx context.Context, boxID string, source Archi
 	if b.Box.Phase != "restoring" || !b.Staged || b.RestoreComplete {
 		return apiError("CONFLICT", "Box is not awaiting archive restore")
 	}
-	dir, err := s.archivesDir()
+	f, cleanup, err := s.openStoredArchive(ctx, source)
 	if err != nil {
 		return err
 	}
-	name, err := archivePath(dir, source.ID)
-	if err != nil {
-		return err
-	}
-	f, err := openArchive(name)
-	if err != nil {
-		return apiError("ARCHIVE_CORRUPT", "Archive content is unavailable")
-	}
-	defer f.Close()
-	if err := verifyArchive(f, source); err != nil {
-		return err
-	}
+	defer cleanup()
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
 	defer cancel()
 	res, err := s.guestRequest(ctx, b, "POST", "/v1/restore", f)
@@ -335,6 +340,9 @@ func (s *Service) restoreArchive(ctx context.Context, boxID string, source Archi
 	}
 	defer res.Body.Close()
 	if err := guestSuccess(res); err != nil {
+		return err
+	}
+	if err := s.setInventoryStage(ctx, b, "staged"); err != nil {
 		return err
 	}
 	return s.store.Update(func(st *State) error {
@@ -353,7 +361,7 @@ func (s *Service) archiveForClient(client, id string) (Archive, error) {
 	var a Archive
 	err := s.store.View(func(st State) error {
 		rec, ok := st.Archives[id]
-		if !ok || rec.ClientID != client {
+		if !ok || rec.ClientID != client || rec.Deleting {
 			return apiError("NOT_FOUND", "Archive not found")
 		}
 		a = rec.Archive
@@ -366,7 +374,7 @@ func (s *Service) listArchives(w http.ResponseWriter, r *http.Request) {
 	out := []Archive{}
 	err := s.store.View(func(st State) error {
 		for _, rec := range st.Archives {
-			if rec.ClientID == clientID(r) {
+			if rec.ClientID == clientID(r) && !rec.Deleting {
 				out = append(out, rec.Archive)
 			}
 		}
@@ -390,40 +398,73 @@ func (s *Service) getArchive(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) archiveContent(w http.ResponseWriter, r *http.Request) {
-	var a Archive
-	var f *os.File
-	err := s.store.View(func(st State) error {
-		rec, ok := st.Archives[r.PathValue("id")]
-		if !ok || rec.ClientID != clientID(r) {
-			return apiError("NOT_FOUND", "Archive not found")
-		}
-		a = rec.Archive
-		dir, err := s.archivesDir()
-		if err != nil {
-			return err
-		}
-		name, err := archivePath(dir, a.ID)
-		if err != nil {
-			return err
-		}
-		f, err = openArchive(name)
-		return err
-	})
+	a, err := s.archiveForClient(clientID(r), r.PathValue("id"))
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	defer f.Close()
-	if err := verifyArchive(f, a); err != nil {
+	f, cleanup, err := s.openStoredArchive(r.Context(), a)
+	if err != nil {
 		fail(w, err)
 		return
 	}
+	defer cleanup()
 	w.Header().Set("Content-Type", "application/gzip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", a.ID+".tar.gz"))
 	w.Header().Set("Content-Length", strconv.FormatInt(a.Size, 10))
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(200)
 	_, _ = io.CopyN(w, f, a.Size)
+}
+
+// Downloads are private, verified temporary files so a corrupt S3 object is
+// never sent to the guest or to an archive download client.
+func (s *Service) openStoredArchive(ctx context.Context, a Archive) (*os.File, func(), error) {
+	dir, err := s.archivesDir()
+	if err != nil {
+		return nil, nil, err
+	}
+	name, err := archivePath(dir, a.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	cleanup := func() {}
+	if s.objects != nil {
+		body, size, _, err := s.objects.Get(ctx, "archives/"+a.ID+".tar.gz")
+		if errors.Is(err, objectstorage.ErrNotFound) {
+			return nil, nil, apiError("ARCHIVE_CORRUPT", "Archive content is unavailable")
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		defer body.Close()
+		if size != a.Size || size < 1 || size > archiveWireLimit {
+			return nil, nil, apiError("ARCHIVE_CORRUPT", "Archive size differs from metadata")
+		}
+		file, err := os.CreateTemp(dir, ".download-*")
+		if err != nil {
+			return nil, nil, err
+		}
+		name = file.Name()
+		n, copyErr := io.Copy(file, io.LimitReader(body, a.Size+1))
+		closeErr := file.Close()
+		if copyErr != nil || closeErr != nil || n != a.Size {
+			os.Remove(name)
+			return nil, nil, apiError("ARCHIVE_CORRUPT", "Archive download is incomplete")
+		}
+		cleanup = func() { _ = os.Remove(name) }
+	}
+	file, err := openArchive(name)
+	if err != nil {
+		cleanup()
+		return nil, nil, apiError("ARCHIVE_CORRUPT", "Archive content is unavailable")
+	}
+	if err = verifyArchive(file, a); err != nil {
+		file.Close()
+		cleanup()
+		return nil, nil, err
+	}
+	return file, func() { file.Close(); cleanup() }, nil
 }
 
 func (s *Service) deleteArchive(w http.ResponseWriter, r *http.Request) {
@@ -447,24 +488,36 @@ func (s *Service) deleteArchive(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		delete(st.Archives, id)
+		rec.Deleting = true
+		st.Archives[id] = rec
 		return nil
 	})
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	dir, err := s.archivesDir()
-	if err != nil {
-		fail(w, err)
-		return
+	if s.objects != nil {
+		if err := s.objects.Delete(r.Context(), "archives/"+id+".tar.gz"); err != nil {
+			fail(w, err)
+			return
+		}
+	} else {
+		dir, err := s.archivesDir()
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		name, err := archivePath(dir, id)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		if err = os.Remove(name); err != nil && !os.IsNotExist(err) {
+			fail(w, err)
+			return
+		}
 	}
-	name, err := archivePath(dir, id)
-	if err != nil {
-		fail(w, err)
-		return
-	}
-	if err := os.Remove(name); err != nil && !os.IsNotExist(err) {
+	if err := s.store.Update(func(st *State) error { delete(st.Archives, id); return nil }); err != nil {
 		fail(w, err)
 		return
 	}

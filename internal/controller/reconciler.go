@@ -33,11 +33,29 @@ type Reconciler struct {
 	NodeName string
 }
 
+type inventoryRuntime interface {
+	SyncInventory(context.Context, *api.ResumablePod) error
+}
+
+func (r *Reconciler) syncInventoryPhase(ctx context.Context, w *api.ResumablePod, phase string) error {
+	syncer, ok := r.Runtime.(inventoryRuntime)
+	if !ok {
+		return nil
+	}
+	resource := w.DeepCopy()
+	resource.Status.Phase = phase
+	return syncer.SyncInventory(ctx, resource)
+}
+
 var again = ctrl.Result{RequeueAfter: time.Second}
 var errServiceCollision = stderrors.New("Service name is already owned by another workload")
 var pullableImage = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}$`)
 
 func (r *Reconciler) phase(ctx context.Context, w *api.ResumablePod, phase, message string) (ctrl.Result, error) {
+	w.Status.Message = message
+	if err := r.syncInventoryPhase(ctx, w, phase); err != nil {
+		return again, err
+	}
 	if w.Status.Phase != phase {
 		w.Status.Since = meta.Now()
 	}
@@ -308,6 +326,18 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if w.Spec.NodeName != r.NodeName {
 		return ctrl.Result{}, nil
 	}
+	if w.Status.Snapshot != "" {
+		phase := w.Status.Phase
+		// The following begin transition will update the index directly to
+		// Restoring; do not briefly republish a stale Suspended state.
+		if !(phase == "Suspended" && w.Spec.DesiredState == "Running") &&
+			(phase == "Checkpointing" || phase == "Suspending" || phase == "Suspended" ||
+				phase == "Restoring" || phase == "Failing" || phase == "Failed" || phase == "Deleting") {
+			if err := r.syncInventoryPhase(ctx, w, phase); err != nil {
+				return again, err
+			}
+		}
+	}
 	if !controllerutil.ContainsFinalizer(w, api.Finalizer) && w.DeletionTimestamp == nil {
 		controllerutil.AddFinalizer(w, api.Finalizer)
 		return again, r.Update(ctx, w)
@@ -347,12 +377,12 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 		return r.phase(ctx, w, "Failed", w.Status.Message)
 	}
-	if err = validate(w); err != nil {
+	if validationErr := validate(w); validationErr != nil {
 		if w.Status.Phase == "Failed" {
 			return again, nil
 		}
 		w.Status.RetryNonce = w.Spec.RetryNonce
-		return r.phase(ctx, w, "Failing", err.Error())
+		return r.phase(ctx, w, "Failing", validationErr.Error())
 	}
 	if w.Status.Phase == "Failed" {
 		if w.Spec.RetryNonce == w.Status.RetryNonce {
@@ -423,6 +453,9 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 				return fail(fmt.Errorf("unexpected scheduling gate"))
 			}
 			if err = r.Runtime.Prepare(ctx, w, p); err != nil {
+				if stderrors.Is(err, runtime.ErrRetryableStorage) {
+					return again, err
+				}
 				return fail(err)
 			}
 			old := p.DeepCopy()
@@ -486,6 +519,9 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			return fail(fmt.Errorf("source Pod missing before checkpoint commit"))
 		}
 		if err = r.Runtime.Checkpoint(ctx, w, p); err != nil {
+			if stderrors.Is(err, runtime.ErrRetryableStorage) {
+				return again, err
+			}
 			return fail(err)
 		}
 		return r.phase(ctx, w, "Suspending", "Snapshot committed; removing source Pod")

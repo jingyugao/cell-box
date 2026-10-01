@@ -3,6 +3,8 @@ package service
 import (
 	"cellbox.local/cellbox/internal/boxprovider"
 	"cellbox.local/cellbox/internal/guestapi"
+	"cellbox.local/cellbox/internal/inventory"
+	"cellbox.local/cellbox/internal/objectstorage"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -18,6 +20,7 @@ import (
 )
 
 type Service struct {
+	objects   objectstorage.Objects
 	config    Config
 	store     *Store
 	providers map[string]boxprovider.Provider
@@ -35,6 +38,9 @@ type activeStream struct {
 }
 
 func New(config Config, providers map[string]boxprovider.Provider) (*Service, error) {
+	return NewContext(context.Background(), config, providers)
+}
+func NewContext(parent context.Context, config Config, providers map[string]boxprovider.Provider) (*Service, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
@@ -43,13 +49,25 @@ func New(config Config, providers map[string]boxprovider.Provider) (*Service, er
 			return nil, fmt.Errorf("provider %s is not configured", p.Provider)
 		}
 	}
-	store, err := OpenStore(config.DataDir)
+	ctx, cancel := context.WithCancel(parent)
+	var store *Store
+	var objects objectstorage.Objects
+	var err error
+	if config.ObjectStorage != (objectstorage.Config{}) {
+		objects, err = objectstorage.New(ctx, config.ObjectStorage)
+		if err == nil {
+			store, err = OpenObjectStore(ctx, objects)
+		}
+	} else {
+		store, err = OpenStore(config.DataDir)
+	}
 	if err != nil {
+		cancel()
 		return nil, err
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	store.onFailure = cancel
 	noRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	s := &Service{config: config, store: store, providers: providers,
+	s := &Service{objects: objects, config: config, store: store, providers: providers,
 		http:     &http.Client{Transport: &http.Transport{Proxy: nil, ResponseHeaderTimeout: 35 * time.Second}, CheckRedirect: noRedirect},
 		toolHTTP: &http.Client{Transport: &http.Transport{Proxy: nil, ResponseHeaderTimeout: 5*time.Minute + 5*time.Second}, CheckRedirect: noRedirect},
 		ctx:      ctx, cancel: cancel, streams: map[string]activeStream{}}
@@ -98,6 +116,8 @@ func New(config Config, providers map[string]boxprovider.Provider) (*Service, er
 	}
 	return s, nil
 }
+func (s *Service) Done() <-chan struct{} { return s.ctx.Done() }
+
 func (s *Service) Close() error {
 	s.cancel()
 	s.mu.Lock()
@@ -284,7 +304,8 @@ func runtimeSpec(b boxRecord) boxprovider.Spec {
 	if b.Profile.DebugReadWriteHostPath != "" {
 		config.DebugHome = "/home/debug"
 	}
-	return boxprovider.Spec{BoxID: b.Box.ID, Image: b.Profile.Image, Config: config, CPU: b.Profile.CPU, MemoryMiB: b.Profile.MemoryMiB, Namespace: b.Profile.Namespace, NodeName: b.Profile.NodeName, DebugReadOnlyHostPath: b.Profile.DebugReadOnlyHostPath, DebugReadWriteHostPath: b.Profile.DebugReadWriteHostPath, Staged: b.Staged}
+	metadata, _ := json.Marshal(inventory.Record{ClientID: b.ClientID, Box: mustBoxJSON(b.Box), Staged: b.Staged})
+	return boxprovider.Spec{Inventory: metadata, BoxID: b.Box.ID, Image: b.Profile.Image, Config: config, CPU: b.Profile.CPU, MemoryMiB: b.Profile.MemoryMiB, Namespace: b.Profile.Namespace, NodeName: b.Profile.NodeName, DebugReadOnlyHostPath: b.Profile.DebugReadOnlyHostPath, DebugReadWriteHostPath: b.Profile.DebugReadWriteHostPath, Staged: b.Staged}
 }
 func (s *Service) rawBox(id string) (boxRecord, error) {
 	return s.store.BoxRecord(id)
@@ -520,7 +541,7 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 	if archiveID != "" && input.ImportedImageID == "" && !acceptImageChange {
 		err := s.store.View(func(st State) error {
 			a, ok := st.Archives[archiveID]
-			if !ok || a.ClientID != client {
+			if !ok || a.ClientID != client || a.Deleting {
 				return apiError("NOT_FOUND", "Archive not found")
 			}
 			input.ImportedImageID = st.Boxes[a.Archive.SourceBoxID].Box.ImportedImageID
@@ -557,7 +578,7 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 		}
 		if archiveID != "" {
 			a, ok := st.Archives[archiveID]
-			if !ok || a.ClientID != client {
+			if !ok || a.ClientID != client || a.Deleting {
 				return apiError("NOT_FOUND", "Archive not found")
 			}
 			source = a.Archive
@@ -693,6 +714,9 @@ func (s *Service) action(client, key, id, action string) (Operation, error) {
 			if err := s.guestAction(ctx, b, "/v1/activate"); err != nil {
 				return nil, err
 			}
+			if err := s.setInventoryStage(ctx, b, "running"); err != nil {
+				return nil, err
+			}
 			if err := s.store.Update(func(st *State) error {
 				v := st.Boxes[id]
 				v.Staged = false
@@ -814,4 +838,15 @@ func (s *Service) execute(client, key, id string, input execInput) (Operation, e
 		return map[string]string{"execId": eid}, err
 	})
 	return op, nil
+}
+
+func mustBoxJSON(box Box) json.RawMessage { data, _ := json.Marshal(box); return data }
+
+func (s *Service) setInventoryStage(ctx context.Context, b boxRecord, stage string) error {
+	if p, ok := s.providers[b.Profile.Provider].(interface {
+		SetInventoryStage(context.Context, boxprovider.Handle, string) error
+	}); ok {
+		return p.SetInventoryStage(ctx, b.Handle, stage)
+	}
+	return nil
 }

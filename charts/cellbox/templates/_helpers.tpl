@@ -12,3 +12,14 @@
 {{- define "cellbox.apiNamespace" -}}
 {{- default .Release.Namespace .Values.api.namespace -}}
 {{- end -}}
+
+{{- define "cellbox.objectStorageConfig" -}}
+{{- $storage := .Values.objectStorage -}}
+{{- $bucket := required "objectStorage.bucket is required; Cellbox does not use a PVC" $storage.bucket -}}
+{{- $config := dict "endpoint" $storage.endpoint "bucket" $bucket "region" $storage.region "prefix" $storage.prefix "pathStyle" $storage.pathStyle -}}
+{{- if $storage.credentialsSecret -}}
+{{- $_ := set $config "accessKeyEnv" "OSS_ACCESS_KEY" -}}
+{{- $_ := set $config "secretKeyEnv" "OSS_SECRET_KEY" -}}
+{{- end -}}
+{{- toJson $config -}}
+{{- end -}}
