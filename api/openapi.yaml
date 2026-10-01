@@ -63,6 +63,8 @@ components:
           type: string
         imageId:
           type: string
+        portable:
+          type: boolean
         profileId:
           type: string
         sha256:
@@ -76,6 +78,7 @@ components:
       - sourceBoxId
       - profileId
       - imageId
+      - portable
       - agent
       - sha256
       - size
@@ -200,8 +203,7 @@ components:
           type: string
         importedImageId:
           type: string
-          description: ID of a successful import owned by this client. Omit to use the profile
-            image; archive restore automatically reuses the source imported image.
+          description: ID of a successful import owned by this client. Omit to use the profile image.
       required:
       - profileId
       - ownerKey
@@ -519,8 +521,12 @@ components:
           type: string
         importedImageId:
           type: string
-          description: ID of a successful import owned by this client. Omit to use the profile
-            image; archive restore automatically reuses the source imported image.
+          description: ID of a successful import owned by this client. Archive restore
+            reuses the source imported image when omitted, unless acceptImageChange is
+            true, in which case the target profile image is used.
+        acceptImageChange:
+          type: boolean
+          description: Explicitly allow a validated portable workspace archive to restore into a different immutable image. Agent UID/GID must still match.
       required:
       - profileId
       - ownerKey
@@ -615,6 +621,8 @@ components:
         createdAt:
           type: string
           format: date-time
+        deleting:
+          type: boolean
       required:
       - id
       - source
@@ -628,6 +636,23 @@ components:
       - env
       - ports
       - createdAt
+      type: object
+    ImageUsage:
+      additionalProperties: false
+      properties:
+        deletable:
+          type: boolean
+        blockers:
+          type: array
+          items:
+            type: string
+        manifestShared:
+          type: boolean
+      required:
+      - deletable
+      - blockers
+      - manifestShared
+      type: object
     ImportImage:
       type: object
       additionalProperties: false
@@ -1580,6 +1605,42 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ImportedImage'
+        default: *id001
+    delete:
+      operationId: deleteImportedImage
+      summary: Delete an unused imported image and its prepared registry manifest
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Deletion operation accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+        default: *id001
+  /v1/images/{id}/usage:
+    get:
+      operationId: getImportedImageUsage
+      summary: Check whether an imported image can be deleted
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Generic usage blockers and manifest sharing status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImageUsage'
         default: *id001
 security:
 - ClientBearer: []

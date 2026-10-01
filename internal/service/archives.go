@@ -273,7 +273,7 @@ func (s *Service) captureArchiveHTTP(ctx context.Context, b boxRecord) (Archive,
 	if err != nil {
 		return Archive{}, err
 	}
-	a := Archive{ID: randomID("arc-"), SourceBoxID: b.Box.ID, ProfileID: b.Box.ProfileID, ImageID: b.Box.ImageID, Agent: b.Profile.Guest.Agent, SHA256: hex.EncodeToString(h.Sum(nil)), Size: n, Consistency: "workspace-best-effort", CreatedAt: time.Now().UTC()}
+	a := Archive{ID: randomID("arc-"), SourceBoxID: b.Box.ID, ProfileID: b.Box.ProfileID, ImageID: b.Box.ImageID, Agent: b.Profile.Guest.Agent, SHA256: hex.EncodeToString(h.Sum(nil)), Size: n, Consistency: "workspace-best-effort", Portable: true, CreatedAt: time.Now().UTC()}
 	final, err := archivePath(dir, a.ID)
 	if err != nil {
 		return Archive{}, err
@@ -304,7 +304,8 @@ func (s *Service) restoreArchive(ctx context.Context, boxID string, source Archi
 	if err != nil {
 		return err
 	}
-	if source.ID != b.RestoreArchiveID || source.ImageID == "" || b.Box.ImageID == "" || source.ImageID != b.Box.ImageID || source.Agent != b.Profile.Guest.Agent {
+	imageChanged := source.ImageID != b.Box.ImageID
+	if source.ID != b.RestoreArchiveID || source.ImageID == "" || b.Box.ImageID == "" || imageChanged && !(source.Portable && b.AcceptImageChange) || source.Agent != b.Profile.Guest.Agent {
 		return apiError("ARCHIVE_INCOMPATIBLE", "Archive image or agent identity differs from target box")
 	}
 	if b.Box.Phase != "restoring" || !b.Staged || b.RestoreComplete {

@@ -8,9 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"cellbox.local/cellbox/internal/image"
+	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
+	remotetransport "github.com/google/go-containerregistry/pkg/v1/remote/transport"
 )
 
 type ImportedImage struct {
@@ -27,6 +32,7 @@ type ImportedImage struct {
 	Warnings       []string          `json:"warnings"`
 	Key            string            `json:"key"`
 	CreatedAt      time.Time         `json:"createdAt"`
+	Deleting       bool              `json:"deleting,omitempty"`
 }
 
 type importedImageRecord struct {
@@ -45,7 +51,7 @@ type importImageRequest struct {
 func imageBuildBusy(st *State) error {
 	for _, record := range st.Operations {
 		op := record.Operation
-		if (op.Kind == "image-build" || op.Kind == "image-import") && (op.Status == "running" || op.Status == "queued") {
+		if (op.Kind == "image-build" || op.Kind == "image-import" || op.Kind == "image-delete") && (op.Status == "running" || op.Status == "queued") {
 			return apiError("BUSY", "Another image preparation is running")
 		}
 	}
@@ -257,6 +263,9 @@ func (s *Service) importedProfile(client, id string, profile Profile) (Profile, 
 		if !ok || record.ClientID != client {
 			return apiError("NOT_FOUND", "Imported image not found")
 		}
+		if record.ImportedImage.Deleting {
+			return apiError("CONFLICT", "Imported image is being deleted")
+		}
 		imported := record.ImportedImage
 		out.Image = imported.Image
 		out.Guest.Command = imported.Command
@@ -273,4 +282,199 @@ func (s *Service) importedProfile(client, id string, profile Profile) (Profile, 
 		return nil
 	})
 	return out, err
+}
+
+type imageUsage struct {
+	Deletable      bool     `json:"deletable"`
+	Blockers       []string `json:"blockers"`
+	ManifestShared bool     `json:"manifestShared"`
+}
+
+// preparedImageIdentity returns the repository and digest that remote.Delete
+// would address. Invalid or non-digest references never qualify for deletion.
+func preparedImageIdentity(value, repository, insecureRegistry string) (string, bool) {
+	ref, err := image.ParseRegistryReference(value, insecureRegistry)
+	if err != nil {
+		return "", false
+	}
+	digest, ok := ref.(name.Digest)
+	if !ok {
+		return "", false
+	}
+	repo, err := image.ParseRegistryReference(repository+":cellbox-validation", insecureRegistry)
+	if err != nil || digest.Context().Name() != repo.Context().Name() {
+		return "", false
+	}
+	return digest.Name(), true
+}
+
+func (s *Service) imageUsage(st State, id string) imageUsage {
+	out := imageUsage{Blockers: []string{}}
+	target, ok := st.ImportedImages[id]
+	if !ok {
+		return out
+	}
+	identity, valid := preparedImageIdentity(target.ImportedImage.Image, s.config.ImageBuild.Repository, s.config.ImageBuild.InsecureRegistry)
+	matchesPrepared := func(value string) bool {
+		if value == target.ImportedImage.Image {
+			return valid
+		}
+		if valid && strings.HasPrefix(value, "sha256:") && strings.HasSuffix(identity, "@"+value) {
+			return true
+		}
+		other, ok := preparedImageIdentity(value, s.config.ImageBuild.Repository, s.config.ImageBuild.InsecureRegistry)
+		return valid && ok && identity == other
+	}
+	if !valid {
+		out.Blockers = append(out.Blockers, "manifest-not-deletable")
+	}
+	if target.ImportedImage.Deleting {
+		out.Blockers = append(out.Blockers, "deletion-pending")
+	}
+	for otherID, rec := range st.ImportedImages {
+		if otherID == id {
+			continue
+		}
+		other, otherValid := preparedImageIdentity(rec.ImportedImage.Image, s.config.ImageBuild.Repository, s.config.ImageBuild.InsecureRegistry)
+		if valid && otherValid && identity == other {
+			out.ManifestShared = true
+			break
+		}
+	}
+	for _, rec := range st.Boxes {
+		if rec.Box.Phase != "deleted" && (rec.Box.ImportedImageID == id || matchesPrepared(rec.Box.Image) || matchesPrepared(rec.Box.ImageID) || matchesPrepared(rec.Profile.Image)) {
+			out.Blockers = append(out.Blockers, "boxes-reference-image")
+			break
+		}
+	}
+	for _, profile := range s.config.Profiles {
+		if matchesPrepared(profile.Image) {
+			out.Blockers = append(out.Blockers, "profiles-reference-image")
+			break
+		}
+	}
+	for _, rec := range st.Archives {
+		if rec.Archive.Portable {
+			continue
+		}
+		if matchesPrepared(rec.Archive.ImageID) {
+			out.Blockers = append(out.Blockers, "archives-reference-image")
+			break
+		}
+		// Older Docker archives store the local image config digest, not the
+		// registry manifest digest. The retained source box preserves the
+		// imported-image reference needed to identify that dependency, even after
+		// the box has been destroyed. Compare the referenced record's prepared
+		// identity too, since multiple imported IDs can share one manifest.
+		source, ok := st.Boxes[rec.Archive.SourceBoxID]
+		if !ok {
+			continue
+		}
+		if source.Box.ImportedImageID == id || matchesPrepared(source.Box.Image) || matchesPrepared(source.Profile.Image) {
+			out.Blockers = append(out.Blockers, "archives-reference-image")
+			break
+		}
+		if source.Box.ImportedImageID != "" {
+			if imported, exists := st.ImportedImages[source.Box.ImportedImageID]; exists && matchesPrepared(imported.ImportedImage.Image) {
+				out.Blockers = append(out.Blockers, "archives-reference-image")
+				break
+			}
+		}
+	}
+	if imageBuildBusy(&st) != nil {
+		out.Blockers = append(out.Blockers, "image-operation-running")
+	}
+	out.Deletable = len(out.Blockers) == 0
+	return out
+}
+
+func (s *Service) imageUsageHandler(w http.ResponseWriter, r *http.Request) {
+	var usage imageUsage
+	err := s.store.View(func(st State) error {
+		rec, ok := st.ImportedImages[r.PathValue("id")]
+		if !ok || rec.ClientID != clientID(r) {
+			return apiError("NOT_FOUND", "Imported image not found")
+		}
+		usage = s.imageUsage(st, r.PathValue("id"))
+		return nil
+	})
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, usage)
+}
+
+func (s *Service) deleteImportedImage(w http.ResponseWriter, r *http.Request) {
+	if s.config.ImageBuild == (ImageBuildConfig{}) {
+		fail(w, apiError("UNSUPPORTED_CAPABILITY", "Image building is not configured"))
+		return
+	}
+	client, id := clientID(r), r.PathValue("id")
+	var imported ImportedImage
+	op, fresh, err := s.prepareOperation(client, r.Header.Get("Idempotency-Key"), "image-delete", id, nil, func(st *State, op *Operation) error {
+		record, ok := st.ImportedImages[id]
+		if !ok || record.ClientID != client {
+			return apiError("NOT_FOUND", "Imported image not found")
+		}
+		if err := imageBuildBusy(st); err != nil {
+			return err
+		}
+		usage := s.imageUsage(*st, id)
+		for _, blocker := range usage.Blockers {
+			if blocker != "deletion-pending" {
+				return apiError("CONFLICT", "Imported image is still in use")
+			}
+		}
+		identity, valid := preparedImageIdentity(record.ImportedImage.Image, s.config.ImageBuild.Repository, s.config.ImageBuild.InsecureRegistry)
+		if !valid {
+			return apiError("CONFLICT", "Imported image does not reference a deletable prepared manifest")
+		}
+		imported = record.ImportedImage
+		imported.Image = identity
+		if usage.ManifestShared {
+			delete(st.ImportedImages, id)
+			op.Result = map[string]string{"metadataOnly": "true"}
+		} else {
+			record.ImportedImage.Deleting = true
+			st.ImportedImages[id] = record
+		}
+		return nil
+	})
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	if fresh {
+		s.launch(op, func(ctx context.Context) (map[string]string, error) {
+			if op.Result["metadataOnly"] == "true" {
+				return op.Result, nil
+			}
+			ref, err := image.ParseRegistryReference(imported.Image, s.config.ImageBuild.InsecureRegistry)
+			if err != nil {
+				return nil, apiError("IMAGE_DELETE_FAILED", "Prepared image reference is invalid")
+			}
+			if _, ok := ref.(name.Digest); !ok {
+				return nil, apiError("IMAGE_DELETE_FAILED", "Prepared image reference is not immutable")
+			}
+			if err := remote.Delete(ref, remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain)); err != nil {
+				var registryError *remotetransport.Error
+				if !errors.As(err, &registryError) || registryError.StatusCode != http.StatusNotFound {
+					return nil, apiError("IMAGE_DELETE_FAILED", "Registry could not delete the prepared image; retry deletion")
+				}
+			}
+			if err := s.store.Update(func(st *State) error {
+				record, ok := st.ImportedImages[id]
+				if !ok || record.ClientID != client || !record.ImportedImage.Deleting {
+					return apiError("CONFLICT", "Imported image deletion state changed")
+				}
+				delete(st.ImportedImages, id)
+				return nil
+			}); err != nil {
+				return nil, err
+			}
+			return map[string]string{"deleted": "true"}, nil
+		})
+	}
+	writeJSON(w, http.StatusAccepted, op)
 }

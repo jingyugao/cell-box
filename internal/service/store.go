@@ -131,7 +131,7 @@ func sameObservationBase(a, b boxRecord) bool {
 		a.Box.Phase == b.Box.Phase && a.Box.OperationID == b.Box.OperationID &&
 		a.Handle == b.Handle && a.ExecutionID == b.ExecutionID &&
 		a.Staged == b.Staged && a.RestoreArchiveID == b.RestoreArchiveID &&
-		a.RestoreComplete == b.RestoreComplete
+		a.RestoreComplete == b.RestoreComplete && a.AcceptImageChange == b.AcceptImageChange
 }
 
 // UpdateObservedBox performs the compare even when update reports no changes.
