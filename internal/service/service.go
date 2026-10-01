@@ -57,6 +57,18 @@ func New(config Config, providers map[string]boxprovider.Provider) (*Service, er
 		now := time.Now().UTC()
 		for id, record := range st.Operations {
 			if record.Operation.Status == "queued" || record.Operation.Status == "running" {
+				if record.Operation.Kind == "image-delete" {
+					if _, exists := st.ImportedImages[record.Operation.TargetID]; !exists {
+						record.Operation.Status = "succeeded"
+						record.Operation.Version++
+						record.Operation.FinishedAt = &now
+						if record.Operation.Result == nil {
+							record.Operation.Result = map[string]string{"deleted": "true"}
+						}
+						st.Operations[id] = record
+						continue
+					}
+				}
 				record.Operation.Status = "failed"
 				record.Operation.Version++
 				record.Operation.Error = &APIError{Code: "OPERATION_INTERRUPTED", Message: "Service restarted during this operation; inspect the resource before retrying"}
@@ -497,7 +509,7 @@ type createRequest struct {
 	ImportedImageID string `json:"importedImageId,omitempty"`
 }
 
-func (s *Service) create(client, key string, input createRequest, archiveID string) (Operation, error) {
+func (s *Service) create(client, key string, input createRequest, archiveID string, acceptImageChange bool) (Operation, error) {
 	if input.OwnerKey == "" || len(input.OwnerKey) > 256 {
 		return Operation{}, apiError("INVALID_REQUEST", "ownerKey must contain 1..256 bytes")
 	}
@@ -505,7 +517,7 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 	if err != nil {
 		return Operation{}, err
 	}
-	if archiveID != "" && input.ImportedImageID == "" {
+	if archiveID != "" && input.ImportedImageID == "" && !acceptImageChange {
 		err := s.store.View(func(st State) error {
 			a, ok := st.Archives[archiveID]
 			if !ok || a.ClientID != client {
@@ -531,8 +543,18 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 	var source Archive
 	op, fresh, err := s.prepareOperation(client, key, kind, "", struct {
 		createRequest
-		ArchiveID string
-	}{input, archiveID}, func(st *State, op *Operation) error {
+		ArchiveID         string
+		AcceptImageChange bool
+	}{input, archiveID, acceptImageChange}, func(st *State, op *Operation) error {
+		if input.ImportedImageID != "" {
+			record, ok := st.ImportedImages[input.ImportedImageID]
+			if !ok || record.ClientID != client {
+				return apiError("NOT_FOUND", "Imported image not found")
+			}
+			if record.ImportedImage.Deleting {
+				return apiError("CONFLICT", "Imported image is being deleted")
+			}
+		}
 		if archiveID != "" {
 			a, ok := st.Archives[archiveID]
 			if !ok || a.ClientID != client {
@@ -542,7 +564,7 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 			if source.Agent != profile.Guest.Agent {
 				return apiError("ARCHIVE_INCOMPATIBLE", "Archive agent UID/GID differs from target profile")
 			}
-			if source.ImageID != profile.Image && profile.Provider == "resumable-k8s-pod" {
+			if source.ImageID != profile.Image && profile.Provider == "resumable-k8s-pod" && !(source.Portable && acceptImageChange) {
 				return apiError("ARCHIVE_INCOMPATIBLE", "Archive image differs from target image")
 			}
 		}
@@ -555,7 +577,7 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 		if archiveID != "" {
 			state = "restoring"
 		}
-		st.Boxes[id] = boxRecord{Box: Box{ID: id, OwnerKey: input.OwnerKey, ProfileID: profile.ID, Phase: state, Version: 1, Image: profile.Image, Workspace: profile.Guest.Workspace, Capabilities: profileCapabilities(profile), OperationID: op.ID, CreatedAt: time.Now().UTC()}, ClientID: client, Profile: profile, Staged: archiveID != "", RestoreArchiveID: archiveID}
+		st.Boxes[id] = boxRecord{Box: Box{ID: id, OwnerKey: input.OwnerKey, ProfileID: profile.ID, Phase: state, Version: 1, Image: profile.Image, Workspace: profile.Guest.Workspace, Capabilities: profileCapabilities(profile), OperationID: op.ID, CreatedAt: time.Now().UTC()}, ClientID: client, Profile: profile, Staged: archiveID != "", RestoreArchiveID: archiveID, AcceptImageChange: acceptImageChange}
 		record := st.Boxes[id]
 		record.Box.ImportedImageID = input.ImportedImageID
 		st.Boxes[id] = record

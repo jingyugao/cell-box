@@ -79,14 +79,15 @@ type Box struct {
 	CreatedAt       time.Time    `json:"createdAt"`
 }
 type boxRecord struct {
-	Box              Box                `json:"box"`
-	ClientID         string             `json:"clientId"`
-	Profile          Profile            `json:"profile"`
-	Handle           boxprovider.Handle `json:"handle"`
-	ExecutionID      string             `json:"executionId,omitempty"`
-	Staged           bool               `json:"staged,omitempty"`
-	RestoreArchiveID string             `json:"restoreArchiveId,omitempty"`
-	RestoreComplete  bool               `json:"restoreComplete,omitempty"`
+	Box               Box                `json:"box"`
+	ClientID          string             `json:"clientId"`
+	Profile           Profile            `json:"profile"`
+	Handle            boxprovider.Handle `json:"handle"`
+	ExecutionID       string             `json:"executionId,omitempty"`
+	Staged            bool               `json:"staged,omitempty"`
+	RestoreArchiveID  string             `json:"restoreArchiveId,omitempty"`
+	RestoreComplete   bool               `json:"restoreComplete,omitempty"`
+	AcceptImageChange bool               `json:"acceptImageChange,omitempty"`
 }
 type Operation struct {
 	ID         string            `json:"id"`
@@ -162,6 +163,7 @@ type Archive struct {
 	SHA256      string            `json:"sha256"`
 	Size        int64             `json:"size"`
 	Consistency string            `json:"consistency"`
+	Portable    bool              `json:"portable"`
 	CreatedAt   time.Time         `json:"createdAt"`
 }
 type archiveRecord struct {

@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"cellbox.local/cellbox/internal/guestapi"
@@ -168,6 +170,276 @@ func TestImageImportCreateIsolationAndRestart(t *testing.T) {
 	}
 	var stateObject map[string]any
 	if err := json.Unmarshal(state, &stateObject); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestImportedImageUsageBlocksPausedAndHidesForeignOwnership(t *testing.T) {
+	f := newCoreFixture(t)
+	id := "img-11111111111111111111111111111111"
+	prepared := "registry.example/prepared@sha256:" + strings.Repeat("c", 64)
+	if err := f.service.store.Update(func(st *State) error {
+		st.ImportedImages[id] = importedImageRecord{ImportedImage: ImportedImage{ID: id, Image: prepared}, ClientID: "client-a"}
+		st.Boxes["paused-box"] = boxRecord{Box: Box{ID: "paused-box", Phase: "suspended", Image: prepared, ImportedImageID: id}, ClientID: "client-a"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.service.config.ImageBuild = ImageBuildConfig{Repository: "registry.example/prepared"}
+	status, body := f.call(t, "GET", "/v1/images/"+id+"/usage", testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	usage := decodeResponse[imageUsage](t, body)
+	if usage.Deletable || len(usage.Blockers) != 1 || usage.Blockers[0] != "boxes-reference-image" {
+		t.Fatalf("paused box was not reported as blocker: %+v", usage)
+	}
+	status, body = f.call(t, "GET", "/v1/images/"+id+"/usage", otherClientToken, "", nil)
+	wantStatus(t, status, 404, body)
+	status, body = f.call(t, "DELETE", "/v1/images/"+id, otherClientToken, "foreign-delete", nil)
+	wantStatus(t, status, 404, body)
+}
+
+func TestImportedImageUsageCountsCrossClientBoxesAndNonportableArchives(t *testing.T) {
+	f := newCoreFixture(t)
+	f.service.config.ImageBuild = ImageBuildConfig{Repository: "registry.example/prepared"}
+	id := "img-33333333333333333333333333333333"
+	digest := "sha256:" + strings.Repeat("d", 64)
+	prepared := "registry.example/prepared@" + digest
+	if err := f.service.store.Update(func(st *State) error {
+		st.ImportedImages[id] = importedImageRecord{ImportedImage: ImportedImage{ID: id, Image: prepared}, ClientID: "client-a"}
+		st.Boxes["foreign-box"] = boxRecord{Box: Box{ID: "foreign-box", Phase: "failed", ImageID: digest}, Profile: Profile{Image: "registry.example/prepared:alias@" + digest}, ClientID: "client-b"}
+		st.Archives["arc-33333333333333333333333333333333"] = archiveRecord{Archive: Archive{ID: "arc-33333333333333333333333333333333", ImageID: digest}, ClientID: "client-b"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status, body := f.call(t, "GET", "/v1/images/"+id+"/usage", testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	usage := decodeResponse[imageUsage](t, body)
+	if usage.Deletable || len(usage.Blockers) != 2 || usage.Blockers[0] != "boxes-reference-image" || usage.Blockers[1] != "archives-reference-image" {
+		t.Fatalf("cross-client image references were not counted generically: %+v", usage)
+	}
+	if err := f.service.store.Update(func(st *State) error {
+		box := st.Boxes["foreign-box"]
+		box.Box.Phase = "deleted"
+		st.Boxes["foreign-box"] = box
+		archive := st.Archives["arc-33333333333333333333333333333333"]
+		archive.Archive.Portable = true
+		st.Archives[archive.Archive.ID] = archive
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status, body = f.call(t, "GET", "/v1/images/"+id+"/usage", testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	if usage := decodeResponse[imageUsage](t, body); !usage.Deletable {
+		t.Fatalf("deleted box or portable archive blocked deletion: %+v", usage)
+	}
+	f.service.config.Profiles[0].Image = "registry.example/prepared:profile-alias@" + digest
+	status, body = f.call(t, "GET", "/v1/images/"+id+"/usage", testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	if usage := decodeResponse[imageUsage](t, body); usage.Deletable || len(usage.Blockers) != 1 || usage.Blockers[0] != "profiles-reference-image" {
+		t.Fatalf("canonical profile digest reference was not counted: %+v", usage)
+	}
+}
+
+func TestNonportableArchiveBlocksDeletedDockerSourceImageByImportedIdentity(t *testing.T) {
+	for _, useAlias := range []bool{false, true} {
+		name := "same-imported-id"
+		if useAlias {
+			name = "shared-manifest-alias"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newCoreFixture(t)
+			f.service.config.ImageBuild = ImageBuildConfig{Repository: "registry.example/prepared"}
+			targetID := "img-11111111111111111111111111111111"
+			aliasID := "img-22222222222222222222222222222222"
+			digest := "sha256:" + strings.Repeat("e", 64)
+			prepared := "registry.example/prepared@" + digest
+			sourceImportedID := targetID
+			if useAlias {
+				sourceImportedID = aliasID
+			}
+			if err := f.service.store.Update(func(st *State) error {
+				st.ImportedImages[targetID] = importedImageRecord{ImportedImage: ImportedImage{ID: targetID, Image: prepared}, ClientID: "client-a"}
+				if useAlias {
+					st.ImportedImages[aliasID] = importedImageRecord{ImportedImage: ImportedImage{
+						ID: aliasID, Image: "registry.example/prepared:source-alias@" + digest,
+					}, ClientID: "client-b"}
+				}
+				const sourceBoxID = "box-deleted-docker-source"
+				st.Boxes[sourceBoxID] = boxRecord{Box: Box{ID: sourceBoxID, Phase: "deleted", ImportedImageID: sourceImportedID,
+					ImageID: "sha256:" + strings.Repeat("f", 64)}, ClientID: "client-b"}
+				st.Archives["arc-44444444444444444444444444444444"] = archiveRecord{Archive: Archive{
+					ID: "arc-44444444444444444444444444444444", SourceBoxID: sourceBoxID,
+					ImageID: "sha256:" + strings.Repeat("f", 64),
+				}, ClientID: "client-b"}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			status, body := f.call(t, "GET", "/v1/images/"+targetID+"/usage", testClientToken, "", nil)
+			wantStatus(t, status, 200, body)
+			usage := decodeResponse[imageUsage](t, body)
+			if usage.Deletable || !slices.Contains(usage.Blockers, "archives-reference-image") {
+				t.Fatalf("nonportable archive did not block Docker image deletion: %+v", usage)
+			}
+			if useAlias && !usage.ManifestShared {
+				t.Fatalf("alias record did not share the prepared manifest: %+v", usage)
+			}
+
+			if err := f.service.store.Update(func(st *State) error {
+				archive := st.Archives["arc-44444444444444444444444444444444"]
+				archive.Archive.Portable = true
+				st.Archives[archive.Archive.ID] = archive
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			status, body = f.call(t, "GET", "/v1/images/"+targetID+"/usage", testClientToken, "", nil)
+			wantStatus(t, status, 200, body)
+			if usage := decodeResponse[imageUsage](t, body); !usage.Deletable {
+				t.Fatalf("portable archive blocked image deletion: %+v", usage)
+			}
+		})
+	}
+}
+
+func TestImportedImageDeleteSharedDigestRemovesOnlyMetadata(t *testing.T) {
+	f := newCoreFixture(t)
+	f.service.config.ImageBuild = ImageBuildConfig{Repository: "registry.example/prepared"}
+	imageRef := "registry.example/prepared@sha256:" + strings.Repeat("b", 64)
+	for _, id := range []string{"img-11111111111111111111111111111111", "img-22222222222222222222222222222222"} {
+		if err := f.service.store.Update(func(st *State) error {
+			st.ImportedImages[id] = importedImageRecord{ImportedImage: ImportedImage{ID: id, Image: imageRef}, ClientID: "client-a"}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status, body := f.call(t, "GET", "/v1/images/img-11111111111111111111111111111111/usage", testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	if usage := decodeResponse[imageUsage](t, body); !usage.Deletable || !usage.ManifestShared {
+		t.Fatalf("shared manifest usage: %+v", usage)
+	}
+	status, body = f.call(t, "DELETE", "/v1/images/img-11111111111111111111111111111111", testClientToken, "delete-shared", nil)
+	wantStatus(t, status, 202, body)
+	done := f.waitOperation(t, decodeResponse[Operation](t, body).ID, "succeeded")
+	status, body = f.call(t, "DELETE", "/v1/images/img-11111111111111111111111111111111", testClientToken, "delete-shared", nil)
+	wantStatus(t, status, 202, body)
+	if decodeResponse[Operation](t, body).ID != done.ID {
+		t.Fatal("metadata-only delete idempotency replay changed operation")
+	}
+	if done.Result["metadataOnly"] != "true" {
+		t.Fatalf("shared digest deletion did not report metadata-only result: %+v", done.Result)
+	}
+	if err := f.service.store.View(func(st State) error {
+		if _, ok := st.ImportedImages["img-11111111111111111111111111111111"]; ok {
+			t.Fatal("target imported image metadata remains")
+		}
+		if _, ok := st.ImportedImages["img-22222222222222222222222222222222"]; !ok {
+			t.Fatal("shared imported image metadata was removed")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestImportedImageDeleteRetryAfterRestartAndBlocksCreates(t *testing.T) {
+	f := newCoreFixture(t)
+	registryStore := registry.New()
+	var deleteCount atomic.Int32
+	allowDelete := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/manifests/") {
+			switch deleteCount.Add(1) {
+			case 1:
+				http.Error(w, "temporary registry failure", http.StatusForbidden)
+				return
+			case 2:
+				<-allowDelete
+			}
+		}
+		registryStore.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+	host := strings.TrimPrefix(server.URL, "http://")
+	ref, err := name.ParseReference(host+"/prepared:initial", name.Insecure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Write(ref, empty.Image); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := empty.Image.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageRef := host + "/prepared@" + digest.String()
+	id := "img-11111111111111111111111111111111"
+	f.config.ImageBuild = ImageBuildConfig{Address: "unix:///tmp/buildkit.sock", Repository: host + "/prepared", GuestBinary: "/bin/true", InsecureRegistry: host}
+	f.service.config.ImageBuild = f.config.ImageBuild
+	if err := f.service.store.Update(func(st *State) error {
+		st.ImportedImages[id] = importedImageRecord{ImportedImage: ImportedImage{ID: id, Image: imageRef}, ClientID: "client-a"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status, body := f.call(t, "DELETE", "/v1/images/"+id, testClientToken, "delete-first", nil)
+	wantStatus(t, status, 202, body)
+	failed := f.waitOperation(t, decodeResponse[Operation](t, body).ID, "failed")
+	if failed.Error == nil || failed.Error.Code != "IMAGE_DELETE_FAILED" {
+		t.Fatalf("registry failure was not surfaced: %+v", failed.Error)
+	}
+	if err := f.service.store.View(func(st State) error {
+		if !st.ImportedImages[id].ImportedImage.Deleting {
+			t.Fatal("failed registry deletion made imported image available")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status, body = f.call(t, "GET", "/v1/images/"+id+"/usage", testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	if usage := decodeResponse[imageUsage](t, body); usage.Deletable || len(usage.Blockers) != 1 || usage.Blockers[0] != "deletion-pending" {
+		t.Fatalf("failed deletion did not remain unavailable: %+v", usage)
+	}
+	status, body = f.call(t, "DELETE", "/v1/images/"+id, testClientToken, "delete-first", nil)
+	wantStatus(t, status, 202, body)
+	if decodeResponse[Operation](t, body).ID != failed.ID {
+		t.Fatal("same idempotency key did not return original failed operation")
+	}
+	interrupted, _, err := f.service.prepareOperation("client-a", "interrupted-delete", "image-delete", id, nil, func(*State, *Operation) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Startup interrupts operations durably while retaining Deleting so a new
+	// request can safely retry the digest deletion.
+	f.reopen(t)
+	status, body = f.call(t, "GET", "/v1/operations/"+interrupted.ID, testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	if got := decodeResponse[Operation](t, body); got.Status != "failed" {
+		t.Fatalf("interrupted deletion operation status: %+v", got)
+	}
+	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "blocked-create", createRequest{ProfileID: "profile-a", OwnerKey: "blocked", ImportedImageID: id})
+	wantStatus(t, status, 409, body)
+	status, body = f.call(t, "DELETE", "/v1/images/"+id, testClientToken, "delete-retry", nil)
+	wantStatus(t, status, 202, body)
+	retry := decodeResponse[Operation](t, body)
+	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "blocked-during-delete", createRequest{ProfileID: "profile-a", OwnerKey: "blocked-during-delete", ImportedImageID: id})
+	wantStatus(t, status, 409, body)
+	close(allowDelete)
+	done := f.waitOperation(t, retry.ID, "succeeded")
+	if done.Error != nil {
+		t.Fatalf("retry after restart failed: %+v", done.Error)
+	}
+	if err := f.service.store.View(func(st State) error {
+		if _, ok := st.ImportedImages[id]; ok {
+			t.Fatal("successful retry retained imported image metadata")
+		}
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 }

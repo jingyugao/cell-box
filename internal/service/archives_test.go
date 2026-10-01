@@ -235,6 +235,10 @@ func TestCaptureSurvivesBoxDeletionAndRestores(t *testing.T) {
 	if archiveID == "" {
 		t.Fatal("capture omitted archive ID")
 	}
+	archive, err := f.service.archiveForClient("client-a", archiveID)
+	if err != nil || !archive.Portable {
+		t.Fatalf("validated native workspace archive is not portable: %+v %v", archive, err)
+	}
 	status, body = f.call(t, "GET", "/v1/archives/"+archiveID, otherClientToken, "", nil)
 	wantStatus(t, status, 404, body)
 	status, body = f.call(t, "GET", "/v1/archives/"+archiveID+"/content", testClientToken, "", nil)
@@ -260,6 +264,98 @@ func TestCaptureSurvivesBoxDeletionAndRestores(t *testing.T) {
 	box := decodeResponse[Box](t, body)
 	if box.Phase != "staged" {
 		t.Fatalf("restored box state: %s", box.Phase)
+	}
+}
+
+func TestPortableArchiveRestoreAcrossImagesRequiresOptIn(t *testing.T) {
+	f := newCoreFixture(t)
+	f.service.config.Profiles[0].Provider = "resumable-k8s-pod"
+	f.service.providers["resumable-k8s-pod"] = f.provider
+	const archiveID = "arc-11111111111111111111111111111111"
+	payload := makeArchiveTestData(t, archiveTestEntry{"work.txt", tar.TypeReg, "portable"})
+	dir, err := f.service.archivesDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := archivePath(dir, archiveID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(name, payload, 0600); err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.Sum256(payload)
+	archive := Archive{ID: archiveID, SourceBoxID: "deleted-source", ImageID: "registry.example/source@sha256:" + strings.Repeat("a", 64), Agent: f.config.Profiles[0].Guest.Agent, SHA256: hex.EncodeToString(h[:]), Size: int64(len(payload)), Portable: true}
+	if err := f.service.store.Update(func(st *State) error {
+		st.Archives[archiveID] = archiveRecord{Archive: archive, ClientID: "client-a"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var restored atomic.Bool
+	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.WriteHeader(200)
+			return
+		}
+		if r.URL.Path == "/v1/restore" {
+			body, readErr := io.ReadAll(r.Body)
+			if readErr == nil && bytes.Equal(body, payload) {
+				restored.Store(true)
+				w.WriteHeader(204)
+				return
+			}
+			http.Error(w, "invalid archive", 400)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer guest.Close()
+	f.provider.mu.Lock()
+	f.provider.guestURL = guest.URL
+	f.provider.mu.Unlock()
+	request := map[string]any{"profileId": "profile-a", "ownerKey": "portable-target", "archiveId": archiveID}
+	status, body := f.call(t, "POST", "/v1/boxes:restore", testClientToken, "restore-needs-optin", request)
+	wantStatus(t, status, 409, body)
+	request["acceptImageChange"] = true
+	archive.Agent.UID++
+	if err := f.service.store.Update(func(st *State) error {
+		record := st.Archives[archiveID]
+		record.Archive = archive
+		st.Archives[archiveID] = record
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status, body = f.call(t, "POST", "/v1/boxes:restore", testClientToken, "restore-agent-mismatch", request)
+	wantStatus(t, status, 409, body)
+	archive.Agent = f.config.Profiles[0].Guest.Agent
+	if err := f.service.store.Update(func(st *State) error {
+		record := st.Archives[archiveID]
+		record.Archive = archive
+		st.Archives[archiveID] = record
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status, body = f.call(t, "POST", "/v1/boxes:restore", testClientToken, "restore-accepted", request)
+	wantStatus(t, status, 202, body)
+	op := decodeResponse[Operation](t, body)
+	f.waitOperation(t, op.ID, "succeeded")
+	request["acceptImageChange"] = false
+	status, body = f.call(t, "POST", "/v1/boxes:restore", testClientToken, "restore-accepted", request)
+	wantStatus(t, status, 409, body)
+	if !restored.Load() {
+		t.Fatal("portable archive was not restored into selected target image")
+	}
+	if err := f.service.store.View(func(st State) error {
+		b := st.Boxes[op.TargetID]
+		if b.Box.ImportedImageID != "" || b.Profile.Image != f.config.Profiles[0].Image {
+			t.Fatalf("restore depended on deleted source import metadata: %+v", b)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

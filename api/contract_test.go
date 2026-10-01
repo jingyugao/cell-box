@@ -25,7 +25,7 @@ func TestOpenAPIResponseShapesAndReferences(t *testing.T) {
 		t.Fatal("unexpected OpenAPI version")
 	}
 	paths := doc["paths"].(map[string]any)
-	for endpoint, methods := range map[string][]string{"/v1/images": {"post", "get"}, "/v1/images:import": {"post"}, "/v1/images/{id}": {"get"}} {
+	for endpoint, methods := range map[string][]string{"/v1/images": {"post", "get"}, "/v1/images:import": {"post"}, "/v1/images/{id}": {"get", "delete"}, "/v1/images/{id}/usage": {"get"}} {
 		for _, method := range methods {
 			if path, ok := paths[endpoint].(map[string]any); !ok || path[method] == nil {
 				t.Errorf("missing image API contract: %s %s", method, endpoint)

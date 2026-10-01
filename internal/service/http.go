@@ -87,13 +87,15 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/images:import", s.importImage)
 	mux.HandleFunc("GET /v1/images", s.listImportedImages)
 	mux.HandleFunc("GET /v1/images/{id}", s.getImportedImage)
+	mux.HandleFunc("GET /v1/images/{id}/usage", s.imageUsageHandler)
+	mux.HandleFunc("DELETE /v1/images/{id}", s.deleteImportedImage)
 	mux.HandleFunc("POST /v1/boxes", func(w http.ResponseWriter, r *http.Request) {
 		var input createRequest
 		if err := decode(w, r, &input); err != nil {
 			fail(w, err)
 			return
 		}
-		op, err := s.create(clientID(r), r.Header.Get("Idempotency-Key"), input, "")
+		op, err := s.create(clientID(r), r.Header.Get("Idempotency-Key"), input, "", false)
 		if err != nil {
 			fail(w, err)
 			return
@@ -103,7 +105,8 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/boxes:restore", func(w http.ResponseWriter, r *http.Request) {
 		var input struct {
 			createRequest
-			ArchiveID string `json:"archiveId"`
+			ArchiveID         string `json:"archiveId"`
+			AcceptImageChange bool   `json:"acceptImageChange,omitempty"`
 		}
 		if err := decode(w, r, &input); err != nil {
 			fail(w, err)
@@ -113,7 +116,7 @@ func (s *Service) Handler() http.Handler {
 			fail(w, apiError("INVALID_REQUEST", "archiveId is required"))
 			return
 		}
-		op, err := s.create(clientID(r), r.Header.Get("Idempotency-Key"), input.createRequest, input.ArchiveID)
+		op, err := s.create(clientID(r), r.Header.Get("Idempotency-Key"), input.createRequest, input.ArchiveID, input.AcceptImageChange)
 		if err != nil {
 			fail(w, err)
 			return
