@@ -59,3 +59,9 @@ type Provider interface {
 type InventoryProvider interface {
 	List(context.Context, string, string) ([]inventory.Record, error)
 }
+
+// ResourceInventoryProvider reads lifecycle state from resources without checking Pods.
+// It is intended for display-only listings that accept eventual consistency.
+type ResourceInventoryProvider interface {
+	ListResources(context.Context, string, string) ([]inventory.Record, error)
+}

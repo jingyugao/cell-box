@@ -71,6 +71,12 @@ func sortInventory(boxes []Box) {
 	})
 }
 func (s *Service) listBoxes(w http.ResponseWriter, r *http.Request) {
+	observation := r.URL.Query().Get("observation")
+	if observation != "" && observation != "resource" {
+		fail(w, apiError("INVALID_REQUEST", "observation must be resource when supplied"))
+		return
+	}
+	resourcesOnly := observation == "resource"
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 	namespaces := map[string]boxprovider.InventoryProvider{}
@@ -86,12 +92,22 @@ func (s *Service) listBoxes(w http.ResponseWriter, r *http.Request) {
 		}
 		provider, ok := s.providers[profile.Provider].(boxprovider.InventoryProvider)
 		if !ok {
+			if resourcesOnly {
+				fail(w, apiError("UNSUPPORTED_CAPABILITY", "Provider does not support resource inventory"))
+				return
+			}
 			if s.objects != nil {
 				fail(w, apiError("UNSUPPORTED_CAPABILITY", "Remote inventory requires a Kubernetes provider"))
 				return
 			}
 			s.listLegacyBoxes(w, r)
 			return
+		}
+		if resourcesOnly {
+			if _, ok := provider.(boxprovider.ResourceInventoryProvider); !ok {
+				fail(w, apiError("UNSUPPORTED_CAPABILITY", "Provider does not support resource inventory"))
+				return
+			}
 		}
 		namespaces[profile.Provider+"/"+profile.Namespace] = provider
 	}
@@ -103,7 +119,13 @@ func (s *Service) listBoxes(w http.ResponseWriter, r *http.Request) {
 	boxes := []Box{}
 	for key, provider := range namespaces {
 		namespace := strings.SplitN(key, "/", 2)[1]
-		rows, err := provider.List(ctx, namespace, clientID(r))
+		var rows []inventory.Record
+		var err error
+		if resourcesOnly {
+			rows, err = provider.(boxprovider.ResourceInventoryProvider).ListResources(ctx, namespace, clientID(r))
+		} else {
+			rows, err = provider.List(ctx, namespace, clientID(r))
+		}
 		if err != nil {
 			fail(w, err)
 			return

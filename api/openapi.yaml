@@ -860,8 +860,17 @@ paths:
         is filtered: creating, checkpointing, suspending, suspended, restoring,
         failed, and deleting resources are all returned. Running executions are
         checked against a batch Pod LIST without per-box GET or ledger enumeration.
+        With observation=resource, trusts CR lifecycle state without reading Pods.
+        This mode is for display-only listings that accept eventual consistency.
         Requests have a ten-second deadline; source errors fail the entire list.
       parameters:
+      - in: query
+        name: observation
+        description: Omit for runtime verification; resource reads only CR lifecycle state.
+        required: false
+        schema:
+          type: string
+          enum: [resource]
       - in: query
         name: id
         description: Repeat to filter by multiple owned box IDs. Any missing or unowned ID returns 404.
