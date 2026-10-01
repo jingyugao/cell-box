@@ -1,25 +1,6 @@
 {{- if .Values.api.enabled }}
 {{- $apiNamespace := include "cellbox.apiNamespace" . }}
-{{- $existingClaim := lookup "v1" "PersistentVolumeClaim" $apiNamespace .Values.api.dataClaim }}
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: {{ .Values.api.dataClaim }}
-  namespace: {{ $apiNamespace }}
-  annotations:
-    helm.sh/resource-policy: keep
-spec:
-  accessModes: [ReadWriteOnce]
-  {{- if and $existingClaim $existingClaim.spec.volumeName }}
-  volumeName: {{ $existingClaim.spec.volumeName }}
-  {{- end }}
-  {{- if .Values.api.storageClassName }}
-  storageClassName: {{ .Values.api.storageClassName }}
-  {{- end }}
-  resources:
-    requests:
-      storage: {{ .Values.api.storageSize }}
----
+{{- if ne (int .Values.api.replicas) 1 }}{{- fail "api.replicas must be 1; the API has a single active Lease owner" }}{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -36,8 +17,8 @@ spec:
     metadata:
       labels:
         app: cellbox-api
-      {{- if or .Values.buildkit.enabled .Values.api.manageSecrets }}
       annotations:
+        checksum/object-storage: {{ include "cellbox.objectStorageConfig" . | sha256sum }}
         {{- if .Values.api.manageSecrets }}
         checksum/api-config: {{ toJson .Values.api.config | sha256sum }}
         checksum/client-tokens: {{ toJson .Values.api.clientTokens | sha256sum }}
@@ -45,7 +26,6 @@ spec:
         {{- if .Values.buildkit.enabled }}
         checksum/buildkit-config: {{ include (print $.Template.BasePath "/buildkit-config.yaml") . | sha256sum }}
         {{- end }}
-      {{- end }}
     spec:
       serviceAccountName: cellbox-api
       automountServiceAccountToken: true
@@ -62,22 +42,8 @@ spec:
         {{- end }}
         seccompProfile:
           type: RuntimeDefault
+      {{- if .Values.buildkit.enabled }}
       initContainers:
-        - name: prepare-data-dir
-          image: {{ include "cellbox.image" (dict "root" . "image" .Values.api.initImage) | quote }}
-          command: [/bin/sh, -ec, 'chown 10001:10001 /var/lib/cellbox && chmod 0700 /var/lib/cellbox']
-          securityContext:
-            runAsUser: 0
-            runAsNonRoot: false
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: [ALL]
-              add: [CHOWN, FOWNER]
-          volumeMounts:
-            - name: data
-              mountPath: /var/lib/cellbox
-        {{- if .Values.buildkit.enabled }}
         - name: prepare-buildkit-dirs
           image: {{ include "cellbox.image" (dict "root" . "image" .Values.api.initImage) | quote }}
           # fsGroup leaves a setgid group outside RootlessKit's UID/GID mapping.
@@ -105,6 +71,10 @@ spec:
           args:
             - --config
             - /etc/cellbox/config.json
+            - --object-storage-config
+            - /etc/cellbox-storage/config.json
+            - --leader-election-namespace
+            - {{ $apiNamespace }}
             {{- if .Values.buildkit.enabled }}
             - --buildkit-addr
             - unix:///run/cellbox-buildkit/buildkitd.sock
@@ -129,17 +99,17 @@ spec:
             - name: DOCKER_CONFIG
               value: /etc/cellbox-registry
             {{- end }}
-            {{- if .Values.api.ossCredentialsSecret }}
+            {{- if .Values.objectStorage.credentialsSecret }}
             - name: OSS_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.api.ossCredentialsSecret }}
-                  key: OSS_ACCESS_KEY
+                  name: {{ .Values.objectStorage.credentialsSecret }}
+                  key: {{ .Values.objectStorage.accessKeyKey }}
             - name: OSS_SECRET_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.api.ossCredentialsSecret }}
-                  key: OSS_SECRET_KEY
+                  name: {{ .Values.objectStorage.credentialsSecret }}
+                  key: {{ .Values.objectStorage.secretKeyKey }}
             {{- end }}
             {{- with .Values.api.extraEnv }}
             {{- toYaml . | nindent 12 }}
@@ -165,6 +135,9 @@ spec:
             capabilities:
               drop: [ALL]
           volumeMounts:
+            - name: object-storage
+              mountPath: /etc/cellbox-storage
+              readOnly: true
             - name: config
               mountPath: /etc/cellbox
               readOnly: true
@@ -221,6 +194,10 @@ spec:
               readOnly: true
         {{- end }}
       volumes:
+        - name: object-storage
+          configMap:
+            name: cellbox-object-storage
+            defaultMode: 0444
         - name: config
           secret:
             secretName: {{ .Values.api.configSecret }}
@@ -229,8 +206,8 @@ spec:
               - key: config.json
                 path: config.json
         - name: data
-          persistentVolumeClaim:
-            claimName: {{ .Values.api.dataClaim }}
+          emptyDir:
+            sizeLimit: {{ .Values.api.temporaryStorageSize }}
         - name: temp
           emptyDir:
             sizeLimit: {{ ternary "1Gi" "64Mi" .Values.buildkit.enabled }}

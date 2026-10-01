@@ -124,6 +124,7 @@ func (s *Service) Handler() http.Handler {
 		writeJSON(w, 202, op)
 	})
 	mux.HandleFunc("GET /v1/boxes", s.listBoxes)
+	mux.HandleFunc("GET /v1/checkpoints", s.listCheckpoints)
 	mux.HandleFunc("GET /v1/boxes/{id}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		b, err := s.box(clientID(r), r.PathValue("id"))
@@ -197,6 +198,12 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/archives/{id}", s.deleteArchive)
 	api := s.authenticate(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-s.ctx.Done():
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": &APIError{Code: "UNAVAILABLE", Message: "Cellbox service is stopping"}})
+			return
+		default:
+		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		if r.URL.Path == "/healthz" {
 			writeJSON(w, 200, map[string]string{"status": "ok"})
@@ -243,7 +250,7 @@ func (s *Service) listProfiles(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, out)
 }
-func (s *Service) listBoxes(w http.ResponseWriter, r *http.Request) {
+func (s *Service) listLegacyBoxes(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
@@ -305,6 +312,14 @@ func (s *Service) listBoxes(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
+	filtered := make([]Box, 0, len(boxes))
+	for _, box := range boxes {
+		checkpoint := r.URL.Path == "/v1/checkpoints"
+		if (checkpoint && box.Phase == "suspended") || !checkpoint {
+			filtered = append(filtered, box)
+		}
+	}
+	boxes = filtered
 	sort.Slice(boxes, func(i, j int) bool {
 		if boxes[i].CreatedAt.Equal(boxes[j].CreatedAt) {
 			return boxes[i].ID < boxes[j].ID

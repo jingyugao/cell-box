@@ -16,6 +16,8 @@ spec:
         app: {{ .Values.controller.name }}
         app.kubernetes.io/part-of: cellbox
         app.kubernetes.io/component: controller
+      annotations:
+        checksum/object-storage: {{ include "cellbox.objectStorageConfig" . | sha256sum }}
     spec:
       serviceAccountName: {{ .Values.controller.serviceAccountName }}
       hostPID: true
@@ -36,6 +38,7 @@ spec:
             - --node=$(NODE_NAME)
             - --namespace={{ .Release.Namespace }}
             - --leader-election-namespace={{ .Release.Namespace }}
+            - --object-storage-config=/etc/cellbox-storage/config.json
             - --host-mount-namespace
             - --cri-socket={{ .Values.controller.criSocket }}
           env:
@@ -43,10 +46,25 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            {{- if .Values.objectStorage.credentialsSecret }}
+            - name: OSS_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.objectStorage.credentialsSecret }}
+                  key: {{ .Values.objectStorage.accessKeyKey }}
+            - name: OSS_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.objectStorage.credentialsSecret }}
+                  key: {{ .Values.objectStorage.secretKeyKey }}
+            {{- end }}
           securityContext:
             privileged: true
             runAsUser: 0
           volumeMounts:
+            - name: object-storage
+              mountPath: /etc/cellbox-storage
+              readOnly: true
             - name: cri-directory
               mountPath: {{ .Values.controller.criDirectory }}
             - name: runsc-root
@@ -57,6 +75,10 @@ spec:
               mountPath: /usr/local/bin
               readOnly: true
       volumes:
+        - name: object-storage
+          configMap:
+            name: cellbox-object-storage
+            defaultMode: 0444
         - name: cri-directory
           hostPath:
             path: {{ .Values.controller.criDirectory }}

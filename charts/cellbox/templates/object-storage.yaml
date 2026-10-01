@@ -1,0 +1,17 @@
+{{- if or .Values.api.enabled .Values.controller.enabled }}
+{{- $namespaces := list .Release.Namespace }}
+{{- $apiNamespace := include "cellbox.apiNamespace" . }}
+{{- if and .Values.api.enabled (ne $apiNamespace .Release.Namespace) }}
+{{- $namespaces = append $namespaces $apiNamespace }}
+{{- end }}
+{{- range $namespace := $namespaces }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cellbox-object-storage
+  namespace: {{ $namespace }}
+data:
+  config.json: {{ include "cellbox.objectStorageConfig" $ | quote }}
+{{- end }}
+{{- end }}

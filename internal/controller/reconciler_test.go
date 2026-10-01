@@ -4,6 +4,7 @@ package controller
 
 import (
 	api "cellbox.local/cellbox/api/v1alpha1"
+	lifecycle "cellbox.local/cellbox/internal/runtime"
 	"context"
 	"errors"
 	core "k8s.io/api/core/v1"
@@ -22,18 +23,39 @@ import (
 type fakeRuntime struct {
 	checkpoints, prepares, cleanups int
 	prepareError, cleanupError      error
+	checkpointError                 error
+	checkpointFailures              int
+	prepareFailures                 int
+	inventoryError                  error
+	inventoryPhases                 []string
 }
 
 func (f *fakeRuntime) Checkpoint(context.Context, *api.ResumablePod, *core.Pod) error {
 	f.checkpoints++
+	if f.checkpointFailures > 0 {
+		f.checkpointFailures--
+		return f.checkpointError
+	}
 	return nil
 }
 func (f *fakeRuntime) Prepare(context.Context, *api.ResumablePod, *core.Pod) error {
 	f.prepares++
+	if f.prepareFailures > 0 {
+		f.prepareFailures--
+		err := f.prepareError
+		if f.prepareFailures == 0 {
+			f.prepareError = nil
+		}
+		return err
+	}
 	return f.prepareError
 }
 func (f *fakeRuntime) Cleanup(context.Context, *core.Pod) error        { f.cleanups++; return f.cleanupError }
 func (f *fakeRuntime) Forget(context.Context, *api.ResumablePod) error { return nil }
+func (f *fakeRuntime) SyncInventory(_ context.Context, w *api.ResumablePod) error {
+	f.inventoryPhases = append(f.inventoryPhases, w.Status.Phase)
+	return f.inventoryError
+}
 func fixture(t *testing.T) (*Reconciler, *fakeRuntime, *api.ResumablePod) {
 	t.Helper()
 	s := runtime.NewScheme()
@@ -136,6 +158,94 @@ func TestSuspendResumeAndControllerRestart(t *testing.T) {
 		t.Fatal("old snapshot must not be replayable after readiness", w.Status)
 	}
 }
+
+func TestCheckpointStorageOutageRetriesWithoutFailingLifecycle(t *testing.T) {
+	r, f, w := fixture(t)
+	desired(t, r, w, "Suspended")
+	step(t, r, w)
+	if w.Status.Phase != "Checkpointing" {
+		t.Fatal(w.Status)
+	}
+	f.checkpointError = lifecycle.ErrRetryableStorage
+	f.checkpointFailures = 1
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(w)})
+	if !errors.Is(err, lifecycle.ErrRetryableStorage) {
+		t.Fatalf("expected retryable storage error, got %v", err)
+	}
+	if err = r.Get(context.Background(), client.ObjectKeyFromObject(w), w); err != nil {
+		t.Fatal(err)
+	}
+	if w.Status.Phase != "Checkpointing" {
+		t.Fatalf("temporary storage outage moved lifecycle to %q", w.Status.Phase)
+	}
+	step(t, r, w)
+	if w.Status.Phase != "Suspending" || f.checkpoints != 2 {
+		t.Fatalf("checkpoint did not retry and advance: phase=%s calls=%d", w.Status.Phase, f.checkpoints)
+	}
+}
+
+func TestInventoryStorageOutageBlocksResume(t *testing.T) {
+	ctx := context.Background()
+	r, f, w := fixture(t)
+	w.Status.Phase = "Suspended"
+	w.Status.Snapshot = "checkpoint-1"
+	w.Status.PodUID = ""
+	w.Status.PodName = ""
+	if err := r.Status().Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	cycle := w.Status.Cycle
+	f.inventoryError = lifecycle.ErrRetryableStorage
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(w)})
+	if !errors.Is(err, lifecycle.ErrRetryableStorage) {
+		t.Fatalf("expected inventory storage error, got %v", err)
+	}
+	if len(f.inventoryPhases) == 0 || f.inventoryPhases[len(f.inventoryPhases)-1] != "Restoring" {
+		t.Fatalf("resume did not request index removal first: %v", f.inventoryPhases)
+	}
+	if err = r.Get(ctx, client.ObjectKeyFromObject(w), w); err != nil {
+		t.Fatal(err)
+	}
+	if w.Status.Phase != "Suspended" || w.Status.Cycle != cycle || f.prepares != 0 {
+		t.Fatalf("resume progressed before inventory removal: status=%+v prepares=%d", w.Status, f.prepares)
+	}
+}
+
+func TestRestoreStorageOutageRetriesWithoutFailingLifecycle(t *testing.T) {
+	ctx := context.Background()
+	r, f, w := fixture(t)
+	p := &core.Pod{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "old", Namespace: "test"}, p); err != nil {
+		t.Fatal(err)
+	}
+	p.Spec.SchedulingGates = []core.PodSchedulingGate{{Name: api.Gate}}
+	if err := r.Update(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	w.Status.Phase = "Restoring"
+	w.Status.Snapshot = "checkpoint-1"
+	if err := r.Status().Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	f.prepareError = lifecycle.ErrRetryableStorage
+	f.prepareFailures = 1
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(w)})
+	if !errors.Is(err, lifecycle.ErrRetryableStorage) {
+		t.Fatalf("expected retryable storage error, got %v", err)
+	}
+	if err = r.Get(ctx, client.ObjectKeyFromObject(w), w); err != nil {
+		t.Fatal(err)
+	}
+	if w.Status.Phase != "Restoring" {
+		t.Fatalf("temporary storage outage moved lifecycle to %q", w.Status.Phase)
+	}
+	step(t, r, w)
+	if f.prepares != 2 || w.Status.Phase != "Restoring" {
+		t.Fatalf("restore did not retry in place: phase=%s calls=%d", w.Status.Phase, f.prepares)
+	}
+}
+
 func TestLostExecutionNeverColdStarts(t *testing.T) {
 	r, _, w := fixture(t)
 	p := &core.Pod{ObjectMeta: meta.ObjectMeta{Name: "old", Namespace: "test"}}
@@ -258,5 +368,42 @@ func TestDeletionRetainsFinalizerUntilRuntimeCleanup(t *testing.T) {
 	}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(w), &api.ResumablePod{}); client.IgnoreNotFound(err) != nil || err == nil {
 		t.Fatal("CR not deleted", err)
+	}
+}
+
+func TestInventoryFailureKeepsPausePending(t *testing.T) {
+	ctx := context.Background()
+	r, f, w := fixture(t)
+	pod := &core.Pod{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "old", Namespace: "test"}, pod); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Delete(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	w.Spec.DesiredState = "Suspended"
+	if err := r.Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	w.Status.Phase = "Suspending"
+	w.Status.Snapshot = "checkpoint-1"
+	if err := r.Status().Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	f.inventoryError = lifecycle.ErrRetryableStorage
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(w)})
+	if !errors.Is(err, lifecycle.ErrRetryableStorage) {
+		t.Fatalf("expected storage failure: %v", err)
+	}
+	if err = r.Get(ctx, client.ObjectKeyFromObject(w), w); err != nil {
+		t.Fatal(err)
+	}
+	if w.Status.Phase != "Suspending" {
+		t.Fatalf("pause exposed before index publication: %s", w.Status.Phase)
+	}
+	f.inventoryError = nil
+	step(t, r, w)
+	if w.Status.Phase != "Suspended" {
+		t.Fatalf("pause did not complete after index recovery: %s", w.Status.Phase)
 	}
 }

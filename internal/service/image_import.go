@@ -215,14 +215,17 @@ func importDockerConfig(registry string, credentials *image.RegistryAuth) (strin
 
 func (s *Service) listImportedImages(w http.ResponseWriter, r *http.Request) {
 	out := []ImportedImage{}
-	err := s.store.View(func(st State) error {
-		for _, record := range st.ImportedImages {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	records, err := s.store.ListImages(ctx)
+	if err == nil {
+		for _, record := range records {
 			if record.ClientID == clientID(r) {
 				out = append(out, record.ImportedImage)
 			}
 		}
-		return nil
-	})
+	}
+
 	if err != nil {
 		fail(w, err)
 		return
@@ -232,15 +235,14 @@ func (s *Service) listImportedImages(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) getImportedImage(w http.ResponseWriter, r *http.Request) {
-	var out ImportedImage
-	err := s.store.View(func(st State) error {
-		record, ok := st.ImportedImages[r.PathValue("id")]
-		if !ok || record.ClientID != clientID(r) {
-			return apiError("NOT_FOUND", "Imported image not found")
-		}
-		out = record.ImportedImage
-		return nil
-	})
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	record, err := s.store.ReadImage(ctx, r.PathValue("id"))
+	if err == nil && record.ClientID != clientID(r) {
+		err = apiError("NOT_FOUND", "Imported image not found")
+	}
+	out := record.ImportedImage
+
 	if err != nil {
 		fail(w, err)
 		return

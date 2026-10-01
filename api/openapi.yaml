@@ -128,6 +128,7 @@ components:
           - freezing
           - frozen
           - unfreezing
+          - checkpointing
           - suspending
           - suspended
           - resuming
@@ -854,11 +855,12 @@ paths:
     get:
       operationId: listBoxes
       description: |
-        Observes runtime lifecycle metadata without guest health checks. At most
-        eight boxes are inspected concurrently within a ten-second request deadline.
-        Each box is committed against its observed local resource version; the
-        list is not a simultaneous snapshot of all external runtimes. An inspection
-        error fails the request instead of returning a partial successful list.
+        Lists all owned resources directly with namespace-scoped Kubernetes LIST,
+        using managed/client labels and inventory annotations. No lifecycle phase
+        is filtered: creating, checkpointing, suspending, suspended, restoring,
+        failed, and deleting resources are all returned. Running executions are
+        checked against a batch Pod LIST without per-box GET or ledger enumeration.
+        Requests have a ten-second deadline; source errors fail the entire list.
       parameters:
       - in: query
         name: id
@@ -881,7 +883,7 @@ paths:
           description: Success
         default:
           $ref: '#/components/responses/Error'
-      summary: List owned boxes and refresh provider lifecycle phases
+      summary: List all owned boxes directly from Kubernetes
     post:
       operationId: createBox
       parameters:
@@ -902,6 +904,29 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       summary: Create a box asynchronously
+  /v1/checkpoints:
+    get:
+      operationId: listCheckpoints
+      summary: List checkpoint resources directly from object storage
+      description: |
+        Lists checkpoint metadata objects and reads each record directly from OSS.
+        Records are scoped to the authenticated client. No lifecycle phase is
+        filtered: checkpointing, suspending, suspended, resuming, failed, and deleting
+        records remain visible until the underlying resource is physically removed.
+        Suspended records require a committed snapshot and released source Pod.
+        No Kubernetes or service-ledger enumeration is performed. Concurrent object
+        deletion between LIST and GET is skipped; storage errors fail the entire list.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/Box'
+                type: array
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
   /v1/images:
     post:
       operationId: buildImage
@@ -941,6 +966,10 @@ paths:
       summary: Build and publish a Cellbox image with BuildKit
     get:
       operationId: listImportedImages
+      description: |
+        Lists image metadata objects in OSS and reads them for each request.
+        The mutation cache is not consulted. Records are scoped to the authenticated
+        client, deletion tombstones are omitted, and storage errors fail the list.
       summary: List successfully imported images owned by this client
       responses:
         '200':

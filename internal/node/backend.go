@@ -10,9 +10,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
+	"cellbox.local/cellbox/internal/objectstorage"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	core "k8s.io/api/core/v1"
@@ -27,6 +29,18 @@ type Backend struct {
 	HostMountNamespace bool
 	Runtime            cri.RuntimeServiceClient
 	Images             cri.ImageServiceClient
+	// Objects is optional for local-only installations. When configured, sealed
+	// snapshots are durable in object storage and Base is only a node cache.
+	Objects        objectstorage.Objects
+	forgetMu       sync.Mutex
+	forgetSuccess  map[forgetKey]struct{}
+	inventoryMu    sync.Mutex
+	inventoryState map[string]string
+}
+
+type forgetKey struct {
+	owner string
+	cycle int64
 }
 
 func New(socket string) (*Backend, error) {
@@ -107,8 +121,26 @@ func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.P
 		return err
 	}
 	if _, err = os.Stat(path); err == nil {
-		_, err = Verify(path, string(r.UID), r.Status.SpecHash, b.Runsc)
+		if _, err = Verify(path, string(r.UID), r.Status.SpecHash, b.Runsc); err != nil {
+			return err
+		}
+		return b.uploadSnapshot(ctx, r, path)
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
+	}
+	// The controller may have restarted after the object upload committed but
+	// before its status transition. Adopt the durable snapshot before considering
+	// another destructive runsc checkpoint.
+	if b.Objects != nil {
+		if err = b.downloadSnapshot(ctx, r, path); err == nil {
+			if _, err = b.verifySnapshotImage(ctx, r, path); err != nil {
+				return err
+			}
+			b.clearForgetSuccess(r)
+			return nil
+		} else if !errors.Is(err, objectstorage.ErrNotFound) {
+			return err
+		}
 	}
 	pending := path + ".pending"
 	// Never repeat a destructive checkpoint after an ambiguous process crash.
@@ -161,24 +193,47 @@ func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.P
 	if err = os.Rename(pending, path); err != nil {
 		return err
 	}
-	return SyncDir(filepath.Dir(path))
+	if err = SyncDir(filepath.Dir(path)); err != nil {
+		return err
+	}
+	return b.uploadSnapshot(ctx, r, path)
 }
+
+func (b *Backend) verifySnapshotImage(ctx context.Context, r *api.ResumablePod, path string) (*Manifest, error) {
+	m, err := Verify(path, string(r.UID), r.Status.SpecHash, b.Runsc)
+	if err != nil {
+		return nil, err
+	}
+	id, err := b.imageID(ctx, r.Spec.Container.Image)
+	if err != nil {
+		return nil, err
+	}
+	if id != m.ImageID {
+		return nil, fmt.Errorf("image changed since checkpoint")
+	}
+	return m, nil
+}
+
 func (b *Backend) Prepare(ctx context.Context, r *api.ResumablePod, p *core.Pod) error {
 	if r.Status.Snapshot != "" {
 		path, err := SnapshotPath(b.Base, string(r.UID), r.Status.Snapshot)
 		if err != nil {
 			return err
 		}
-		m, err := Verify(path, string(r.UID), r.Status.SpecHash, b.Runsc)
-		if err != nil {
+		if _, err = os.Stat(path); errors.Is(err, os.ErrNotExist) && b.Objects != nil {
+			if err = b.downloadSnapshot(ctx, r, path); err != nil {
+				return err
+			}
+		} else if err != nil {
 			return err
 		}
-		id, err := b.imageID(ctx, r.Spec.Container.Image)
-		if err != nil {
+		if _, err = b.verifySnapshotImage(ctx, r, path); err != nil {
 			return err
 		}
-		if id != m.ImageID {
-			return fmt.Errorf("image changed since checkpoint")
+		// The cache may be the only surviving copy after an interrupted upload.
+		// Do not authorize restore until the remote durable copy is committed.
+		if err = b.uploadSnapshot(ctx, r, path); err != nil {
+			return err
 		}
 	}
 	return AtomicJSON(filepath.Join(b.Base, "tickets", string(p.UID)+".json"), Ticket{OwnerUID: string(r.UID), PodUID: string(p.UID), Namespace: p.Namespace, PodName: p.Name, Snapshot: r.Status.Snapshot, SpecHash: r.Status.SpecHash})
@@ -258,5 +313,48 @@ func (b *Backend) Forget(ctx context.Context, r *api.ResumablePod) error {
 	if !ValidID(string(r.UID)) {
 		return fmt.Errorf("invalid owner UID")
 	}
-	return os.RemoveAll(filepath.Join(b.Base, "workloads", string(r.UID)))
+	key := forgetKey{owner: string(r.UID), cycle: r.Status.Cycle}
+	deleting := r.DeletionTimestamp != nil
+	b.forgetMu.Lock()
+	_, alreadyCleaned := b.forgetSuccess[key]
+	if deleting {
+		b.clearForgetOwnerLocked(key.owner)
+		alreadyCleaned = false
+	}
+	b.forgetMu.Unlock()
+	if b.Objects != nil && !alreadyCleaned {
+		if err := b.Objects.DeletePrefix(ctx, "checkpoints/"+string(r.UID)); err != nil {
+			return err
+		}
+		b.clearInventoryState(key.owner)
+	}
+	if err := os.RemoveAll(filepath.Join(b.Base, "workloads", string(r.UID))); err != nil {
+		return err
+	}
+	if b.Objects != nil && !deleting {
+		b.forgetMu.Lock()
+		if b.forgetSuccess == nil {
+			b.forgetSuccess = map[forgetKey]struct{}{}
+		}
+		b.clearForgetOwnerLocked(key.owner)
+		b.forgetSuccess[key] = struct{}{}
+		b.forgetMu.Unlock()
+	}
+	return nil
+}
+
+func (b *Backend) clearForgetSuccess(r *api.ResumablePod) {
+	key := forgetKey{owner: string(r.UID), cycle: r.Status.Cycle}
+	b.forgetMu.Lock()
+	delete(b.forgetSuccess, key)
+	b.forgetMu.Unlock()
+	b.clearInventoryState(key.owner)
+}
+
+func (b *Backend) clearForgetOwnerLocked(owner string) {
+	for key := range b.forgetSuccess {
+		if key.owner == owner {
+			delete(b.forgetSuccess, key)
+		}
+	}
 }

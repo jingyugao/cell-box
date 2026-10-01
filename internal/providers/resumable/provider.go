@@ -15,6 +15,7 @@ import (
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/boxprovider"
 	"cellbox.local/cellbox/internal/guestapi"
+	"cellbox.local/cellbox/internal/inventory"
 	core "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -109,6 +110,15 @@ func (p *Provider) Create(ctx context.Context, spec boxprovider.Spec) (boxprovid
 			DebugReadWriteHostPath: spec.DebugReadWriteHostPath,
 			ServicePorts:           []core.ServicePort{{Name: "guest", Port: guestapi.Port, TargetPort: intstr.FromInt32(guestapi.Port), Protocol: core.ProtocolTCP}}},
 	}
+	if len(spec.Inventory) > 0 {
+		var record inventory.Record
+		if err = json.Unmarshal(spec.Inventory, &record); err != nil || record.ClientID == "" {
+			return boxprovider.Handle{}, errors.New("invalid inventory metadata")
+		}
+		wanted.Annotations = map[string]string{inventory.Annotation: string(spec.Inventory)}
+		wanted.Labels[inventory.ClientLabel] = inventory.ClientValue(record.ClientID)
+	}
+
 	err = p.Client.Create(ctx, wanted)
 	if apierrors.IsAlreadyExists(err) {
 		actual := &api.ResumablePod{}
@@ -136,7 +146,7 @@ func (p *Provider) Create(ctx context.Context, spec boxprovider.Spec) (boxprovid
 }
 
 func matchExisting(actual, wanted *api.ResumablePod) error {
-	if actual.UID == "" || actual.DeletionTimestamp != nil || actual.Labels[managedLabel] != "true" || actual.Labels[boxLabel] != wanted.Labels[boxLabel] || actual.Spec.NodeName != wanted.Spec.NodeName || actual.Spec.DebugReadOnlyHostPath != wanted.Spec.DebugReadOnlyHostPath || actual.Spec.DebugReadWriteHostPath != wanted.Spec.DebugReadWriteHostPath || !apiequality.Semantic.DeepEqual(actual.Spec.Container, wanted.Spec.Container) || !apiequality.Semantic.DeepEqual(actual.Spec.ServicePorts, wanted.Spec.ServicePorts) {
+	if actual.UID == "" || actual.DeletionTimestamp != nil || actual.Labels[managedLabel] != "true" || actual.Labels[boxLabel] != wanted.Labels[boxLabel] || actual.Annotations[inventory.Annotation] != wanted.Annotations[inventory.Annotation] || actual.Labels[inventory.ClientLabel] != wanted.Labels[inventory.ClientLabel] || actual.Spec.NodeName != wanted.Spec.NodeName || actual.Spec.DebugReadOnlyHostPath != wanted.Spec.DebugReadOnlyHostPath || actual.Spec.DebugReadWriteHostPath != wanted.Spec.DebugReadWriteHostPath || !apiequality.Semantic.DeepEqual(actual.Spec.Container, wanted.Spec.Container) || !apiequality.Semantic.DeepEqual(actual.Spec.ServicePorts, wanted.Spec.ServicePorts) {
 		return fmt.Errorf("ResumablePod %s already exists with different ownership or immutable profile", actual.Name)
 	}
 	return nil

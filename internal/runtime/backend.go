@@ -8,8 +8,13 @@ package runtime
 import (
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"context"
+	"errors"
 	core "k8s.io/api/core/v1"
 )
+
+// ErrRetryableStorage marks an object-storage outage that must not make a
+// checkpoint unrecoverable or fail an otherwise valid restore permanently.
+var ErrRetryableStorage = errors.New("retryable checkpoint storage failure")
 
 // Backend performs operations only on the workload and Pod identities supplied
 // by the controller. Implementations must reject ambiguous checkpoint replay.

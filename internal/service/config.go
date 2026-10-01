@@ -3,6 +3,7 @@ package service
 import (
 	"cellbox.local/cellbox/internal/guestapi"
 	"cellbox.local/cellbox/internal/image"
+	"cellbox.local/cellbox/internal/objectstorage"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,6 +33,11 @@ func LoadConfig(r io.Reader) (Config, error) {
 	return c, c.Validate()
 }
 func (c *Config) Validate() error {
+	if c.ObjectStorage != (objectstorage.Config{}) {
+		if err := c.ObjectStorage.Validate(); err != nil {
+			return err
+		}
+	}
 	if c.Listen == "" {
 		c.Listen = "127.0.0.1:8090"
 	}
