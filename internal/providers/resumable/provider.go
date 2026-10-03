@@ -96,8 +96,12 @@ func (p *Provider) Create(ctx context.Context, spec boxprovider.Spec) (boxprovid
 	container := core.Container{
 		Name: "cellbox", Image: spec.Image, ImagePullPolicy: core.PullIfNotPresent,
 		Command: []string{guestapi.Binary}, Args: argv,
-		Ports:     []core.ContainerPort{{Name: "guest", ContainerPort: guestapi.Port, Protocol: core.ProtocolTCP}},
-		Resources: core.ResourceRequirements{Requests: resources, Limits: resources},
+		Ports: []core.ContainerPort{{Name: "guest", ContainerPort: guestapi.Port, Protocol: core.ProtocolTCP}},
+		Resources: core.ResourceRequirements{
+			// Explicit zeros prevent Kubernetes from defaulting requests to limits.
+			Requests: core.ResourceList{core.ResourceCPU: resource.MustParse("0"), core.ResourceMemory: resource.MustParse("0")},
+			Limits:   resources,
+		},
 		SecurityContext: &core.SecurityContext{RunAsUser: &zero, RunAsNonRoot: &no, Privileged: &no, AllowPrivilegeEscalation: &no,
 			Capabilities: &core.Capabilities{Drop: []core.Capability{"ALL"}, Add: []core.Capability{"CHOWN", "SETUID", "SETGID", "FOWNER", "DAC_OVERRIDE"}}},
 		ReadinessProbe: &core.Probe{ProbeHandler: core.ProbeHandler{TCPSocket: &core.TCPSocketAction{Port: intstr.FromInt32(guestapi.Port)}}, PeriodSeconds: 2},

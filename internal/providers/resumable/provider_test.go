@@ -71,6 +71,7 @@ func fixture(t *testing.T) (*Provider, boxprovider.Spec, context.Context) {
 
 func TestCreateAndImmutableOwnership(t *testing.T) {
 	p, s, ctx := fixture(t)
+	s.CPU, s.MemoryMiB = 4, 8192
 	h, err := p.Create(ctx, s)
 	if err != nil {
 		t.Fatal(err)
@@ -95,8 +96,14 @@ func TestCreateAndImmutableOwnership(t *testing.T) {
 	if caps == nil || len(caps.Drop) != 1 || caps.Drop[0] != "ALL" || len(caps.Add) != 5 || caps.Add[0] != "CHOWN" || caps.Add[1] != "SETUID" || caps.Add[2] != "SETGID" || caps.Add[3] != "FOWNER" || caps.Add[4] != "DAC_OVERRIDE" {
 		t.Fatalf("unexpected guest capabilities: %#v", caps)
 	}
-	if w.Spec.Container.Resources.Limits.Cpu().MilliValue() != 500 || w.Spec.Container.Resources.Limits.Memory().Value() != 256*1024*1024 {
+	if w.Spec.Container.Resources.Limits.Cpu().MilliValue() != 4000 || w.Spec.Container.Resources.Limits.Memory().Value() != 8192*1024*1024 {
 		t.Fatal("resource limits missing")
+	}
+	for _, name := range []core.ResourceName{core.ResourceCPU, core.ResourceMemory} {
+		request, exists := w.Spec.Container.Resources.Requests[name]
+		if !exists || !request.IsZero() {
+			t.Fatalf("%s request must be explicitly zero to prevent limit defaulting", name)
+		}
 	}
 	repeated, err := p.Create(ctx, s)
 	if err != nil {
