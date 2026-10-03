@@ -52,6 +52,14 @@ spec:
                   type: string
                   enum: [Running, Suspended]
                   default: Running
+                sharedReadOnlyHostPath:
+                  type: string
+                  minLength: 2
+                  maxLength: 4096
+                  pattern: '^/.*$'
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: sharedReadOnlyHostPath is immutable
                 debugReadOnlyHostPath:
                   type: string
                   minLength: 2

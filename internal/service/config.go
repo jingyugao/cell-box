@@ -115,6 +115,13 @@ func (c *Config) Validate() error {
 		if p.Provider == "resumable-k8s-pod" && (p.Namespace == "" || p.NodeName == "") {
 			return fmt.Errorf("resumable profile requires namespace and nodeName")
 		}
+		if p.SharedReadOnlyHostPath != "" {
+			if p.Provider != "resumable-k8s-pod" || !path.IsAbs(p.SharedReadOnlyHostPath) ||
+				path.Clean(p.SharedReadOnlyHostPath) != p.SharedReadOnlyHostPath || p.SharedReadOnlyHostPath == "/" ||
+				len(p.SharedReadOnlyHostPath) > 4096 || strings.ContainsAny(p.SharedReadOnlyHostPath, "\x00\r\n") {
+				return fmt.Errorf("profile %s has invalid sharedReadOnlyHostPath", p.ID)
+			}
+		}
 		if p.DebugReadOnlyHostPath != "" {
 			if p.Provider != "resumable-k8s-pod" || !path.IsAbs(p.DebugReadOnlyHostPath) ||
 				path.Clean(p.DebugReadOnlyHostPath) != p.DebugReadOnlyHostPath ||
@@ -138,17 +145,15 @@ func (c *Config) Validate() error {
 			p.Guest.Workspace = "/workspace"
 		}
 		defaults := guestapi.DefaultConfig()
-		if p.Guest.Agent.UID == 0 {
+		if p.Guest.Agent == (guestapi.Identity{}) && p.Guest.Debug == (guestapi.Identity{}) {
 			p.Guest.Agent = defaults.Agent
-		}
-		if p.Guest.Debug.UID == 0 {
 			p.Guest.Debug = defaults.Debug
 		}
 		if !path.IsAbs(p.Guest.Workspace) || path.Clean(p.Guest.Workspace) != p.Guest.Workspace || p.Guest.Workspace == "/" {
 			return fmt.Errorf("workspace must be a clean absolute directory")
 		}
-		if p.Guest.Agent.GID == 0 || p.Guest.Debug.GID == 0 || p.Guest.Agent.UID == p.Guest.Debug.UID || p.Guest.Agent.GID == p.Guest.Debug.GID {
-			return fmt.Errorf("agent/debug identities must be distinct and non-root")
+		if p.Guest.Agent.UID == 0 || p.Guest.Agent.GID == 0 || (p.Guest.Debug.UID == 0) != (p.Guest.Debug.GID == 0) || p.Guest.Agent.UID == p.Guest.Debug.UID || p.Guest.Agent.GID == p.Guest.Debug.GID {
+			return fmt.Errorf("agent must be non-root and distinct from debug; root debug requires UID/GID zero")
 		}
 		if len(p.Clients) == 0 {
 			return fmt.Errorf("profile %s requires explicit clients", p.ID)

@@ -49,6 +49,36 @@ func TestObserveUnchangedBoxDoesNotRewriteStateFile(t *testing.T) {
 	}
 }
 
+func TestOperationQueryPreservesIsolationAndOwnership(t *testing.T) {
+	f := newCoreFixture(t)
+	op, _ := f.createBox(t, "query-operation-copy")
+	if err := f.service.store.Update(func(st *State) error {
+		record := st.Operations[op.ID]
+		record.Operation.Error = &APIError{Code: "original", Message: "original"}
+		st.Operations[op.ID] = record
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	copy, err := f.service.operation("client-a", op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy.Result["boxId"] = "changed"
+	copy.Error.Code = "changed"
+	*copy.FinishedAt = time.Time{}
+	original, err := f.service.operation("client-a", op.ID)
+	if err != nil || original.Result["boxId"] == "changed" || original.Error.Code != "original" || original.FinishedAt.IsZero() {
+		t.Fatalf("query exposed mutable operation state: %+v %v", original, err)
+	}
+	if _, err := f.service.operation("client-b", op.ID); err == nil {
+		t.Fatal("operation query exposed another client's record")
+	}
+	if _, err := f.service.operation("client-a", "missing-operation"); err == nil {
+		t.Fatal("missing operation was accepted")
+	}
+}
+
 func TestObserveCASRetriesAfterIdentityAndVersionChange(t *testing.T) {
 	f := newCoreFixture(t)
 	_, box := f.createBox(t, "query-cas-retry")

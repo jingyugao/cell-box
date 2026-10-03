@@ -22,6 +22,34 @@ const testClientToken = "client-a-secret-abcdefghijklmnopqrstuvwxyz"
 const otherClientToken = "client-b-secret-abcdefghijklmnopqrstuvwxyz"
 const testGuestToken = "local-test-guest-token"
 
+func TestProfilePreservesExplicitRootDebugAndDefaultsOmittedIdentity(t *testing.T) {
+	f := newCoreFixture(t)
+	c := f.config
+	p := &c.Profiles[0]
+	if err := json.Unmarshal([]byte(`{"workspace":"/workspace","debug":{"uid":0,"gid":0}}`), &p.Guest); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if p.Guest.Debug != (guestapi.Identity{}) || !profileCapabilities(*p).RootDebug {
+		t.Fatal("root debug was silently replaced")
+	}
+	p.Guest.Debug.GID = 1
+	if err := c.Validate(); err == nil {
+		t.Fatal("partially root debug identity accepted")
+	}
+	if err := json.Unmarshal([]byte(`{"workspace":"/workspace"}`), &p.Guest); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if p.Guest.Debug.UID == 0 || profileCapabilities(*p).RootDebug {
+		t.Fatal("omitted debug identity became root")
+	}
+}
+
 type fakeCoreProvider struct {
 	mu           sync.Mutex
 	guestURL     string
@@ -192,6 +220,33 @@ func (f *coreFixture) createBox(t *testing.T, key string) (Operation, Box) {
 	return op, box
 }
 
+func TestStagedCreateHoldsWorkloadUntilActivation(t *testing.T) {
+	f := newCoreFixture(t)
+	input := map[string]any{"profileId": "profile-a", "ownerKey": "staged-owner", "staged": true}
+	status, body := f.call(t, "POST", "/v1/boxes", testClientToken, "staged-create", input)
+	wantStatus(t, status, 202, body)
+	op := decodeResponse[Operation](t, body)
+	f.waitOperation(t, op.ID, "succeeded")
+	status, body = f.call(t, "GET", "/v1/boxes/"+op.TargetID, testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	box := decodeResponse[Box](t, body)
+	if box.Phase != "staged" || f.activateCalls.Load() != 0 {
+		t.Fatalf("candidate started too soon: %+v", box)
+	}
+	record, err := f.service.rawBox(box.ID)
+	if err != nil || !runtimeSpec(record).Staged || !record.RestoreComplete {
+		t.Fatalf("invalid staged record: %+v, %v", record, err)
+	}
+	status, body = f.call(t, "POST", "/v1/boxes/"+box.ID+":activate", testClientToken, "staged-activate", nil)
+	wantStatus(t, status, 202, body)
+	f.waitOperation(t, decodeResponse[Operation](t, body).ID, "succeeded")
+	status, body = f.call(t, "GET", "/v1/boxes/"+box.ID, testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	if decodeResponse[Box](t, body).Phase != "running" || f.activateCalls.Load() != 1 {
+		t.Fatal("activation did not start workload exactly once")
+	}
+}
+
 func TestBoxQueriesObserveLifecycleWithoutGuestAndFilterOwnedIDs(t *testing.T) {
 	f := newCoreFixture(t)
 	_, first := f.createBox(t, "query-first")
@@ -268,6 +323,36 @@ func TestRESTAuthAndClientIsolation(t *testing.T) {
 	wantStatus(t, status, 200, body)
 	if boxes := decodeResponse[[]Box](t, body); len(boxes) != 0 {
 		t.Fatalf("other client sees boxes: %+v", boxes)
+	}
+}
+
+func TestReadinessRetriesAStalledEndpointWithinStartupDeadline(t *testing.T) {
+	f := newCoreFixture(t)
+	_, box := f.createBox(t, "create-probe-retry")
+	var attempts atomic.Int32
+	stalledCanceled := make(chan struct{})
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			<-r.Context().Done()
+			close(stalledCanceled)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer endpoint.Close()
+	f.provider.mu.Lock()
+	f.provider.guestURL = endpoint.URL
+	f.provider.mu.Unlock()
+	if _, err := f.service.waitState(context.Background(), box.ID, "running"); err != nil {
+		t.Fatalf("transient endpoint stall exhausted startup deadline: %v", err)
+	}
+	if attempts.Load() < 2 {
+		t.Fatal("stalled readiness request was not retried")
+	}
+	select {
+	case <-stalledCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("stalled readiness request was not canceled")
 	}
 }
 

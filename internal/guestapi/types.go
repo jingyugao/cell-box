@@ -1,9 +1,42 @@
 // Package guestapi defines the private authenticated protocol to a Cellbox guest.
 package guestapi
 
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"regexp"
+)
+
 const Port = 40000
 const Binary = "/opt/cellbox/bin/cellbox-container-agent"
 const TokenPath = "/run/cellbox/control-token"
+const MaxCredentialBytes = 1 << 20
+const MaxCredentialBatchBytes = 2 << 20
+
+type CredentialBatch struct {
+	Slots map[string][]byte `json:"slots"`
+}
+
+var credentialSlotPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,63}$`)
+
+func (b CredentialBatch) Validate() error {
+	if len(b.Slots) == 0 || len(b.Slots) > 32 {
+		return fmt.Errorf("credential batch requires 1..32 slots")
+	}
+	total := 0
+	for slot, data := range b.Slots {
+		if !credentialSlotPattern.MatchString(slot) || len(data) == 0 || len(data) > MaxCredentialBytes {
+			return fmt.Errorf("invalid credential slot or size")
+		}
+		total += len(data)
+	}
+	if total > MaxCredentialBatchBytes {
+		return fmt.Errorf("credential batch exceeds 2 MiB")
+	}
+	return nil
+}
 
 type Identity struct {
 	UID uint32 `json:"uid"`
@@ -36,6 +69,23 @@ type Config struct {
 	CommandDir string            `json:"commandDir,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 	Tools      []Tool            `json:"tools,omitempty"`
+}
+
+// Decode defaults before applying supplied fields so an explicit debug UID/GID
+// of zero remains root, while an omitted debug identity remains non-root.
+func (c *Config) UnmarshalJSON(data []byte) error {
+	type plain Config
+	next := plain(DefaultConfig())
+	d := json.NewDecoder(bytes.NewReader(data))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&next); err != nil {
+		return err
+	}
+	if err := d.Decode(new(any)); err != io.EOF {
+		return fmt.Errorf("guest configuration must contain one JSON object")
+	}
+	*c = Config(next)
+	return nil
 }
 
 func DefaultConfig() Config {

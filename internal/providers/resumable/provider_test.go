@@ -17,6 +17,31 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+func TestSharedDirectorySpecPropagation(t *testing.T) {
+	p, s, ctx := fixture(t)
+	s.SharedReadOnlyHostPath = "/srv/cocell/shared"
+	h, err := p.Create(ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &api.ResumablePod{}
+	if err := p.Client.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
+		t.Fatal(err)
+	}
+	if w.Spec.SharedReadOnlyHostPath != s.SharedReadOnlyHostPath {
+		t.Fatal("provider lost shared mount")
+	}
+	s.SharedReadOnlyHostPath = "/srv/other"
+	if _, err := p.Create(ctx, s); err == nil {
+		t.Fatal("reused box with a different shared directory")
+	}
+	s.BoxID = "box-invalid"
+	s.SharedReadOnlyHostPath = "/"
+	if _, err := p.Create(ctx, s); err == nil {
+		t.Fatal("accepted root as shared directory")
+	}
+}
+
 type uidClient struct{ client.Client }
 
 func (c uidClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {

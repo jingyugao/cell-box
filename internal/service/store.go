@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"golang.org/x/sys/unix"
-	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -141,6 +141,31 @@ func (s *Store) BoxRecord(id string) (boxRecord, error) {
 	return cloneBoxRecord(record)
 }
 
+// Operation returns an isolated record without copying historical executions,
+// images and boxes on every lifecycle poll.
+func (s *Store) Operation(client, id string) (Operation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failure != nil {
+		return Operation{}, s.failure
+	}
+	record, ok := s.state.Operations[id]
+	if !ok || record.ClientID != client {
+		return Operation{}, apiError("NOT_FOUND", "Operation not found")
+	}
+	op := record.Operation
+	op.Result = maps.Clone(op.Result)
+	if op.Error != nil {
+		copy := *op.Error
+		op.Error = &copy
+	}
+	if op.FinishedAt != nil {
+		copy := *op.FinishedAt
+		op.FinishedAt = &copy
+	}
+	return op, nil
+}
+
 func sameObservationBase(a, b boxRecord) bool {
 	return a.Box.Version == b.Box.Version && a.Box.Generation == b.Box.Generation &&
 		a.Box.Phase == b.Box.Phase && a.Box.OperationID == b.Box.OperationID &&
@@ -172,10 +197,10 @@ func (s *Store) UpdateObservedBox(base boxRecord, update func(*boxRecord) (bool,
 	if !changed {
 		return cloneBoxRecord(current)
 	}
-	state, err := cloneState(s.state)
-	if err != nil {
-		return boxRecord{}, err
-	}
+	// Only this already-cloned box can change. Other collections stay private
+	// to the store and are never handed to the callback.
+	state := s.state
+	state.Boxes = maps.Clone(s.state.Boxes)
 	state.Boxes[base.Box.ID] = next
 	if err = s.persistLocked(state); err != nil {
 		return boxRecord{}, err
@@ -292,23 +317,12 @@ func OpenObjectStore(ctx context.Context, objects objectstorage.Objects) (*Store
 	if err := recoverObjectTransaction(ctx, objects); err != nil {
 		return nil, err
 	}
-	body, size, etag, err := objects.Get(ctx, stateObjectKey)
+	data, etag, err := readObject(ctx, objects, stateObjectKey)
 	if errors.Is(err, objectstorage.ErrNotFound) {
 		return s, s.loadImageObjects(ctx)
 	}
 	if err != nil {
 		return nil, err
-	}
-	defer body.Close()
-	if size < 1 || size > stateObjectLimit || etag == "" {
-		return nil, errors.New("invalid remote service ledger")
-	}
-	data, err := io.ReadAll(io.LimitReader(body, stateObjectLimit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) != size {
-		return nil, errors.New("remote service ledger size mismatch")
 	}
 	if err = json.Unmarshal(data, &s.state); err != nil {
 		return nil, errors.New("invalid remote service ledger JSON")

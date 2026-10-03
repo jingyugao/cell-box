@@ -12,6 +12,7 @@ require (
 	github.com/google/go-containerregistry v0.22.1
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	golang.org/x/sys v0.47.0
+	golang.org/x/sync v0.22.0
 	google.golang.org/grpc v1.79.3
 	k8s.io/api v0.36.0
 	k8s.io/apimachinery v0.36.0
@@ -76,7 +77,6 @@ require (
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/net v0.49.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/text v0.33.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
