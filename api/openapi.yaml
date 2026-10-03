@@ -170,6 +170,18 @@ components:
           type: boolean
         protectedTools:
           type: boolean
+        credentialBatch:
+          type: boolean
+          description: The API accepts generation-fenced batch credential writes. Older Guest images may require the single-slot endpoint.
+        internalServices:
+          type: boolean
+          description: Owning API clients can connect to HTTP/WebSocket services without creating browser routes or grants.
+        rootDebug:
+          type: boolean
+          description: Admitted tools run as debug UID/GID zero and can read agent-owned private workspace files without permission changes.
+        sharedDirectory:
+          type: boolean
+          description: A profile-owned shared directory is mounted read-only at /var/lib/cellbox/shared.
         pty:
           type: boolean
         reconnectExec:
@@ -196,6 +208,10 @@ components:
     CreateBox:
       additionalProperties: false
       properties:
+        staged:
+          type: boolean
+          default: false
+          description: Start guest control and hold the workload until explicit activation.
         ownerKey:
           maxLength: 256
           minLength: 1
@@ -1038,7 +1054,7 @@ paths:
       summary: Capture a durable best-effort workspace archive
   /v1/boxes/{id}/credentials/{slot}:
     put:
-      description: 1..65536 bytes. Slot must be referenced by an admitted tool. Secret
+      description: 1..1048576 bytes. Slot must be referenced by an admitted tool. Secret
         never enters public box metadata or archive.
       operationId: putCredential
       parameters:
@@ -1057,7 +1073,7 @@ paths:
           application/octet-stream:
             schema:
               format: binary
-              maxLength: 65536
+              maxLength: 1048576
               type: string
         required: true
       responses:
@@ -1066,6 +1082,67 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       summary: Install an admitted debug credential slot
+  /v1/boxes/{id}/credentials:
+    put:
+      summary: Install admitted credential slots in one generation-fenced request
+      description: A 204 response acknowledges all writes against the requested generation. A failed batch can have applied some slots; retry the complete batch. Values are base64 strings, each decoding to 1..1048576 bytes, at most 2097152 bytes total.
+      operationId: writeCredentialBatch
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedGeneration, slots]
+              properties:
+                expectedGeneration:
+                  type: integer
+                  minimum: 1
+                slots:
+                  type: object
+                  minProperties: 1
+                  maxProperties: 32
+                  propertyNames:
+                    pattern: '^[A-Za-z][A-Za-z0-9_]{0,63}$'
+                  additionalProperties:
+                    type: string
+                    contentEncoding: base64
+      responses:
+        "204":
+          description: All slots installed in the requested generation
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/boxes/{id}/services/{port}/{path}:
+    get:
+      summary: Connect an owning backend client to a box HTTP or WebSocket service
+      description: Uses API bearer authentication, rejects browser Origin headers and the private control port, and holds a lifecycle fence for the live connection. No route, grant, lease or ledger write is required. API credentials are never forwarded to the application. Other HTTP methods are also proxied.
+      operationId: internalService
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+      - in: path
+        name: port
+        required: true
+        schema: { type: integer, minimum: 1, maximum: 65535, not: { const: 40000 } }
+      - in: path
+        name: path
+        required: true
+        schema: { type: string }
+        description: Service path, including nested segments; an empty path uses the trailing slash.
+      responses:
+        "101": { description: WebSocket upgraded }
+        "200": { description: Application HTTP response }
+        default:
+          $ref: '#/components/responses/Error'
   /v1/boxes/{id}/execs:
     post:
       description: result.execId identifies the execution. Outcome may be unknown

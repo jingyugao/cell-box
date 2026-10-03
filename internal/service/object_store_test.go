@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -20,6 +21,7 @@ type ledgerObjects struct {
 	mu           sync.Mutex
 	data         map[string][]byte
 	revision     int
+	stateReads   int
 	lostResponse bool
 	unavailable  bool
 	failKey      string
@@ -29,6 +31,9 @@ type ledgerObjects struct {
 func (o *ledgerObjects) Get(_ context.Context, key string) (io.ReadCloser, int64, string, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if key == stateObjectKey {
+		o.stateReads++
+	}
 	if o.unavailable {
 		return nil, 0, "", objectstorage.ErrUnavailable
 	}
@@ -81,6 +86,32 @@ func (o *ledgerObjects) Delete(_ context.Context, key string) error {
 }
 func (o *ledgerObjects) DeletePrefix(context.Context, string) error { return errors.New("unused") }
 
+func TestLedgerOnlyUpdateAvoidsRedundantReadsAndRetainsIntentFence(t *testing.T) {
+	objects := &ledgerObjects{}
+	store, err := OpenObjectStore(context.Background(), objects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects.stateReads = 0
+	if err := store.Update(func(st *State) error { st.Routes["route"] = Route{ID: "route"}; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if objects.stateReads != 0 {
+		t.Fatalf("ledger-only update read ledger %d times", objects.stateReads)
+	}
+	if _, ok := objects.data[pendingObjectKey]; ok {
+		t.Fatal("completed update kept intent")
+	}
+	before := append([]byte(nil), objects.data[stateObjectKey]...)
+	objects.data[pendingObjectKey] = []byte("another writer owns the intent slot")
+	if err := store.Update(func(st *State) error { st.Leases["lease"] = Lease{ID: "lease"}; return nil }); err == nil {
+		t.Fatal("writer bypassed another transaction's intent")
+	}
+	if !bytes.Equal(before, objects.data[stateObjectKey]) {
+		t.Fatal("ledger changed while another writer held the intent")
+	}
+}
+
 func TestObjectStoreRestartFencesStaleWriterAndResolvesLostResponse(t *testing.T) {
 	objects := &ledgerObjects{}
 	store, err := OpenObjectStore(context.Background(), objects)
@@ -115,6 +146,74 @@ func TestObjectStoreRestartFencesStaleWriterAndResolvesLostResponse(t *testing.T
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCompressedLedgerMigratesToCompatibleJSONAndRecoversIntent(t *testing.T) {
+	objects := &ledgerObjects{}
+	store, err := OpenObjectStore(context.Background(), objects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := strings.Repeat("immutable-profile-metadata", 10000)
+	if err := store.Update(func(st *State) error { st.Keys["large"] = keyRecord{Hash: payload}; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	compress := func(data []byte) []byte {
+		var buffer bytes.Buffer
+		writer := gzip.NewWriter(&buffer)
+		if _, err := writer.Write(data); err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return buffer.Bytes()
+	}
+	encoded := compress(objects.data[stateObjectKey])
+	objects.data[stateObjectKey] = encoded
+	reopened, err := OpenObjectStore(context.Background(), objects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.View(func(st State) error {
+		if st.Keys["large"].Hash != payload {
+			t.Fatal("metadata changed after restart")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	objects.lostResponse = true
+	if err := reopened.Update(func(st *State) error { st.Keys["migrated"] = keyRecord{Hash: "compatible"}; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(objects.data[stateObjectKey]) {
+		t.Fatal("new writes are not compatible JSON")
+	}
+	objects.failKey, objects.failWrites = stateObjectKey, 1
+	if err := reopened.Update(func(st *State) error { st.Keys["after"] = keyRecord{Hash: "recoverable"}; return nil }); err == nil {
+		t.Fatal("interrupted write succeeded")
+	}
+	objects.data[pendingObjectKey] = compress(objects.data[pendingObjectKey])
+	recovered, err := OpenObjectStore(context.Background(), objects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recovered.View(func(st State) error {
+		if st.Keys["after"].Hash != "recoverable" {
+			t.Fatal("compressed intent was not recovered")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(objects.data[stateObjectKey]) {
+		t.Fatal("recovered ledger is not compatible JSON")
+	}
+	objects.data[stateObjectKey] = encoded[:len(encoded)-4]
+	if _, err := OpenObjectStore(context.Background(), objects); err == nil {
+		t.Fatal("corrupt compressed metadata was accepted")
 	}
 }
 func TestObjectStoreFailureCancelsServiceAndRejectsStaleReads(t *testing.T) {

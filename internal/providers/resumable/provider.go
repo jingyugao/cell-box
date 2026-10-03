@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"golang.org/x/sync/singleflight"
 	"math"
 	"path"
 	"regexp"
 	"strings"
+	"sync"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/boxprovider"
@@ -43,6 +45,17 @@ type Provider struct {
 	Exec   TokenExec
 	// ServiceDomain may be overridden for nonstandard cluster DNS suffixes.
 	ServiceDomain string
+	tokenMu       sync.Mutex
+	tokens        map[string]cachedToken
+	tokenReads    singleflight.Group
+}
+
+type cachedToken struct{ identity, token string }
+
+func (p *Provider) forgetToken(h boxprovider.Handle) {
+	p.tokenMu.Lock()
+	delete(p.tokens, h.Namespace+"/"+h.Name)
+	p.tokenMu.Unlock()
 }
 
 func New(c client.Client, exec TokenExec) *Provider { return &Provider{Client: c, Exec: exec} }
@@ -68,6 +81,10 @@ func (p *Provider) Create(ctx context.Context, spec boxprovider.Spec) (boxprovid
 	}
 	if !validImage.MatchString(spec.Image) {
 		return boxprovider.Handle{}, errors.New("immutable image repository@sha256:<digest> is required")
+	}
+	if host := spec.SharedReadOnlyHostPath; host != "" &&
+		(!path.IsAbs(host) || path.Clean(host) != host || host == "/" || len(host) > 4096 || strings.ContainsAny(host, "\x00\r\n")) {
+		return boxprovider.Handle{}, errors.New("invalid sharedReadOnlyHostPath")
 	}
 	if host := spec.DebugReadOnlyHostPath; host != "" &&
 		(!path.IsAbs(host) || path.Clean(host) != host || host == "/" || len(host) > 4096 || strings.ContainsAny(host, "\x00\r\n")) {
@@ -104,12 +121,13 @@ func (p *Provider) Create(ctx context.Context, spec boxprovider.Spec) (boxprovid
 		},
 		SecurityContext: &core.SecurityContext{RunAsUser: &zero, RunAsNonRoot: &no, Privileged: &no, AllowPrivilegeEscalation: &no,
 			Capabilities: &core.Capabilities{Drop: []core.Capability{"ALL"}, Add: []core.Capability{"CHOWN", "SETUID", "SETGID", "FOWNER", "DAC_OVERRIDE"}}},
-		ReadinessProbe: &core.Probe{ProbeHandler: core.ProbeHandler{TCPSocket: &core.TCPSocketAction{Port: intstr.FromInt32(guestapi.Port)}}, PeriodSeconds: 2},
+		ReadinessProbe: &core.Probe{ProbeHandler: core.ProbeHandler{TCPSocket: &core.TCPSocketAction{Port: intstr.FromInt32(guestapi.Port)}}, PeriodSeconds: 1},
 	}
 	wanted := &api.ResumablePod{
 		TypeMeta:   meta.TypeMeta{APIVersion: api.GroupVersion.String(), Kind: api.Kind},
 		ObjectMeta: meta.ObjectMeta{Name: crname, Namespace: spec.Namespace, Labels: map[string]string{managedLabel: "true", boxLabel: spec.BoxID}},
 		Spec: api.Spec{NodeName: spec.NodeName, DesiredState: "Running", Container: container,
+			SharedReadOnlyHostPath: spec.SharedReadOnlyHostPath,
 			DebugReadOnlyHostPath:  spec.DebugReadOnlyHostPath,
 			DebugReadWriteHostPath: spec.DebugReadWriteHostPath,
 			ServicePorts:           []core.ServicePort{{Name: "guest", Port: guestapi.Port, TargetPort: intstr.FromInt32(guestapi.Port), Protocol: core.ProtocolTCP}}},
@@ -150,7 +168,7 @@ func (p *Provider) Create(ctx context.Context, spec boxprovider.Spec) (boxprovid
 }
 
 func matchExisting(actual, wanted *api.ResumablePod) error {
-	if actual.UID == "" || actual.DeletionTimestamp != nil || actual.Labels[managedLabel] != "true" || actual.Labels[boxLabel] != wanted.Labels[boxLabel] || actual.Annotations[inventory.Annotation] != wanted.Annotations[inventory.Annotation] || actual.Labels[inventory.ClientLabel] != wanted.Labels[inventory.ClientLabel] || actual.Spec.NodeName != wanted.Spec.NodeName || actual.Spec.DebugReadOnlyHostPath != wanted.Spec.DebugReadOnlyHostPath || actual.Spec.DebugReadWriteHostPath != wanted.Spec.DebugReadWriteHostPath || !apiequality.Semantic.DeepEqual(actual.Spec.Container, wanted.Spec.Container) || !apiequality.Semantic.DeepEqual(actual.Spec.ServicePorts, wanted.Spec.ServicePorts) {
+	if actual.UID == "" || actual.DeletionTimestamp != nil || actual.Labels[managedLabel] != "true" || actual.Labels[boxLabel] != wanted.Labels[boxLabel] || actual.Annotations[inventory.Annotation] != wanted.Annotations[inventory.Annotation] || actual.Labels[inventory.ClientLabel] != wanted.Labels[inventory.ClientLabel] || actual.Spec.NodeName != wanted.Spec.NodeName || actual.Spec.SharedReadOnlyHostPath != wanted.Spec.SharedReadOnlyHostPath || actual.Spec.DebugReadOnlyHostPath != wanted.Spec.DebugReadOnlyHostPath || actual.Spec.DebugReadWriteHostPath != wanted.Spec.DebugReadWriteHostPath || !apiequality.Semantic.DeepEqual(actual.Spec.Container, wanted.Spec.Container) || !apiequality.Semantic.DeepEqual(actual.Spec.ServicePorts, wanted.Spec.ServicePorts) {
 		return fmt.Errorf("ResumablePod %s already exists with different ownership or immutable profile", actual.Name)
 	}
 	return nil
@@ -193,8 +211,12 @@ func (p *Provider) Inspect(ctx context.Context, h boxprovider.Handle) (boxprovid
 	switch w.Status.Phase {
 	case "", "Creating":
 		obs.Phase = "creating"
+		// Pending Pods cannot serve I/O. Publish their identity together with
+		// readiness instead of requiring a separate durable generation update.
+		obs.ExecutionID = ""
 	case "Restoring":
 		obs.Phase = "resuming"
+		obs.ExecutionID = ""
 	case "Running":
 		obs.Phase, err = p.inspectRunning(ctx, h, w)
 		if err != nil {
@@ -315,6 +337,7 @@ func (p *Provider) Action(ctx context.Context, h boxprovider.Handle, action stri
 }
 
 func (p *Provider) Destroy(ctx context.Context, h boxprovider.Handle) error {
+	p.forgetToken(h)
 	w, err := p.get(ctx, h)
 	if errors.Is(err, boxprovider.ErrNotFound) {
 		return nil
@@ -334,6 +357,62 @@ func (p *Provider) Destroy(ctx context.Context, h boxprovider.Handle) error {
 }
 
 func (p *Provider) Guest(ctx context.Context, h boxprovider.Handle) (boxprovider.Connection, error) {
+	return p.GuestForExecution(ctx, h, "")
+}
+
+func containerIdentity(pod *core.Pod, container string) string {
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == container && status.ContainerID != "" && status.State.Running != nil {
+			return fmt.Sprintf("%s/%d/%s", status.ContainerID, status.RestartCount, status.State.Running.StartedAt.String())
+		}
+	}
+	return ""
+}
+
+func (p *Provider) guestToken(ctx context.Context, h boxprovider.Handle, w *api.ResumablePod, pod *core.Pod) (string, error) {
+	container := containerIdentity(pod, w.Spec.Container.Name)
+	// Without a container identity, do not assume a restarted process kept its token.
+	if container == "" {
+		return p.Exec.Token(ctx, w.Namespace, pod.Name, w.Spec.Container.Name)
+	}
+	key := h.Namespace + "/" + h.Name
+	identity := string(w.UID) + "/" + string(pod.UID) + "/" + container
+	value, err, _ := p.tokenReads.Do(key+"/"+identity, func() (any, error) {
+		p.tokenMu.Lock()
+		cached := p.tokens[key]
+		p.tokenMu.Unlock()
+		if cached.identity == identity {
+			return cached.token, nil
+		}
+		token, err := p.Exec.Token(ctx, w.Namespace, pod.Name, w.Spec.Container.Name)
+		if err != nil {
+			return nil, err
+		}
+		token = strings.TrimSpace(token)
+		if token == "" || strings.ContainsAny(token, "\r\n\x00") {
+			return nil, errors.New("guest returned an invalid token")
+		}
+		p.tokenMu.Lock()
+		if p.tokens == nil {
+			p.tokens = map[string]cachedToken{}
+		}
+		if len(p.tokens) >= 1024 && p.tokens[key].identity == "" {
+			for old := range p.tokens {
+				delete(p.tokens, old)
+				break
+			}
+		}
+		p.tokens[key] = cachedToken{identity: identity, token: token}
+		p.tokenMu.Unlock()
+		return token, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return value.(string), nil
+}
+
+func (p *Provider) GuestForExecution(ctx context.Context, h boxprovider.Handle, expected string) (boxprovider.Connection, error) {
 	if p.Exec == nil {
 		return boxprovider.Connection{}, errors.New("Kubernetes Pod exec is not configured")
 	}
@@ -342,7 +421,11 @@ func (p *Provider) Guest(ctx context.Context, h boxprovider.Handle) (boxprovider
 		return boxprovider.Connection{}, err
 	}
 	if w.DeletionTimestamp != nil || w.Spec.DesiredState != "Running" {
+		p.forgetToken(h)
 		return boxprovider.Connection{}, errNotReady
+	}
+	if expected != "" && w.Status.PodUID != expected {
+		return boxprovider.Connection{}, boxprovider.ErrStaleExecution
 	}
 	pod, err := p.readyPod(ctx, w)
 	if err != nil {
@@ -365,7 +448,7 @@ func (p *Provider) Guest(ctx context.Context, h boxprovider.Handle) (boxprovider
 	if !validPort {
 		return boxprovider.Connection{}, errors.New("guest Service port changed")
 	}
-	token, err := p.Exec.Token(ctx, w.Namespace, pod.Name, w.Spec.Container.Name)
+	token, err := p.guestToken(ctx, h, w, pod)
 	if err != nil {
 		return boxprovider.Connection{}, err
 	}
@@ -382,8 +465,13 @@ func (p *Provider) Guest(ctx context.Context, h boxprovider.Handle) (boxprovider
 	if current.DeletionTimestamp != nil || current.Spec.DesiredState != "Running" || current.Status.Phase != "Running" || current.Status.PodUID != string(pod.UID) || current.Status.PodName != pod.Name {
 		return boxprovider.Connection{}, errors.New("guest execution changed during token retrieval")
 	}
-	if _, err = p.readyPod(ctx, current); err != nil {
+	currentPod, err := p.readyPod(ctx, current)
+	if err != nil {
 		return boxprovider.Connection{}, err
+	}
+	if containerIdentity(currentPod, current.Spec.Container.Name) != containerIdentity(pod, w.Spec.Container.Name) {
+		p.forgetToken(h)
+		return boxprovider.Connection{}, boxprovider.ErrStaleExecution
 	}
 	domain := p.ServiceDomain
 	if domain == "" {

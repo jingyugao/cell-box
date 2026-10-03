@@ -24,6 +24,15 @@ func NewForConfig(cfg *rest.Config) (*Provider, error) {
 	if cfg == nil {
 		return nil, errors.New("Kubernetes REST config is required")
 	}
+	// This API performs several short reads per lifecycle operation. The
+	// client-go 5 QPS default makes a single sandbox wait on its own limiter.
+	cfg = rest.CopyConfig(cfg)
+	if cfg.QPS == 0 {
+		cfg.QPS = 50
+	}
+	if cfg.Burst == 0 {
+		cfg.Burst = 100
+	}
 	scheme := runtime.NewScheme()
 	if err := core.AddToScheme(scheme); err != nil {
 		return nil, err

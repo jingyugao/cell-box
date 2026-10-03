@@ -74,6 +74,28 @@ func TestConfigAndPaths(t *testing.T) {
 	}
 }
 
+func TestExplicitRootDebugAndOmittedIdentity(t *testing.T) {
+	var c guestapi.Config
+	if err := json.Unmarshal([]byte(`{"workspace":"/workspace"}`), &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Debug != guestapi.DefaultConfig().Debug {
+		t.Fatal("omitted debug identity lost non-root default")
+	}
+	if err := json.Unmarshal([]byte(`{"workspace":"/workspace","debug":{"uid":0,"gid":0}}`), &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Debug != (guestapi.Identity{}) {
+		t.Fatal("explicit root debug identity was replaced")
+	}
+	if _, err := validateConfig(c); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(`{"unknown":true}`), &c); err == nil {
+		t.Fatal("unknown guest configuration field accepted")
+	}
+}
+
 func TestAccountConflicts(t *testing.T) {
 	id := guestapi.Identity{UID: 11000, GID: 11000}
 	for _, passwd := range []string{
@@ -171,6 +193,33 @@ func TestCredentialWriteIsPrivateAndAtomic(t *testing.T) {
 	}
 	if err := writeCredential(root, "../key", strings.NewReader("x"), id); err == nil {
 		t.Fatal("unsafe slot accepted")
+	}
+}
+
+func TestCredentialBatchValidatesBeforeWritingAndSupportsLargeFiles(t *testing.T) {
+	root := t.TempDir()
+	id := guestapi.Identity{UID: uint32(os.Getuid()), GID: uint32(os.Getgid())}
+	bad := guestapi.CredentialBatch{Slots: map[string][]byte{"valid": []byte("ok"), "../bad": []byte("bad")}}
+	if err := writeCredentialBatch(root, bad, id); err == nil {
+		t.Fatal("invalid batch accepted")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 0 {
+		t.Fatal("invalid batch wrote credentials")
+	}
+	batch := guestapi.CredentialBatch{Slots: map[string][]byte{"first": bytes.Repeat([]byte("x"), 80<<10), "second": {0, 1, 255}}}
+	if err := writeCredentialBatch(root, batch, id); err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range batch.Slots {
+		actual, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil || !bytes.Equal(actual, data) {
+			t.Fatalf("incorrect batch slot %s", name)
+		}
+		info, err := os.Stat(filepath.Join(root, name))
+		if err != nil || info.Mode().Perm() != 0600 {
+			t.Fatalf("unsafe batch slot %s", name)
+		}
 	}
 }
 

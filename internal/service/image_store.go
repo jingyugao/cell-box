@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -61,9 +62,23 @@ func readObject(ctx context.Context, objects objectstorage.Objects, key string) 
 	if int64(len(data)) != size {
 		return nil, "", errors.New("metadata object size mismatch")
 	}
+	if bytes.HasPrefix(data, []byte{0x1f, 0x8b, 0x08}) {
+		reader, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return nil, "", errors.New("invalid compressed metadata")
+		}
+		decoded, err := io.ReadAll(io.LimitReader(reader, stateObjectLimit+1))
+		closeErr := reader.Close()
+		if err != nil || closeErr != nil || len(decoded) == 0 || len(decoded) > stateObjectLimit {
+			return nil, "", errors.New("invalid compressed metadata")
+		}
+		data = decoded
+	}
 	return data, etag, nil
 }
 func writeObject(ctx context.Context, objects objectstorage.Objects, key string, data []byte, before string) (string, error) {
+	// Keep writes readable by previous API versions. The reader also accepts
+	// compressed metadata produced by the initial startup optimization rollout.
 	condition := before
 	if condition == "" {
 		condition = "*"
@@ -280,15 +295,19 @@ func (s *Store) persistRemoteLocked(next State) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	// Check the ledger before acquiring the intent slot. A stale process must
-	// never begin overwriting independently stored image metadata.
-	_, current, err := readObject(ctx, s.objects, stateObjectKey)
-	if errors.Is(err, objectstorage.ErrNotFound) {
-		current = ""
-		err = nil
-	}
-	if err != nil || current != s.etag {
-		return s.failRemote()
+	// Only image transactions need preflight reads: they modify independent
+	// objects before committing the ledger. A ledger-only update is fenced by
+	// its conditional PUT. Both paths retain the intent slot so stale image
+	// writers cannot run concurrently, and interrupted writes remain recoverable.
+	if len(tx.Images) > 0 {
+		_, current, err := readObject(ctx, s.objects, stateObjectKey)
+		if errors.Is(err, objectstorage.ErrNotFound) {
+			current = ""
+			err = nil
+		}
+		if err != nil || current != s.etag {
+			return s.failRemote()
+		}
 	}
 	journal, err := json.Marshal(tx)
 	if err != nil {
@@ -301,7 +320,12 @@ func (s *Store) persistRemoteLocked(next State) error {
 	if err != nil {
 		return s.failRemote()
 	}
-	etag, err := applyObjectTransaction(ctx, s.objects, tx)
+	var etag string
+	if len(tx.Images) == 0 {
+		etag, err = writeObject(ctx, s.objects, stateObjectKey, tx.State, tx.BeforeETag)
+	} else {
+		etag, err = applyObjectTransaction(ctx, s.objects, tx)
+	}
 	if err != nil {
 		if errors.Is(err, errStaleTransaction) {
 			_ = s.objects.DeleteIfMatch(ctx, pendingObjectKey, journalETag)

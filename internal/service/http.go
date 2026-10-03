@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"cellbox.local/cellbox/internal/guestapi"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -69,7 +70,10 @@ func fail(w http.ResponseWriter, err error) {
 	writeJSON(w, status, map[string]any{"error": e})
 }
 func decode(w http.ResponseWriter, r *http.Request, target any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	return decodeLimit(w, r, target, 1<<20)
+}
+func decodeLimit(w http.ResponseWriter, r *http.Request, target any, limit int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
 	if err := d.Decode(target); err != nil {
@@ -176,6 +180,8 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/boxes/{id}/files", s.files)
 	mux.HandleFunc("PUT /v1/boxes/{id}/files", s.files)
 	mux.HandleFunc("PUT /v1/boxes/{id}/credentials/{slot}", s.credentials)
+	mux.HandleFunc("PUT /v1/boxes/{id}/credentials", s.credentialBatch)
+	mux.HandleFunc("/v1/boxes/{id}/services/{port}/{path...}", s.internalService)
 	mux.HandleFunc("POST /v1/boxes/{id}/tools/{tool}", s.tool)
 	mux.HandleFunc("POST /v1/routes", s.createRoute)
 	mux.HandleFunc("POST /v1/routes/{id}/grants", s.createGrant)
@@ -329,16 +335,7 @@ func (s *Service) listLegacyBoxes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, boxes)
 }
 func (s *Service) operation(client, id string) (Operation, error) {
-	var op Operation
-	err := s.store.View(func(st State) error {
-		record, ok := st.Operations[id]
-		if !ok || record.ClientID != client {
-			return apiError("NOT_FOUND", "Operation not found")
-		}
-		op = record.Operation
-		return nil
-	})
-	return op, err
+	return s.store.Operation(client, id)
 }
 func (s *Service) getOperation(w http.ResponseWriter, r *http.Request) {
 	op, err := s.operation(clientID(r), r.PathValue("id"))
@@ -634,9 +631,9 @@ func (s *Service) credentials(w http.ResponseWriter, r *http.Request) {
 		fail(w, apiError("FORBIDDEN", "Credential slot is not declared by an admitted tool"))
 		return
 	}
-	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 65536))
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, guestapi.MaxCredentialBytes))
 	if err != nil || len(data) == 0 {
-		fail(w, apiError("INVALID_REQUEST", "Credential must contain 1..65536 bytes"))
+		fail(w, apiError("INVALID_REQUEST", "Credential must contain 1..1048576 bytes"))
 		return
 	}
 	defer clear(data)
@@ -653,6 +650,76 @@ func (s *Service) credentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(204)
+}
+
+func (s *Service) credentialBatch(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		guestapi.CredentialBatch
+		ExpectedGeneration uint64 `json:"expectedGeneration"`
+	}
+	if err := decodeLimit(w, r, &input, 3<<20); err != nil {
+		fail(w, err)
+		return
+	}
+	defer func() {
+		for _, data := range input.Slots {
+			clear(data)
+		}
+	}()
+	if err := input.CredentialBatch.Validate(); err != nil {
+		fail(w, apiError("INVALID_REQUEST", err.Error()))
+		return
+	}
+	b, release, err := s.beginIO(clientID(r), r.PathValue("id"))
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	defer release()
+	if input.ExpectedGeneration == 0 || input.ExpectedGeneration != b.Box.Generation {
+		fail(w, apiError("STALE_GENERATION", "Credential batch targets another generation"))
+		return
+	}
+	declared := map[string]bool{}
+	for _, tool := range b.Profile.Guest.Tools {
+		for _, slot := range tool.CredentialEnv {
+			declared[slot] = true
+		}
+	}
+	for slot := range input.Slots {
+		if !declared[slot] {
+			fail(w, apiError("FORBIDDEN", "Credential slot is not declared by an admitted tool"))
+			return
+		}
+	}
+	data, err := json.Marshal(input.CredentialBatch)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	defer clear(data)
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	res, err := s.guestRequest(ctx, b, "PUT", "/v1/credentials", bytes.NewReader(data))
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	defer res.Body.Close()
+	if err = guestSuccess(res); err != nil {
+		fail(w, err)
+		return
+	}
+	current, err := s.observe(ctx, b)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	if current.Generation != input.ExpectedGeneration || (current.Phase != "running" && current.Phase != "staged") {
+		fail(w, apiError("STALE_GENERATION", "Runtime changed during credential provisioning"))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 func (s *Service) tool(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("tool")
