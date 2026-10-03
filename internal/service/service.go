@@ -165,7 +165,7 @@ func cloneError(err error) *APIError {
 	return &APIError{Code: "RUNTIME_ERROR", Message: "Runtime operation failed; inspect Cellbox and provider health"}
 }
 func profileCapabilities(p Profile) Capabilities {
-	return Capabilities{Exec: true, Files: true, HTTP: true, WebSocket: true, Freeze: p.Provider == "docker", Suspend: map[bool]string{true: "same-node-checkpoint", false: "none"}[p.Provider == "resumable-k8s-pod"], Archives: "workspace-best-effort", ProtectedTools: len(p.Guest.Tools) > 0}
+	return Capabilities{Exec: true, Files: true, HTTP: true, WebSocket: true, Freeze: p.Provider == "docker", Suspend: map[bool]string{true: "same-node-checkpoint", false: "none"}[p.Provider == "resumable-k8s-pod"], Archives: "workspace-best-effort", ProtectedTools: len(p.Guest.Tools) > 0, CredentialBatch: true, InternalServices: true, RootDebug: p.Guest.Debug.UID == 0 && p.Guest.Debug.GID == 0, SharedDirectory: p.SharedReadOnlyHostPath != ""}
 }
 func owned(st *State, client, id string) (boxRecord, error) {
 	b, ok := st.Boxes[id]
@@ -237,13 +237,20 @@ func (s *Service) prepareOperation(client, key, kind, target string, input any, 
 	if key == "" || len(key) > 200 {
 		return Operation{}, false, apiError("INVALID_REQUEST", "Idempotency-Key header (1..200 bytes) is required")
 	}
+	started := time.Now()
+	var operation Operation
+	var err error
+	defer func() {
+		if operation.TargetID != "" {
+			runtimeTiming(operation.TargetID, "cellbox.accept_"+kind, started, err)
+		}
+	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key = client + ":" + kind + ":" + target + ":" + key
 	digest := inputHash(input)
-	var operation Operation
 	fresh := false
-	err := s.store.Update(func(st *State) error {
+	err = s.store.Update(func(st *State) error {
 		if previous, ok := st.Keys[key]; ok {
 			if previous.Hash != digest {
 				return apiError("CONFLICT", "Idempotency key was already used with different input")
@@ -268,13 +275,21 @@ func (s *Service) prepareOperation(client, key, kind, target string, input any, 
 	return operation, fresh, err
 }
 func (s *Service) launch(op Operation, work func(context.Context) (map[string]string, error)) {
+	s.launchWithCommit(op, work, nil)
+}
+
+func (s *Service) launchWithCommit(op Operation, work func(context.Context) (map[string]string, error), commit func(*State) error) {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		ctx, cancel := context.WithTimeout(s.ctx, 15*time.Minute)
 		defer cancel()
 		result, err := work(ctx)
+		saveStarted := time.Now()
 		saveErr := s.store.Update(func(st *State) error {
+			if err == nil && commit != nil {
+				err = commit(st)
+			}
 			record := st.Operations[op.ID]
 			now := time.Now().UTC()
 			record.Operation.FinishedAt = &now
@@ -294,10 +309,27 @@ func (s *Service) launch(op Operation, work func(context.Context) (map[string]st
 			}
 			return nil
 		})
+		runtimeTiming(op.TargetID, "cellbox.persist_completion", saveStarted, saveErr)
 		if saveErr != nil {
 			fmt.Printf("Cellbox could not persist operation completion %s\n", op.ID)
 		}
 	}()
+}
+
+// The same event shape as CoCell runtime logs lets the read-only timing tool
+// correlate control-plane work with project operations without logging input.
+func runtimeTiming(boxID, phase string, started time.Time, err error) {
+	finished := time.Now()
+	status := "succeeded"
+	if err != nil {
+		status = "failed"
+	}
+	data, _ := json.Marshal(map[string]any{
+		"event": "sandbox.runtime_stage", "phase": phase, "sandboxId": boxID,
+		"status": status, "startedAt": started.UTC(), "finishedAt": finished.UTC(),
+		"timestamp": finished.UTC(), "durationMs": finished.Sub(started).Milliseconds(),
+	})
+	fmt.Printf("%s\n", data)
 }
 func runtimeSpec(b boxRecord) boxprovider.Spec {
 	config := b.Profile.Guest
@@ -305,7 +337,7 @@ func runtimeSpec(b boxRecord) boxprovider.Spec {
 		config.DebugHome = "/home/debug"
 	}
 	metadata, _ := json.Marshal(inventory.Record{ClientID: b.ClientID, Box: mustBoxJSON(b.Box), Staged: b.Staged})
-	return boxprovider.Spec{Inventory: metadata, BoxID: b.Box.ID, Image: b.Profile.Image, Config: config, CPU: b.Profile.CPU, MemoryMiB: b.Profile.MemoryMiB, Namespace: b.Profile.Namespace, NodeName: b.Profile.NodeName, DebugReadOnlyHostPath: b.Profile.DebugReadOnlyHostPath, DebugReadWriteHostPath: b.Profile.DebugReadWriteHostPath, Staged: b.Staged}
+	return boxprovider.Spec{Inventory: metadata, BoxID: b.Box.ID, Image: b.Profile.Image, Config: config, CPU: b.Profile.CPU, MemoryMiB: b.Profile.MemoryMiB, Namespace: b.Profile.Namespace, NodeName: b.Profile.NodeName, SharedReadOnlyHostPath: b.Profile.SharedReadOnlyHostPath, DebugReadOnlyHostPath: b.Profile.DebugReadOnlyHostPath, DebugReadWriteHostPath: b.Profile.DebugReadWriteHostPath, Staged: b.Staged}
 }
 func (s *Service) rawBox(id string) (boxRecord, error) {
 	return s.store.BoxRecord(id)
@@ -403,6 +435,13 @@ func (s *Service) observe(ctx context.Context, b boxRecord) (Box, error) {
 }
 func (s *Service) connection(ctx context.Context, b boxRecord) (boxprovider.Connection, error) {
 	p := s.providers[b.Profile.Provider]
+	if fenced, ok := p.(boxprovider.FencedGuestProvider); ok {
+		conn, err := fenced.GuestForExecution(ctx, b.Handle, b.ExecutionID)
+		if errors.Is(err, boxprovider.ErrStaleExecution) {
+			return boxprovider.Connection{}, apiError("STALE_GENERATION", "Runtime changed; fetch the box and inspect its generation")
+		}
+		return conn, err
+	}
 	check := func() error {
 		ob, err := p.Inspect(ctx, b.Handle)
 		if err != nil {
@@ -493,12 +532,20 @@ func (s *Service) waitState(ctx context.Context, id, want string) (Box, error) {
 				return box, nil
 			}
 			updated, _ := s.rawBox(id)
-			res, e := s.guestRequest(ctx, updated, "GET", "/healthz", nil)
+			// Endpoint publication can lag Pod readiness. Bound each attempt so
+			// an early dropped SYN does not consume the whole startup deadline.
+			probeCtx, probeCancel := context.WithTimeout(ctx, time.Second)
+			probeStarted := time.Now()
+			res, e := s.guestRequest(probeCtx, updated, "GET", "/healthz", nil)
+			runtimeTiming(id, "cellbox.health_probe", probeStarted, e)
 			if e == nil {
 				res.Body.Close()
+				probeCancel()
 				if res.StatusCode == 200 {
 					return box, nil
 				}
+			} else {
+				probeCancel()
 			}
 		}
 		if err == nil && box.Phase == "failed" {
@@ -516,11 +563,16 @@ func (s *Service) provision(ctx context.Context, id string) (Box, error) {
 	if err != nil {
 		return Box{}, err
 	}
+	createStarted := time.Now()
 	handle, err := s.providers[b.Profile.Provider].Create(ctx, runtimeSpec(b))
+	runtimeTiming(id, "cellbox.create_runtime", createStarted, err)
 	if err != nil {
 		return Box{}, err
 	}
-	if err = s.saveHandle(id, handle); err != nil {
+	handleStarted := time.Now()
+	err = s.saveHandle(id, handle)
+	runtimeTiming(id, "cellbox.persist_handle", handleStarted, err)
+	if err != nil {
 		return Box{}, err
 	}
 	want := "running"
@@ -530,13 +582,17 @@ func (s *Service) provision(ctx context.Context, id string) (Box, error) {
 			want = "restoring"
 		}
 	}
-	return s.waitState(ctx, id, want)
+	waitStarted := time.Now()
+	box, err := s.waitState(ctx, id, want)
+	runtimeTiming(id, "cellbox.wait_"+want, waitStarted, err)
+	return box, err
 }
 
 type createRequest struct {
 	ProfileID       string `json:"profileId"`
 	OwnerKey        string `json:"ownerKey"`
 	ImportedImageID string `json:"importedImageId,omitempty"`
+	Staged          bool   `json:"staged,omitempty"`
 }
 
 func (s *Service) create(client, key string, input createRequest, archiveID string, acceptImageChange bool) (Operation, error) {
@@ -607,7 +663,7 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 		if archiveID != "" {
 			state = "restoring"
 		}
-		st.Boxes[id] = boxRecord{Box: Box{ID: id, OwnerKey: input.OwnerKey, ProfileID: profile.ID, Phase: state, Version: 1, Image: profile.Image, Workspace: profile.Guest.Workspace, Capabilities: profileCapabilities(profile), OperationID: op.ID, CreatedAt: time.Now().UTC()}, ClientID: client, Profile: profile, Staged: archiveID != "", RestoreArchiveID: archiveID, AcceptImageChange: acceptImageChange}
+		st.Boxes[id] = boxRecord{Box: Box{ID: id, OwnerKey: input.OwnerKey, ProfileID: profile.ID, Phase: state, Version: 1, Image: profile.Image, Workspace: profile.Guest.Workspace, Capabilities: profileCapabilities(profile), OperationID: op.ID, CreatedAt: time.Now().UTC()}, ClientID: client, Profile: profile, Staged: archiveID != "" || input.Staged, RestoreComplete: input.Staged && archiveID == "", RestoreArchiveID: archiveID, AcceptImageChange: acceptImageChange}
 		record := st.Boxes[id]
 		record.Box.ImportedImageID = input.ImportedImageID
 		st.Boxes[id] = record
@@ -697,7 +753,7 @@ func (s *Service) action(client, key, id, action string) (Operation, error) {
 	if err != nil || !fresh {
 		return op, err
 	}
-	s.launch(op, func(ctx context.Context) (map[string]string, error) {
+	s.launchWithCommit(op, func(ctx context.Context) (map[string]string, error) {
 		p := s.providers[b.Profile.Provider]
 		switch action {
 		case "destroy":
@@ -724,16 +780,6 @@ func (s *Service) action(client, key, id, action string) (Operation, error) {
 				return nil, err
 			}
 			if err := s.setInventoryStage(ctx, b, "running"); err != nil {
-				return nil, err
-			}
-			if err := s.store.Update(func(st *State) error {
-				v := st.Boxes[id]
-				v.Staged = false
-				v.Box.Phase = "running"
-				v.Box.Version++
-				st.Boxes[id] = v
-				return nil
-			}); err != nil {
 				return nil, err
 			}
 		case "reconcile":
@@ -773,6 +819,20 @@ func (s *Service) action(client, key, id, action string) (Operation, error) {
 			}
 		}
 		return map[string]string{"boxId": id}, nil
+	}, func(st *State) error {
+		if action != "activate" {
+			return nil
+		}
+		v, ok := st.Boxes[id]
+		if !ok || v.Box.OperationID != op.ID {
+			return apiError("CONFLICT", "Box changed during activation")
+		}
+		// Activation and operation completion become visible in one commit.
+		v.Staged = false
+		v.Box.Phase = "running"
+		v.Box.Version++
+		st.Boxes[id] = v
+		return nil
 	})
 	return op, nil
 }

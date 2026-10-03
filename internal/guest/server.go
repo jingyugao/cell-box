@@ -65,6 +65,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/quiesce", s.quiesceHandler)
 	mux.HandleFunc("POST /v1/unquiesce", s.unquiesceHandler)
 	mux.HandleFunc("PUT /v1/credentials/{slot}", s.credentialHandler)
+	mux.HandleFunc("PUT /v1/credentials", s.credentialBatchHandler)
 	mux.HandleFunc("POST /v1/tools/{id}", s.toolHandler)
 	mux.HandleFunc("/proxy/", s.proxyHandler)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -84,7 +85,10 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
-	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	return decodeJSONLimit(w, r, v, 1<<20)
+}
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, v any, limit int64) bool {
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	d.DisallowUnknownFields()
 	if err := d.Decode(v); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), 400)
@@ -153,6 +157,32 @@ func (s *Server) credentialHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := writeCredential(debugRoot, slot, http.MaxBytesReader(w, r.Body, 1<<20), s.cfg.Debug); err != nil {
 		http.Error(w, err.Error(), 400)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) credentialBatchHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.beginCommand() {
+		http.Error(w, "guest quiesced", 409)
+		return
+	}
+	defer s.endCommand()
+	var batch guestapi.CredentialBatch
+	if !decodeJSONLimit(w, r, &batch, 3<<20) {
+		return
+	}
+	defer func() {
+		for _, data := range batch.Slots {
+			clear(data)
+		}
+	}()
+	if err := batch.Validate(); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	if err := writeCredentialBatch(debugRoot, batch, s.cfg.Debug); err != nil {
+		http.Error(w, "credential batch write failed", 500)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

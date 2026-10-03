@@ -20,6 +20,54 @@ import (
 	"time"
 )
 
+func TestSharedDirectoryMountAdmissionAndFingerprint(t *testing.T) {
+	_, _, w := fixture(t)
+	legacyHash := fingerprint(w)
+	w.Spec.SharedReadOnlyHostPath = "/srv/cocell/shared"
+	w.Spec.DebugReadOnlyHostPath = "/srv/debug"
+	w.Status.SpecHash = fingerprint(w)
+	if w.Status.SpecHash == legacyHash {
+		t.Fatal("shared mount must affect immutable fingerprint")
+	}
+	if err := validate(w); err != nil {
+		t.Fatal(err)
+	}
+	p := &core.Pod{Spec: core.PodSpec{Containers: []core.Container{w.Spec.Container}, Volumes: hostVolumes(w)}}
+	p.Spec.Containers[0].VolumeMounts = hostMounts(w)
+	if !admittedDebugMount(w, p) {
+		t.Fatal("dedicated shared and debug mounts should coexist")
+	}
+	if p.Spec.Containers[0].VolumeMounts[1].MountPath != api.SharedMountPath || !p.Spec.Containers[0].VolumeMounts[1].ReadOnly {
+		t.Fatal("shared directory must be read-only at fixed path")
+	}
+	tampered := p.DeepCopy()
+	tampered.Spec.Containers[0].VolumeMounts[1].ReadOnly = false
+	if admittedDebugMount(w, tampered) {
+		t.Fatal("writable shared mount was admitted")
+	}
+	tampered = p.DeepCopy()
+	tampered.Spec.Volumes[1].HostPath.Path = "/srv/other"
+	if admittedDebugMount(w, tampered) {
+		t.Fatal("different host directory was admitted")
+	}
+	tampered = p.DeepCopy()
+	tampered.Spec.Containers[0].VolumeMounts[1].SubPath = "config.json"
+	if admittedDebugMount(w, tampered) {
+		t.Fatal("individual-file subPath was admitted")
+	}
+	w.Spec.SharedReadOnlyHostPath = "/srv/other"
+	if validate(w) == nil {
+		t.Fatal("shared directory must be immutable")
+	}
+	w.Status.SpecHash = ""
+	for _, path := range []string{"/", "relative", "/srv/../other", "/srv/shared\n"} {
+		w.Spec.SharedReadOnlyHostPath = path
+		if validate(w) == nil {
+			t.Fatalf("accepted invalid path %q", path)
+		}
+	}
+}
+
 type fakeRuntime struct {
 	checkpoints, prepares, cleanups int
 	prepareError, cleanupError      error

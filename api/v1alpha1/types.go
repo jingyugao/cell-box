@@ -22,13 +22,15 @@ const (
 	RuntimeClass       = "runsc-recoverable"
 	DebugHostMountPath = "/var/lib/cellbox/debug/host"
 	DebugHomeMountPath = "/home/debug"
+	SharedMountPath    = "/var/lib/cellbox/shared"
 )
 
 type Spec struct {
 	NodeName     string `json:"nodeName"`
 	DesiredState string `json:"desiredState"`
-	// Container is immutable. The controller owns optional debug mounts.
+	// Container is immutable. The controller owns optional directory mounts.
 	Container              core.Container     `json:"container"`
+	SharedReadOnlyHostPath string             `json:"sharedReadOnlyHostPath,omitempty"`
 	DebugReadOnlyHostPath  string             `json:"debugReadOnlyHostPath,omitempty"`
 	DebugReadWriteHostPath string             `json:"debugReadWriteHostPath,omitempty"`
 	ServicePorts           []core.ServicePort `json:"servicePorts,omitempty"`

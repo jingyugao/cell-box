@@ -11,6 +11,7 @@ import (
 
 var ErrNotFound = errors.New("runtime not found")
 var ErrUnsupported = errors.New("unsupported runtime operation")
+var ErrStaleExecution = errors.New("runtime execution changed")
 
 type Spec struct {
 	Inventory              json.RawMessage
@@ -21,6 +22,7 @@ type Spec struct {
 	MemoryMiB              int64
 	NodeName               string
 	Namespace              string
+	SharedReadOnlyHostPath string
 	DebugReadOnlyHostPath  string
 	DebugReadWriteHostPath string
 	Staged                 bool // Start guest control, but hold the configured workload until activation.
@@ -53,6 +55,12 @@ type Provider interface {
 	Action(context.Context, Handle, string) error // freeze, unfreeze, suspend, resume
 	Destroy(context.Context, Handle) error
 	Guest(context.Context, Handle) (Connection, error)
+}
+
+// FencedGuestProvider validates the execution while resolving its authenticated
+// connection, avoiding a second, independent lifecycle inspection.
+type FencedGuestProvider interface {
+	GuestForExecution(context.Context, Handle, string) (Connection, error)
 }
 
 // InventoryProvider enumerates workloads from the runtime, without the service ledger.

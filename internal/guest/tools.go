@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -63,6 +64,23 @@ func writeCredential(root, slot string, body io.Reader, id guestapi.Identity) er
 	return unix.Fsync(d)
 }
 
+func writeCredentialBatch(root string, batch guestapi.CredentialBatch, id guestapi.Identity) error {
+	if err := batch.Validate(); err != nil {
+		return err
+	}
+	slots := make([]string, 0, len(batch.Slots))
+	for slot := range batch.Slots {
+		slots = append(slots, slot)
+	}
+	sort.Strings(slots)
+	for _, slot := range slots {
+		if err := writeCredential(root, slot, bytes.NewReader(batch.Slots[slot]), id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Server) runTool(ctx context.Context, t compiledTool, req guestapi.ToolRequest) (result guestapi.ExecResult, err error) {
 	if err := validateToolArgs(t, req.Args); err != nil {
 		return guestapi.ExecResult{}, err
@@ -82,9 +100,11 @@ func (s *Server) runTool(ctx context.Context, t compiledTool, req guestapi.ToolR
 		mode := workspace.Mode().Perm()
 		// The debug identity cannot write agent-owned 0700 directories. Transfer
 		// ownership only for the duration of this explicitly admitted tool.
-		if err := chownWorkspaceTree(s.cfg.Workspace, s.cfg.Debug); err != nil {
-			_ = chownWorkspaceTree(s.cfg.Workspace, s.cfg.Agent)
-			return guestapi.ExecResult{}, err
+		if s.cfg.Debug.UID != 0 {
+			if err := chownWorkspaceTree(s.cfg.Workspace, s.cfg.Debug); err != nil {
+				_ = chownWorkspaceTree(s.cfg.Workspace, s.cfg.Agent)
+				return guestapi.ExecResult{}, err
+			}
 		}
 		defer func() {
 			err = errors.Join(err, chownWorkspaceTree(s.cfg.Workspace, s.cfg.Agent), os.Chmod(s.cfg.Workspace, mode))

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"cellbox.local/cellbox/internal/boxprovider"
 	"cellbox.local/cellbox/internal/guestapi"
 )
 
@@ -459,11 +460,6 @@ func (s *Service) gateway(w http.ResponseWriter, r *http.Request, routeID, tail 
 		fail(w, err)
 		return
 	}
-	target, err := url.Parse(conn.URL)
-	if err != nil {
-		fail(w, err)
-		return
-	}
 	upstreamAuth := ""
 	if cookieAuth {
 		upstreamAuth = r.Header.Get("Authorization")
@@ -486,18 +482,61 @@ func (s *Service) gateway(w http.ResponseWriter, r *http.Request, routeID, tail 
 			}
 		}
 	}
+	escapedTail := r.URL.EscapedPath()
+	if !hostMode {
+		escapedTail = strings.TrimPrefix(escapedTail, "/s/"+routeID)
+		if escapedTail == "" {
+			escapedTail = "/"
+		}
+	}
+	s.proxyService(w, r, ctx, conn, route.Port, tail, escapedTail, upstreamAuth)
+}
+
+// Internal product connections already have an owning API credential. Their
+// live stream is the lifecycle fence; no persistent browser route/grant is needed.
+func (s *Service) internalService(w http.ResponseWriter, r *http.Request) {
+	port, err := strconv.Atoi(r.PathValue("port"))
+	if err != nil || port < 1 || port > 65535 || port == guestapi.Port {
+		fail(w, apiError("INVALID_REQUEST", "Invalid service port"))
+		return
+	}
+	if r.Header.Get("Origin") != "" {
+		fail(w, apiError("FORBIDDEN", "Internal services require a backend client"))
+		return
+	}
+	b, release, err := s.beginIO(clientID(r), r.PathValue("id"))
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	defer release()
+	if b.Box.Phase != "running" {
+		fail(w, apiError("CONFLICT", "Box is not running"))
+		return
+	}
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	stop := context.AfterFunc(s.ctx, cancel)
+	defer stop()
+	conn, err := s.connection(ctx, b)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	prefix := "/v1/boxes/" + url.PathEscape(b.Box.ID) + "/services/" + r.PathValue("port")
+	s.proxyService(w, r, ctx, conn, port, "/"+r.PathValue("path"), strings.TrimPrefix(r.URL.EscapedPath(), prefix), "")
+}
+
+func (s *Service) proxyService(w http.ResponseWriter, r *http.Request, ctx context.Context, conn boxprovider.Connection, port int, tail, escapedTail, upstreamAuth string) {
+	target, err := url.Parse(conn.URL)
+	if err != nil {
+		fail(w, err)
+		return
+	}
 	proxy := &httputil.ReverseProxy{Rewrite: func(p *httputil.ProxyRequest) {
 		p.SetURL(target)
-		p.Out.URL.Path = "/proxy/" + strconv.Itoa(route.Port) + tail
-		p.Out.URL.RawPath = ""
-		escapedTail := r.URL.EscapedPath()
-		if !hostMode {
-			escapedTail = strings.TrimPrefix(escapedTail, "/s/"+routeID)
-			if escapedTail == "" {
-				escapedTail = "/"
-			}
-		}
-		p.Out.URL.RawPath = "/proxy/" + strconv.Itoa(route.Port) + escapedTail
+		p.Out.URL.Path = "/proxy/" + strconv.Itoa(port) + tail
+		p.Out.URL.RawPath = "/proxy/" + strconv.Itoa(port) + escapedTail
 		p.Out.Host = target.Host
 		// Neither callers nor an application can inject control-plane credentials.
 		for name := range p.Out.Header {

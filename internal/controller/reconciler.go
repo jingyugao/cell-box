@@ -76,7 +76,16 @@ func fingerprint(w *api.ResumablePod) string {
 		Ports     []core.ServicePort
 	}{w.Spec.NodeName, w.Spec.Container, w.Spec.ServicePorts}
 	var b []byte
-	if w.Spec.DebugReadOnlyHostPath == "" && w.Spec.DebugReadWriteHostPath == "" {
+	if w.Spec.SharedReadOnlyHostPath != "" {
+		b, _ = json.Marshal(struct {
+			Node                   string
+			Container              core.Container
+			Ports                  []core.ServicePort
+			SharedReadOnlyHostPath string
+			DebugReadOnlyHostPath  string
+			DebugReadWriteHostPath string
+		}{legacy.Node, legacy.Container, legacy.Ports, w.Spec.SharedReadOnlyHostPath, w.Spec.DebugReadOnlyHostPath, w.Spec.DebugReadWriteHostPath})
+	} else if w.Spec.DebugReadOnlyHostPath == "" && w.Spec.DebugReadWriteHostPath == "" {
 		// Keep the fingerprint of existing workloads unchanged.
 		b, _ = json.Marshal(legacy)
 	} else if w.Spec.DebugReadWriteHostPath == "" {
@@ -117,11 +126,26 @@ func debugHostMounts(w *api.ResumablePod) []core.VolumeMount {
 	}
 	return []core.VolumeMount{{Name: "debug-host", MountPath: api.DebugHostMountPath, ReadOnly: true}}
 }
+func hostVolumes(w *api.ResumablePod) []core.Volume {
+	volumes := debugHostVolumes(w)
+	if w.Spec.SharedReadOnlyHostPath != "" {
+		directory := core.HostPathDirectory
+		volumes = append(volumes, core.Volume{Name: "shared", VolumeSource: core.VolumeSource{HostPath: &core.HostPathVolumeSource{Path: w.Spec.SharedReadOnlyHostPath, Type: &directory}}})
+	}
+	return volumes
+}
+func hostMounts(w *api.ResumablePod) []core.VolumeMount {
+	mounts := debugHostMounts(w)
+	if w.Spec.SharedReadOnlyHostPath != "" {
+		mounts = append(mounts, core.VolumeMount{Name: "shared", MountPath: api.SharedMountPath, ReadOnly: true})
+	}
+	return mounts
+}
 func admittedDebugMount(w *api.ResumablePod, p *core.Pod) bool {
 	if len(p.Spec.Containers) != 1 {
 		return false
 	}
-	wantVolumes, wantMounts := debugHostVolumes(w), debugHostMounts(w)
+	wantVolumes, wantMounts := hostVolumes(w), hostMounts(w)
 	if len(p.Spec.Volumes) != len(wantVolumes) || len(p.Spec.Containers[0].VolumeMounts) != len(wantMounts) {
 		return false
 	}
@@ -153,6 +177,10 @@ func validate(w *api.ResumablePod) error {
 	}
 	if c.Name == "" || c.Image == "" {
 		return fmt.Errorf("container name/image required")
+	}
+	if host := w.Spec.SharedReadOnlyHostPath; host != "" &&
+		(!path.IsAbs(host) || path.Clean(host) != host || host == "/" || len(host) > 4096 || strings.ContainsAny(host, "\x00\r\n")) {
+		return fmt.Errorf("sharedReadOnlyHostPath must be a clean absolute directory path other than /")
 	}
 	if host := w.Spec.DebugReadOnlyHostPath; host != "" &&
 		(!path.IsAbs(host) || path.Clean(host) != host || host == "/" || len(host) > 4096 || strings.ContainsAny(host, "\x00\r\n")) {
@@ -425,8 +453,8 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			grace := int64(3)
 			runtime := api.RuntimeClass
 			container := *w.Spec.Container.DeepCopy()
-			container.VolumeMounts = debugHostMounts(w)
-			p = &core.Pod{ObjectMeta: meta.ObjectMeta{Name: w.Status.PodName, Namespace: w.Namespace, Labels: map[string]string{api.OwnerLabel: string(w.UID)}}, Spec: core.PodSpec{Containers: []core.Container{container}, Volumes: debugHostVolumes(w), RuntimeClassName: &runtime, RestartPolicy: core.RestartPolicyNever, AutomountServiceAccountToken: &no, EnableServiceLinks: &no, Hostname: "recoverable", TerminationGracePeriodSeconds: &grace, NodeSelector: map[string]string{"kubernetes.io/hostname": w.Spec.NodeName}, SchedulingGates: []core.PodSchedulingGate{{Name: api.Gate}}}}
+			container.VolumeMounts = hostMounts(w)
+			p = &core.Pod{ObjectMeta: meta.ObjectMeta{Name: w.Status.PodName, Namespace: w.Namespace, Labels: map[string]string{api.OwnerLabel: string(w.UID)}}, Spec: core.PodSpec{Containers: []core.Container{container}, Volumes: hostVolumes(w), RuntimeClassName: &runtime, RestartPolicy: core.RestartPolicyNever, AutomountServiceAccountToken: &no, EnableServiceLinks: &no, Hostname: "recoverable", TerminationGracePeriodSeconds: &grace, NodeSelector: map[string]string{"kubernetes.io/hostname": w.Spec.NodeName}, SchedulingGates: []core.PodSchedulingGate{{Name: api.Gate}}}}
 			if err = controllerutil.SetControllerReference(w, p, r.Scheme()); err != nil {
 				return again, err
 			}
