@@ -40,20 +40,19 @@ func TestInternalServiceScopesClientAndFencesLiveWebSocketWithoutMetadataWrites(
 	status, body = f.call(t, "GET", "/v1/boxes/"+f.box.ID+"/services/40000/", testClientToken, "", nil)
 	wantStatus(t, status, 400, body)
 	req := httptest.NewRequest("GET", prefix+"/", nil)
-	req.Header.Set("Authorization", "Bearer "+testClientToken)
 	req.Header.Set("Origin", "https://browser.example.test")
 	rec := httptest.NewRecorder()
 	f.service.Handler().ServeHTTP(rec, req)
-	wantStatus(t, rec.Code, 403, rec.Body.Bytes())
+	wantStatus(t, rec.Code, 200, rec.Body.Bytes())
 
-	status, body = f.call(t, "GET", prefix+"/nested/a%2Fb?q=value", testClientToken, "", nil)
+	status, body = f.call(t, "GET", prefix+"/nested/a%2Fb?q=value", "", "", nil)
 	wantStatus(t, status, 200, body)
 	if string(body) != "/proxy/8080/nested/a%2Fb?q=value" {
 		t.Fatalf("wrong proxy path: %s", body)
 	}
 	server := httptest.NewServer(f.service.Handler())
 	defer server.Close()
-	conn, res, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+prefix+"/ws", http.Header{"Authorization": {"Bearer " + testClientToken}, "X-Cellbox-Upstream-Authorization": {"injected"}})
+	conn, res, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+prefix+"/ws", http.Header{"X-Cellbox-Upstream-Authorization": {"injected"}})
 	if err != nil {
 		t.Fatalf("internal websocket: %v (%v)", err, res)
 	}
@@ -69,7 +68,7 @@ func TestInternalServiceScopesClientAndFencesLiveWebSocketWithoutMetadataWrites(
 	status, body = f.call(t, "POST", "/v1/boxes/"+f.box.ID+":destroy", testClientToken, "internal-busy", nil)
 	wantStatus(t, status, 409, body)
 	if err := f.service.store.View(func(st State) error {
-		if len(st.Routes) != 1 || len(st.Grants) != 0 || len(st.Leases) != 0 {
+		if len(st.Routes) != 1 || len(st.Leases) != 0 {
 			t.Fatal("internal access created durable access records")
 		}
 		return nil

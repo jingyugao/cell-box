@@ -61,8 +61,7 @@ func TestDockerREST(t *testing.T) {
 	cfg := guestapi.DefaultConfig()
 	cfg.Command = []string{"/workload", "serve"}
 	cfg.Tools = []guestapi.Tool{{ID: "demo", Executable: "/opt/cellbox/tools/demo", Args: []string{"tool"}, CredentialEnv: map[string]string{"DEMO_FILE": "demo"}}}
-	const clientToken = "smoke-client-abcdefghijklmnopqrstuvwxyz-0123456789"
-	s, err := service.New(service.Config{DataDir: filepath.Join(dir, "state"), PublicURL: "http://127.0.0.1", StartupTimeoutSeconds: 20, Clients: []service.Client{{ID: "smoke", Token: clientToken}}, Profiles: []service.Profile{{ID: "smoke", Provider: "docker", Image: prepared.ImageID, Guest: cfg, Clients: []string{"smoke"}}}}, map[string]boxprovider.Provider{"docker": docker.New("docker")})
+	s, err := service.New(service.Config{DataDir: filepath.Join(dir, "state"), PublicURL: "http://127.0.0.1", StartupTimeoutSeconds: 20, ClientID: "smoke", Profiles: []service.Profile{{ID: "smoke", Provider: "docker", Image: prepared.ImageID, Guest: cfg}}}, map[string]boxprovider.Provider{"docker": docker.New("docker")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +82,6 @@ func TestDockerREST(t *testing.T) {
 			}
 		}
 		req, _ := http.NewRequest(method, server.URL+path, bytes.NewReader(data))
-		req.Header.Set("Authorization", "Bearer "+clientToken)
 		req.Header.Set("Idempotency-Key", fmt.Sprint(time.Now().UnixNano()))
 		res, err := server.Client().Do(req)
 		if err != nil {
@@ -151,22 +149,8 @@ func TestDockerREST(t *testing.T) {
 	call("PUT", "/v1/boxes/"+source+"/files?path=hello.txt", "archive-roundtrip", 204)
 	var route service.Route
 	json.Unmarshal(call("POST", "/v1/routes", map[string]any{"boxId": source, "port": 8080}, 201), &route)
-	var grant struct {
-		Grant service.Grant `json:"grant"`
-		Token string        `json:"token"`
-	}
-	json.Unmarshal(call("POST", "/v1/routes/"+route.ID+"/grants", map[string]any{"subject": "smoke", "ttlSeconds": 30}, 201), &grant)
 	req, _ := http.NewRequest("GET", server.URL+"/s/"+route.ID+"/", nil)
 	res, err := server.Client().Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	res.Body.Close()
-	if res.StatusCode != 401 {
-		t.Fatal("unauthorized proxy allowed")
-	}
-	req.Header.Set("Authorization", "Bearer "+grant.Token)
-	res, err = server.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

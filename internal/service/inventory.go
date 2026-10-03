@@ -81,15 +81,6 @@ func (s *Service) listBoxes(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	namespaces := map[string]boxprovider.InventoryProvider{}
 	for _, profile := range s.config.Profiles {
-		allowed := false
-		for _, client := range profile.Clients {
-			if client == clientID(r) {
-				allowed = true
-			}
-		}
-		if !allowed {
-			continue
-		}
 		provider, ok := s.providers[profile.Provider].(boxprovider.InventoryProvider)
 		if !ok {
 			if resourcesOnly {
@@ -100,7 +91,7 @@ func (s *Service) listBoxes(w http.ResponseWriter, r *http.Request) {
 				fail(w, apiError("UNSUPPORTED_CAPABILITY", "Remote inventory requires a Kubernetes provider"))
 				return
 			}
-			s.listLegacyBoxes(w, r)
+			s.listLocalBoxes(w, r)
 			return
 		}
 		if resourcesOnly {
@@ -152,7 +143,7 @@ func (s *Service) listBoxes(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Service) listCheckpoints(w http.ResponseWriter, r *http.Request) {
 	if s.objects == nil {
-		s.listLegacyBoxes(w, r)
+		s.listLocalBoxes(w, r)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)

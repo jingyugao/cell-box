@@ -138,8 +138,8 @@ func newCoreFixture(t *testing.T) *coreFixture {
 	}))
 	f.provider = &fakeCoreProvider{guestURL: f.guest.URL, executionID: "fake-container/start-one"}
 	f.config = Config{DataDir: t.TempDir(), StartupTimeoutSeconds: 3,
-		Clients:  []Client{{ID: "client-a", Token: testClientToken}, {ID: "client-b", Token: otherClientToken}},
-		Profiles: []Profile{{ID: "profile-a", Provider: "docker", Image: "sha256:" + strings.Repeat("a", 64), CPU: 1, MemoryMiB: 512, Guest: guestapi.DefaultConfig(), Clients: []string{"client-a"}}},
+		ClientID: "client-a",
+		Profiles: []Profile{{ID: "profile-a", Provider: "docker", Image: "sha256:" + strings.Repeat("a", 64), CPU: 1, MemoryMiB: 512, Guest: guestapi.DefaultConfig()}},
 	}
 	var err error
 	f.service, err = New(f.config, map[string]boxprovider.Provider{"docker": f.provider})
@@ -180,6 +180,9 @@ func (f *coreFixture) call(t *testing.T, method, path, token, key string, body a
 	r := httptest.NewRequest(method, path, reader)
 	if token != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
+		if token == otherClientToken {
+			r.Header.Set("X-Cellbox-Client-ID", "client-b")
+		}
 	}
 	if key != "" {
 		r.Header.Set("Idempotency-Key", key)
@@ -308,21 +311,41 @@ func (f *coreFixture) waitOperation(t *testing.T, id, want string) Operation {
 	return Operation{}
 }
 
-func TestRESTAuthAndClientIsolation(t *testing.T) {
+func TestRESTUnauthenticatedClientNamespaces(t *testing.T) {
 	f := newCoreFixture(t)
 	op, box := f.createBox(t, "create-isolation")
 	status, body := f.call(t, "GET", "/v1/boxes/"+box.ID, "", "", nil)
-	wantStatus(t, status, 401, body)
+	wantStatus(t, status, 200, body)
 	status, body = f.call(t, "GET", "/v1/boxes/"+box.ID, otherClientToken, "", nil)
 	wantStatus(t, status, 404, body)
 	status, body = f.call(t, "GET", "/v1/operations/"+op.ID, otherClientToken, "", nil)
-	wantStatus(t, status, 404, body)
-	status, body = f.call(t, "POST", "/v1/boxes", otherClientToken, "other-create", map[string]string{"profileId": "profile-a", "ownerKey": "owner-b"})
 	wantStatus(t, status, 404, body)
 	status, body = f.call(t, "GET", "/v1/boxes", otherClientToken, "", nil)
 	wantStatus(t, status, 200, body)
 	if boxes := decodeResponse[[]Box](t, body); len(boxes) != 0 {
 		t.Fatalf("other client sees boxes: %+v", boxes)
+	}
+}
+
+func TestRESTWithoutClientCredentialsOrProfileAdmission(t *testing.T) {
+	f := newCoreFixture(t)
+	f.config.ClientID = ""
+	f.reopen(t)
+	status, body := f.call(t, "GET", "/v1/profiles", "", "", nil)
+	wantStatus(t, status, 200, body)
+	status, body = f.call(t, "POST", "/v1/boxes", "", "anonymous-create", map[string]string{"profileId": "profile-a", "ownerKey": "owner"})
+	wantStatus(t, status, 202, body)
+	op := decodeResponse[Operation](t, body)
+	f.waitOperation(t, op.ID, "succeeded")
+	status, body = f.call(t, "GET", "/v1/boxes/"+op.TargetID, "ignored-invalid-token", "", nil)
+	wantStatus(t, status, 200, body)
+	if f.service.config.ClientID != "internal" {
+		t.Fatal("unexpected default data namespace")
+	}
+	status, body = f.call(t, "POST", "/v1/boxes", "", "anonymous-create", map[string]string{"profileId": "profile-a", "ownerKey": "owner"})
+	wantStatus(t, status, 202, body)
+	if decodeResponse[Operation](t, body).ID != op.ID {
+		t.Fatal("anonymous retries lost their idempotency namespace")
 	}
 }
 
@@ -441,7 +464,7 @@ func TestInterruptedExecIsUnknownAndNeverReplayed(t *testing.T) {
 	var eid string
 	op, fresh, err := f.service.prepareOperation("client-a", "interrupted-exec", "exec", box.ID, input, func(st *State, op *Operation) error {
 		eid = randomID("exec-")
-		st.Executions[eid] = Execution{ID: eid, BoxID: box.ID, OperationID: op.ID, State: "running"}
+		st.Executions[eid] = executionRecord{Execution: Execution{ID: eid, BoxID: box.ID, OperationID: op.ID, State: "running"}}
 		b := st.Boxes[box.ID]
 		b.Box.OperationID = op.ID
 		st.Boxes[box.ID] = b
@@ -513,3 +536,51 @@ func TestStoreLockPreventsSecondServiceUntilClose(t *testing.T) {
 }
 
 var _ boxprovider.Provider = (*fakeCoreProvider)(nil)
+
+func TestProfilesExposeOnlySupportedRuntimeBehaviorKinds(t *testing.T) {
+	f := newCoreFixture(t)
+	f.config.Profiles = append(f.config.Profiles, Profile{ID: "profile-k8s", Provider: "resumable-k8s-pod",
+		Image: "example.invalid/agent@sha256:" + strings.Repeat("b", 64), Namespace: "test", NodeName: "test-node",
+		CPU: 2, MemoryMiB: 1024, Guest: guestapi.DefaultConfig()})
+	if err := f.service.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.service = nil
+	var err error
+	f.service, err = New(f.config, map[string]boxprovider.Provider{
+		"docker": f.provider, "resumable-k8s-pod": f.provider,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, body := f.call(t, "GET", "/v1/profiles", testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	type profileResponse struct {
+		Provider, Runtime, Behavior, Kind, Image, Workspace string
+		CPU                                                 float64
+		MemoryMiB                                           int64
+		Agent                                               guestapi.Identity
+	}
+	profiles := decodeResponse[[]profileResponse](t, body)
+	if len(profiles) != 2 {
+		t.Fatalf("expected two admitted profiles: %s", body)
+	}
+	for _, profile := range profiles {
+		switch profile.Provider {
+		case "docker":
+			if profile.Runtime != "docker" || profile.Behavior != "normal" || profile.Kind != "docker-normal" {
+				t.Fatalf("wrong docker combination: %+v", profile)
+			}
+		case "resumable-k8s-pod":
+			if profile.Runtime != "k8s" || profile.Behavior != "resumable" || profile.Kind != "k8s-resumable" {
+				t.Fatalf("wrong k8s combination: %+v", profile)
+			}
+		default:
+			t.Fatalf("unexpected provider: %+v", profile)
+		}
+		if profile.Image == "" || profile.Workspace == "" || profile.CPU < 1 || profile.MemoryMiB < 1 ||
+			profile.Agent.UID != 11000 || profile.Agent.GID != 11000 {
+			t.Fatalf("profile metadata missing: %+v", profile)
+		}
+	}
+}

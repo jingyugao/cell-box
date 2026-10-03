@@ -38,6 +38,7 @@ type Handle struct {
 }
 
 type Observation struct {
+	Generation  uint64 // Provider-owned durable execution cycle, when available.
 	Phase       string // creating, running, freezing, frozen, unfreezing, checkpointing, suspending, suspended, resuming, restoring, staged, deleting, deleted, failed
 	ExecutionID string // immutable runtime identity; changes after Pod replacement
 	Message     string

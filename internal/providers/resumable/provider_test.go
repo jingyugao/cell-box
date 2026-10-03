@@ -197,6 +197,7 @@ func TestLifecycleAndGuestIdentity(t *testing.T) {
 	w.Status.Phase = "Running"
 	w.Status.PodName = "pod-a"
 	w.Status.PodUID = "pod-uid"
+	w.Status.Cycle = 7
 	if err = p.Client.Status().Update(ctx, w); err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +214,7 @@ func TestLifecycleAndGuestIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	obs, err = p.Inspect(ctx, h)
-	if err != nil || obs.Phase != "running" || obs.ExecutionID != "pod-uid" {
+	if err != nil || obs.Phase != "running" || obs.ExecutionID != "pod-uid" || obs.Generation != 7 {
 		t.Fatalf("not-ready Pod changed lifecycle: %#v %v", obs, err)
 	}
 	if _, err = p.Guest(ctx, h); !errors.Is(err, errNotReady) {

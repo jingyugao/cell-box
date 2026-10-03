@@ -2,9 +2,7 @@ package service
 
 import (
 	"cellbox.local/cellbox/internal/objectstorage"
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"golang.org/x/sys/unix"
 	"maps"
@@ -14,15 +12,18 @@ import (
 )
 
 type Store struct {
-	imageEtags map[string]string
-	objects    objectstorage.Objects
-	etag       string
-	failure    error
-	onFailure  func()
-	mu         sync.Mutex
-	state      State
-	dir        string
-	lock       *os.File
+	// Writers remain serialized for cross-resource invariants. Readers only hold
+	// mu while copying committed memory, never while object storage is accessed.
+	writeMu   sync.Mutex
+	records   *recordStore
+	objects   objectstorage.Objects
+	etag      string
+	failure   error
+	onFailure func()
+	mu        sync.Mutex
+	state     State
+	dir       string
+	lock      *os.File
 }
 
 func OpenStore(dir string) (*Store, error) {
@@ -60,19 +61,16 @@ func OpenStore(dir string) (*Store, error) {
 		return nil, err
 	}
 	if err == nil {
+		s.state = State{}
 		if err = json.Unmarshal(b, &s.state); err != nil {
 			s.Close()
 			return nil, fmt.Errorf("invalid state file: %w", err)
 		}
-		if s.state.Schema != 2 {
+		if s.state.Schema != stateSchema {
 			s.Close()
 			return nil, fmt.Errorf("unsupported state schema")
 		}
-		// Additive schema-2 collection; older lifecycle state remains readable.
-		if s.state.ImportedImages == nil {
-			s.state.ImportedImages = map[string]importedImageRecord{}
-		}
-		if s.state.Boxes == nil || s.state.Operations == nil || s.state.Keys == nil || s.state.Executions == nil || s.state.Leases == nil || s.state.Routes == nil || s.state.Grants == nil || s.state.Access == nil || s.state.Sessions == nil || s.state.Archives == nil {
+		if s.state.Boxes == nil || s.state.Operations == nil || s.state.Keys == nil || s.state.Executions == nil || s.state.Leases == nil || s.state.Routes == nil || s.state.ImportedImages == nil || s.state.Archives == nil {
 			s.Close()
 			return nil, fmt.Errorf("state contains null collections")
 		}
@@ -177,6 +175,8 @@ func sameObservationBase(a, b boxRecord) bool {
 // UpdateObservedBox performs the compare even when update reports no changes.
 // It persists only when the observation changed the box.
 func (s *Store) UpdateObservedBox(base boxRecord, update func(*boxRecord) (bool, error)) (boxRecord, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.failure != nil {
@@ -202,6 +202,11 @@ func (s *Store) UpdateObservedBox(base boxRecord, update func(*boxRecord) (bool,
 	state := s.state
 	state.Boxes = maps.Clone(s.state.Boxes)
 	state.Boxes[base.Box.ID] = next
+	if s.records != nil && next.Profile.Provider == "resumable-k8s-pod" {
+		// Kubernetes owns observations; Cycle supplies the durable generation.
+		s.state = state
+		return cloneBoxRecord(next)
+	}
 	if err = s.persistLocked(state); err != nil {
 		return boxRecord{}, err
 	}
@@ -230,6 +235,8 @@ func (s *Store) View(fn func(State) error) error {
 	return fn(copy)
 }
 func (s *Store) Update(fn func(*State) error) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.failure != nil {
@@ -264,9 +271,20 @@ func (s *Store) persistLocked(next State) error {
 		return s.failure
 	}
 	if s.objects != nil {
-		return s.persistRemoteLocked(next)
+		// writeMu protects the transaction. Publish the new state only after its
+		// durable commit; concurrent readers can keep using the previous snapshot.
+		s.mu.Unlock()
+		err := s.persistRecords(next)
+		s.mu.Lock()
+		if err != nil {
+			return s.failRemote()
+		}
+		s.state = next
+		return nil
 	}
-	b, err := json.MarshalIndent(next, "", "  ")
+	persisted := next
+	persisted.Routes = map[string]Route{}
+	b, err := json.MarshalIndent(persisted, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -308,32 +326,3 @@ func (s *Store) persistLocked(next State) error {
 
 const stateObjectKey = "metadata/state.json"
 const stateObjectLimit = 64 << 20
-
-// OpenObjectStore loads the durable service ledger; it never reads or writes a
-// local state file. A single API leader owns this ledger. Conditional writes
-// additionally fence stale processes and resolve ambiguous PUT responses.
-func OpenObjectStore(ctx context.Context, objects objectstorage.Objects) (*Store, error) {
-	s := &Store{objects: objects, state: newState(), imageEtags: map[string]string{}}
-	if err := recoverObjectTransaction(ctx, objects); err != nil {
-		return nil, err
-	}
-	data, etag, err := readObject(ctx, objects, stateObjectKey)
-	if errors.Is(err, objectstorage.ErrNotFound) {
-		return s, s.loadImageObjects(ctx)
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err = json.Unmarshal(data, &s.state); err != nil {
-		return nil, errors.New("invalid remote service ledger JSON")
-	}
-	if s.state.Schema != 2 || s.state.Boxes == nil || s.state.Operations == nil || s.state.Keys == nil || s.state.Executions == nil || s.state.Leases == nil || s.state.Routes == nil || s.state.Grants == nil || s.state.Access == nil || s.state.Sessions == nil || s.state.Archives == nil {
-		return nil, errors.New("invalid remote service ledger schema")
-	}
-	if len(s.state.ImportedImages) > 0 {
-		return nil, errors.New("aggregate image metadata is unsupported")
-	}
-	s.state.ImportedImages = map[string]importedImageRecord{}
-	s.etag = etag
-	return s, s.loadImageObjects(ctx)
-}

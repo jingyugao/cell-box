@@ -2,8 +2,7 @@
 # Import test/counter's ordinary image and verify it through the public REST API.
 # Keeps its source sandbox suspended and restored sandbox running for inspection.
 set -euo pipefail
-[[ $# == 3 ]] || { echo "Usage: CELLBOX_CLIENT_TOKEN=... $0 API_URL PROFILE_ID SOURCE_IMAGE" >&2; exit 2; }
-: "${CELLBOX_CLIENT_TOKEN:?Set CELLBOX_CLIENT_TOKEN}"
+[[ $# == 3 ]] || { echo "Usage: $0 API_URL PROFILE_ID SOURCE_IMAGE" >&2; exit 2; }
 uv run python - "$@" <<'PY'
 import json
 import os
@@ -26,8 +25,10 @@ report = {'source': source, 'profileId': profile}
 def save(name, value):
     (evidence / (name + '.json')).write_text(json.dumps(value, indent=2) + '\n')
 
-def call(method, path, data=None, token=None, key=None):
-    headers = {'Authorization': 'Bearer ' + (token or os.environ['CELLBOX_CLIENT_TOKEN'])}
+def call(method, path, data=None, key=None):
+    headers = {}
+    if os.environ.get('CELLBOX_CLIENT_ID'):
+        headers['X-Cellbox-Client-ID'] = os.environ['CELLBOX_CLIENT_ID']
     headers['Idempotency-Key'] = key or str(uuid.uuid4())
     if isinstance(data, bytes):
         headers['Content-Type'] = 'application/octet-stream'
@@ -64,18 +65,17 @@ def create(path, body, name):
 
 def route_for(box):
     route = call('POST', '/v1/routes', {'boxId': box, 'port': 8000})
-    grant = call('POST', f"/v1/routes/{route['id']}/grants", {'subject': 'counter-import-e2e', 'ttlSeconds': 3600})
-    return route['id'], grant['token']
+    return route['id']
 
-def app(route, token, endpoint):
-    return call('GET', f'/s/{route}/{endpoint}', token=token)
+def app(route, endpoint):
+    return call('GET', f'/s/{route}/{endpoint}')
 
-def ready(route, token):
+def ready(route):
     last = None
     for _ in range(60):
         try:
-            assert app(route, token, 'healthz') == b'ok\n'
-            return app(route, token, 'state')
+            assert app(route, 'healthz') == b'ok\n'
+            return app(route, 'state')
         except RuntimeError as error:
             last = error
             time.sleep(1)
@@ -119,18 +119,12 @@ try:
     print('PASS: registry image imported, entrypoint retained, guest injected, idempotency verified', flush=True)
 
     box = create('/v1/boxes', {'profileId': profile, 'ownerKey': 'counter-import-' + str(uuid.uuid4()), 'importedImageId': imported_id}, 'boxId')
-    route, grant = route_for(box)
+    route = route_for(box)
     report['sourceRouteId'] = route
-    ready(route, grant)
-    try:
-        app(route, 'invalid-grant', 'state')
-    except RuntimeError as error:
-        assert 'HTTP 401' in str(error)
-    else:
-        raise AssertionError('Unauthenticated counter request succeeded')
+    ready(route)
     for i in range(1, 11):
-        assert app(route, grant, 'increment') == f'{i}\n'.encode()
-    before = app(route, grant, 'state')
+        assert app(route, 'increment') == f'{i}\n'.encode()
+    before = app(route, 'state')
     save('state-before-suspend', before)
     assert before['count'] == 10 and before['memory_bytes'] == 32 << 20
     assert call('GET', f'/v1/boxes/{box}/files?path=marker') == before['instance'].encode()
@@ -141,14 +135,14 @@ try:
     execution = wait(call('POST', f'/v1/boxes/{box}/execs', {'argv': ['/server', 'get', 'http://127.0.0.1:8000/state'], 'expectedGeneration': b['generation']}))
     result = call('GET', '/v1/execs/' + execution['result']['execId'])['result']
     assert result['exitCode'] == 0 and json.loads(result['stdout'])['instance'] == before['instance']
-    print('PASS: counter reached 10; HTTP authorization, exec and workspace files verified', flush=True)
+    print('PASS: counter reached 10; anonymous HTTP access, exec and workspace files verified', flush=True)
 
     runtime_before = runtime(box)
     assert b['capabilities']['suspend'] == 'same-node-checkpoint'
     wait(call('POST', f'/v1/boxes/{box}:suspend'))
     assert call('GET', '/v1/boxes/' + box)['phase'] == 'suspended'
     wait(call('POST', f'/v1/boxes/{box}:resume'))
-    after = ready(route, grant)
+    after = ready(route)
     save('state-after-resume', after)
     for field in ('count', 'started', 'instance', 'memory_bytes', 'memory_sha256', 'marker'):
         assert before[field] == after[field], field
@@ -160,7 +154,7 @@ try:
         assert runtime_before['serviceUID'] == runtime_after['serviceUID']
         assert runtime_before['clusterIP'] == runtime_after['clusterIP']
         assert all(x == 0 for x in runtime_after['restartCounts'])
-    assert app(route, grant, 'increment') == b'11\n'
+    assert app(route, 'increment') == b'11\n'
     print('PASS: suspend/resume preserved count, process identity and 32 MiB of memory; counter continues at 11', flush=True)
 
     archive = wait(call('POST', f'/v1/boxes/{box}/archives'))['result']['archiveId']
@@ -173,13 +167,13 @@ try:
     assert call('GET', f'/v1/boxes/{restored}/files?path=marker') == before['instance'].encode()
     assert call('GET', f'/v1/boxes/{restored}/files?path=counter-proof.json') == proof
     wait(call('POST', f'/v1/boxes/{restored}:activate'))
-    restored_route, restored_grant = route_for(restored)
+    restored_route = route_for(restored)
     report['routeId'] = restored_route
-    restored_state = ready(restored_route, restored_grant)
+    restored_state = ready(restored_route)
     assert restored_state['count'] == 0 and restored_state['instance'] != before['instance']
     assert call('GET', f'/v1/boxes/{restored}/files?path=counter-proof.json') == proof
-    assert app(restored_route, restored_grant, 'increment') == b'1\n'
-    save('restored-state', app(restored_route, restored_grant, 'state'))
+    assert app(restored_route, 'increment') == b'1\n'
+    save('restored-state', app(restored_route, 'state'))
     print('PASS: archive restored workspace and imported image; activation starts a fresh counter', flush=True)
     report['status'] = 'passed'
     print(json.dumps(report, indent=2), flush=True)

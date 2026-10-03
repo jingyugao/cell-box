@@ -82,7 +82,7 @@ func TestBuildImageOperationReturnsRegistryReference(t *testing.T) {
 		t.Fatal(err)
 	}
 	const authToken = "0123456789abcdef0123456789abcdef"
-	app, err := New(Config{DataDir: filepath.Join(dir, "data"), Clients: []Client{{ID: "test", Token: authToken}}, ImageBuild: ImageBuildConfig{Address: "unix:///tmp/buildkitd.sock", Repository: "example.com/cellbox", GuestBinary: guest, BuildctlBinary: script}}, nil)
+	app, err := New(Config{DataDir: filepath.Join(dir, "data"), ClientID: "test", ImageBuild: ImageBuildConfig{Address: "unix:///tmp/buildkitd.sock", Repository: "example.com/cellbox", GuestBinary: guest, BuildctlBinary: script}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
