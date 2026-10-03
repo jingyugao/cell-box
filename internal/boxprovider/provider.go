@@ -38,14 +38,14 @@ type Handle struct {
 }
 
 type Observation struct {
+	Generation  uint64 // Provider-owned durable execution cycle, when available.
 	Phase       string // creating, running, freezing, frozen, unfreezing, checkpointing, suspending, suspended, resuming, restoring, staged, deleting, deleted, failed
 	ExecutionID string // immutable runtime identity; changes after Pod replacement
 	Message     string
 }
 
 type Connection struct {
-	URL   string
-	Token string
+	URL string
 }
 
 type Provider interface {
@@ -57,7 +57,7 @@ type Provider interface {
 	Guest(context.Context, Handle) (Connection, error)
 }
 
-// FencedGuestProvider validates the execution while resolving its authenticated
+// FencedGuestProvider validates the execution while resolving its
 // connection, avoiding a second, independent lifecycle inspection.
 type FencedGuestProvider interface {
 	GuestForExecution(context.Context, Handle, string) (Connection, error)

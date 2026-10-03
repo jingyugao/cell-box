@@ -274,7 +274,7 @@ func (s *Service) captureArchiveHTTP(ctx context.Context, b boxRecord) (Archive,
 	if err != nil {
 		return Archive{}, err
 	}
-	a := Archive{ID: randomID("arc-"), SourceBoxID: b.Box.ID, ProfileID: b.Box.ProfileID, ImageID: b.Box.ImageID, Agent: b.Profile.Guest.Agent, SHA256: hex.EncodeToString(h.Sum(nil)), Size: n, Consistency: "workspace-best-effort", Portable: true, CreatedAt: time.Now().UTC()}
+	a := Archive{ID: randomID("arc-"), SourceBoxID: b.Box.ID, ProfileID: b.Box.ProfileID, ImageID: b.Box.ImageID, Agent: b.Profile.Guest.Agent, SHA256: hex.EncodeToString(h.Sum(nil)), Size: n, Consistency: "workspace-best-effort", Portable: true, CreatedAt: time.Now().UTC(), ManifestVersion: 1, ImportedImageID: b.Box.ImportedImageID, PreparedImage: b.Profile.Image}
 	final, err := archivePath(dir, a.ID)
 	if err != nil {
 		return Archive{}, err

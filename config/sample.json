@@ -3,12 +3,6 @@
   "dataDir": "data",
   "publicUrl": "http://127.0.0.1:8090",
   "startupTimeoutSeconds": 120,
-  "clients": [
-    {
-      "id": "client",
-      "tokenEnv": "CELLBOX_CLIENT_TOKEN"
-    }
-  ],
   "profiles": [
     {
       "id": "docker-dev",
@@ -16,9 +10,6 @@
       "image": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
       "cpu": 1,
       "memoryMiB": 512,
-      "clients": [
-        "client"
-      ],
       "guest": {
         "workspace": "/workspace",
         "agent": {
@@ -34,5 +25,6 @@
         "tools": []
       }
     }
-  ]
+  ],
+  "clientId": "client"
 }

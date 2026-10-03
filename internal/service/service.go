@@ -30,11 +30,12 @@ type Service struct {
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	mu        sync.Mutex
+	gcMu      sync.Mutex
 	streams   map[string]activeStream
 }
 type activeStream struct {
-	grantID, boxID string
-	cancel         context.CancelFunc
+	boxID  string
+	cancel context.CancelFunc
 }
 
 func New(config Config, providers map[string]boxprovider.Provider) (*Service, error) {
@@ -72,6 +73,7 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 		toolHTTP: &http.Client{Transport: &http.Transport{Proxy: nil, ResponseHeaderTimeout: 5*time.Minute + 5*time.Second}, CheckRedirect: noRedirect},
 		ctx:      ctx, cancel: cancel, streams: map[string]activeStream{}}
 	err = store.Update(func(st *State) error {
+		st.Routes = map[string]Route{}
 		now := time.Now().UTC()
 		for id, record := range st.Operations {
 			if record.Operation.Status == "queued" || record.Operation.Status == "running" {
@@ -114,6 +116,51 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 		store.Close()
 		return nil, err
 	}
+	if store.records != nil {
+		var records []boxRecord
+		err := store.View(func(st State) error {
+			for _, b := range st.Boxes {
+				records = append(records, b)
+			}
+			return nil
+		})
+		if err != nil {
+			cancel()
+			store.Close()
+			return nil, err
+		}
+		// Bound total startup probing, rather than waiting ten seconds for each
+		// unavailable runtime. Unobserved boxes stay unknown until the next GET.
+		probe, stop := context.WithTimeout(ctx, 10*time.Second)
+		jobs := make(chan boxRecord, len(records))
+		for _, b := range records {
+			if b.Profile.Provider == "resumable-k8s-pod" && b.Handle.ID != "" {
+				jobs <- b
+			}
+		}
+		close(jobs)
+		var probes sync.WaitGroup
+		for n := 0; n < min(8, len(records)); n++ {
+			probes.Add(1)
+			go func() {
+				defer probes.Done()
+				for b := range jobs {
+					if probe.Err() != nil {
+						return
+					}
+					_, _ = s.observe(probe, b)
+				}
+			}()
+		}
+		probes.Wait()
+		stop()
+	}
+	if err := s.pruneMetadata(time.Now().UTC()); err != nil {
+		cancel()
+		store.Close()
+		return nil, err
+	}
+	s.startRetention()
 	return s, nil
 }
 func (s *Service) Done() <-chan struct{} { return s.ctx.Done() }
@@ -135,13 +182,6 @@ func randomID(prefix string) string {
 		panic(err)
 	}
 	return prefix + hex.EncodeToString(b)
-}
-func token() string {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		panic(err)
-	}
-	return hex.EncodeToString(b)
 }
 func hash(value string) string {
 	sum := sha256.Sum256([]byte(value))
@@ -184,22 +224,10 @@ func (s *Service) box(client, id string) (boxRecord, error) {
 func (s *Service) profile(client, id string) (Profile, error) {
 	for _, p := range s.config.Profiles {
 		if p.ID == id {
-			for _, c := range p.Clients {
-				if c == client {
-					return p, nil
-				}
-			}
+			return p, nil
 		}
 	}
 	return Profile{}, apiError("NOT_FOUND", "Profile not found")
-}
-func (s *Service) client(id string) Client {
-	for _, c := range s.config.Clients {
-		if c.ID == id {
-			return c
-		}
-	}
-	return Client{}
 }
 func busy(st *State, b boxRecord, leases bool) error {
 	if b.Box.OperationID != "" {
@@ -252,6 +280,9 @@ func (s *Service) prepareOperation(client, key, kind, target string, input any, 
 	fresh := false
 	err = s.store.Update(func(st *State) error {
 		if previous, ok := st.Keys[key]; ok {
+			if previous.Expired {
+				return apiError("OPERATION_EXPIRED", "Operation history has expired; this idempotency key cannot be reused")
+			}
 			if previous.Hash != digest {
 				return apiError("CONFLICT", "Idempotency key was already used with different input")
 			}
@@ -407,7 +438,11 @@ func (s *Service) observe(ctx context.Context, b boxRecord) (Box, error) {
 			}
 			if ob.ExecutionID != "" && current.ExecutionID != ob.ExecutionID {
 				current.ExecutionID = ob.ExecutionID
-				current.Box.Generation++
+				if ob.Generation > 0 {
+					current.Box.Generation = ob.Generation
+				} else {
+					current.Box.Generation++
+				}
 				changed = true
 			}
 			current.Box.Phase = phase
@@ -486,7 +521,6 @@ func (s *Service) guestRequestHeaders(client *http.Client, ctx context.Context, 
 	if r.Header == nil {
 		r.Header = make(http.Header)
 	}
-	r.Header.Set("Authorization", "Bearer "+conn.Token)
 	if r.Header.Get("Content-Type") == "" {
 		r.Header.Set("Content-Type", "application/json")
 	}
@@ -609,7 +643,7 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 			if !ok || a.ClientID != client || a.Deleting {
 				return apiError("NOT_FOUND", "Archive not found")
 			}
-			input.ImportedImageID = st.Boxes[a.Archive.SourceBoxID].Box.ImportedImageID
+			input.ImportedImageID = a.Archive.ImportedImageID
 			return nil
 		})
 		if err != nil {
@@ -870,7 +904,7 @@ func (s *Service) execute(client, key, id string, input execInput) (Operation, e
 			return apiError("STALE_GENERATION", "expectedGeneration must match the current box generation")
 		}
 		eid = randomID("exec-")
-		st.Executions[eid] = Execution{ID: eid, BoxID: id, OperationID: op.ID, State: "running"}
+		st.Executions[eid] = executionRecord{Execution: Execution{ID: eid, BoxID: id, OperationID: op.ID, State: "running"}}
 		op.Result = map[string]string{"execId": eid}
 		return nil
 	})

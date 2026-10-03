@@ -15,7 +15,6 @@ import (
 )
 
 const testImageID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-const testToken = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 type fakeDocker struct {
 	calls     [][]string
@@ -66,8 +65,6 @@ func (f *fakeDocker) Run(_ context.Context, args []string) ([]byte, error) {
 	case "rm":
 		f.exists = false
 		return nil, nil
-	case "exec":
-		return []byte(testToken + "\n"), nil
 	}
 	return nil, errors.New("unexpected command")
 }
@@ -120,7 +117,7 @@ func TestCreateLifecycle(t *testing.T) {
 		t.Fatalf("inspect: %+v %v", obs, err)
 	}
 	conn, err := p.Guest(ctx, h)
-	if err != nil || conn.URL != "http://127.0.0.1:49152" || conn.Token != testToken {
+	if err != nil || conn.URL != "http://127.0.0.1:49152" {
 		t.Fatalf("guest: %+v %v", conn, err)
 	}
 	if err = p.Action(ctx, h, "freeze"); err != nil {

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"cellbox.local/cellbox/internal/guestapi"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,24 +21,17 @@ func clientID(r *http.Request) string {
 	value, _ := r.Context().Value(clientContextKey{}).(string)
 	return value
 }
-func bearer(r *http.Request) string {
-	v := r.Header.Get("Authorization")
-	if !strings.HasPrefix(v, "Bearer ") {
-		return ""
-	}
-	return strings.TrimPrefix(v, "Bearer ")
-}
-func (s *Service) authenticate(next http.Handler) http.Handler {
+func (s *Service) scopeClient(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		candidate := hash(bearer(r))
-		for _, c := range s.config.Clients {
-			if subtle.ConstantTimeCompare([]byte(candidate), []byte(hash(c.Token))) == 1 {
-				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), clientContextKey{}, c.ID)))
-				return
-			}
+		id := r.Header.Get("X-Cellbox-Client-ID")
+		if id == "" {
+			id = s.config.ClientID
 		}
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		fail(w, apiError("UNAUTHENTICATED", "A valid client bearer token is required"))
+		if !validName.MatchString(id) {
+			fail(w, apiError("INVALID_REQUEST", "Invalid client namespace"))
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), clientContextKey{}, id)))
 	})
 }
 func writeJSON(w http.ResponseWriter, status int, value any) {
@@ -60,6 +52,8 @@ func fail(w http.ResponseWriter, err error) {
 		status = 403
 	case "NOT_FOUND":
 		status = 404
+	case "OPERATION_EXPIRED", "RESULT_EXPIRED":
+		status = http.StatusGone
 	case "CONFLICT", "BUSY", "STALE_GENERATION", "ARCHIVE_INCOMPATIBLE":
 		status = 409
 	case "UNSUPPORTED_CAPABILITY":
@@ -184,25 +178,12 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/boxes/{id}/services/{port}/{path...}", s.internalService)
 	mux.HandleFunc("POST /v1/boxes/{id}/tools/{tool}", s.tool)
 	mux.HandleFunc("POST /v1/routes", s.createRoute)
-	mux.HandleFunc("POST /v1/routes/{id}/grants", s.createGrant)
-	mux.HandleFunc("DELETE /v1/grants/{id}", s.revokeGrant)
-	mux.HandleFunc("PATCH /v1/grants/{id}", s.renewGrant)
-	mux.HandleFunc("GET /v1/access-requests/{id}", s.getAccess)
-	mux.HandleFunc("POST /v1/access-requests/{action}", func(w http.ResponseWriter, r *http.Request) {
-		id, action, ok := strings.Cut(r.PathValue("action"), ":")
-		if !ok || action != "approve" {
-			fail(w, apiError("NOT_FOUND", "Endpoint not found"))
-			return
-		}
-		r.SetPathValue("id", id)
-		s.approveAccess(w, r)
-	})
 	mux.HandleFunc("POST /v1/boxes/{id}/archives", s.captureArchive)
 	mux.HandleFunc("GET /v1/archives", s.listArchives)
 	mux.HandleFunc("GET /v1/archives/{id}", s.getArchive)
 	mux.HandleFunc("GET /v1/archives/{id}/content", s.archiveContent)
 	mux.HandleFunc("DELETE /v1/archives/{id}", s.deleteArchive)
-	api := s.authenticate(mux)
+	api := s.scopeClient(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-s.ctx.Done():
@@ -256,7 +237,7 @@ func (s *Service) listProfiles(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, out)
 }
-func (s *Service) listLegacyBoxes(w http.ResponseWriter, r *http.Request) {
+func (s *Service) listLocalBoxes(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
@@ -346,7 +327,7 @@ func (s *Service) getOperation(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, op)
 }
 func (s *Service) getExec(w http.ResponseWriter, r *http.Request) {
-	var e Execution
+	var e executionRecord
 	err := s.store.View(func(st State) error {
 		var ok bool
 		e, ok = st.Executions[r.PathValue("id")]
@@ -360,7 +341,12 @@ func (s *Service) getExec(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
-	writeJSON(w, 200, e)
+	result, err := s.store.executionResult(r.Context(), e)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, 200, result)
 }
 func (s *Service) operationEvents(w http.ResponseWriter, r *http.Request) {
 	op, err := s.operation(clientID(r), r.PathValue("id"))
@@ -502,6 +488,10 @@ func (s *Service) releaseLease(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) beginIO(client, id string) (boxRecord, func(), error) {
+	return s.beginIOWithPolicy(client, id, false)
+}
+
+func (s *Service) beginIOWithPolicy(client, id string, service bool) (boxRecord, func(), error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := randomID("io-")
@@ -512,8 +502,11 @@ func (s *Service) beginIO(client, id string) (boxRecord, func(), error) {
 		if err != nil {
 			return err
 		}
-		if err = busy(&st, b, false); err != nil {
-			return err
+		op := st.Operations[b.Box.OperationID].Operation
+		if !service || (op.Kind != "exec" && op.Kind != "archive") {
+			if err = busy(&st, b, false); err != nil {
+				return err
+			}
 		}
 		if b.Box.Phase != "running" && b.Box.Phase != "staged" {
 			return apiError("CONFLICT", "Box is not ready")

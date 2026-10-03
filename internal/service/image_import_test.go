@@ -73,7 +73,6 @@ func TestImageImportCreateIsolationAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.config.ImageBuild = ImageBuildConfig{Address: "unix:///tmp/buildkit.sock", Repository: "example.com/prepared", GuestBinary: guest, BuildctlBinary: buildctl}
-	f.config.Profiles[0].Clients = append(f.config.Profiles[0].Clients, "client-b")
 	f.reopen(t)
 	const buildCommand = "mkdir -p /opt/product && printf platform > /opt/product/platform.txt"
 	input := importImageRequest{URL: ref.Name(), BuildCommand: buildCommand, RunCommand: "docker run -e BASE_ENV=overridden -w /tmp " + ref.Name() + " 'echo imported'", RegistryAuth: &image.RegistryAuth{Username: "import-user", Password: registryPassword}}
@@ -198,7 +197,7 @@ func TestImportedImageUsageBlocksPausedAndHidesForeignOwnership(t *testing.T) {
 	wantStatus(t, status, 404, body)
 }
 
-func TestImportedImageUsageCountsCrossClientBoxesAndNonportableArchives(t *testing.T) {
+func TestImportedImageUsageCountsCrossClientBoxesAndArchives(t *testing.T) {
 	f := newCoreFixture(t)
 	f.service.config.ImageBuild = ImageBuildConfig{Repository: "registry.example/prepared"}
 	id := "img-33333333333333333333333333333333"
@@ -207,7 +206,7 @@ func TestImportedImageUsageCountsCrossClientBoxesAndNonportableArchives(t *testi
 	if err := f.service.store.Update(func(st *State) error {
 		st.ImportedImages[id] = importedImageRecord{ImportedImage: ImportedImage{ID: id, Image: prepared}, ClientID: "client-a"}
 		st.Boxes["foreign-box"] = boxRecord{Box: Box{ID: "foreign-box", Phase: "failed", ImageID: digest}, Profile: Profile{Image: "registry.example/prepared:alias@" + digest}, ClientID: "client-b"}
-		st.Archives["arc-33333333333333333333333333333333"] = archiveRecord{Archive: Archive{ID: "arc-33333333333333333333333333333333", ImageID: digest}, ClientID: "client-b"}
+		st.Archives["arc-33333333333333333333333333333333"] = archiveRecord{Archive: Archive{ID: "arc-33333333333333333333333333333333", ImageID: digest, PreparedImage: prepared, ManifestVersion: 1}, ClientID: "client-b"}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -222,9 +221,7 @@ func TestImportedImageUsageCountsCrossClientBoxesAndNonportableArchives(t *testi
 		box := st.Boxes["foreign-box"]
 		box.Box.Phase = "deleted"
 		st.Boxes["foreign-box"] = box
-		archive := st.Archives["arc-33333333333333333333333333333333"]
-		archive.Archive.Portable = true
-		st.Archives[archive.Archive.ID] = archive
+		delete(st.Archives, "arc-33333333333333333333333333333333")
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -232,7 +229,7 @@ func TestImportedImageUsageCountsCrossClientBoxesAndNonportableArchives(t *testi
 	status, body = f.call(t, "GET", "/v1/images/"+id+"/usage", testClientToken, "", nil)
 	wantStatus(t, status, 200, body)
 	if usage := decodeResponse[imageUsage](t, body); !usage.Deletable {
-		t.Fatalf("deleted box or portable archive blocked deletion: %+v", usage)
+		t.Fatalf("deleted box or removed archive blocked deletion: %+v", usage)
 	}
 	f.service.config.Profiles[0].Image = "registry.example/prepared:profile-alias@" + digest
 	status, body = f.call(t, "GET", "/v1/images/"+id+"/usage", testClientToken, "", nil)
@@ -242,7 +239,7 @@ func TestImportedImageUsageCountsCrossClientBoxesAndNonportableArchives(t *testi
 	}
 }
 
-func TestNonportableArchiveBlocksDeletedDockerSourceImageByImportedIdentity(t *testing.T) {
+func TestArchiveBlocksImageDeletionWithoutSourceBox(t *testing.T) {
 	for _, useAlias := range []bool{false, true} {
 		name := "same-imported-id"
 		if useAlias {
@@ -267,10 +264,9 @@ func TestNonportableArchiveBlocksDeletedDockerSourceImageByImportedIdentity(t *t
 					}, ClientID: "client-b"}
 				}
 				const sourceBoxID = "box-deleted-docker-source"
-				st.Boxes[sourceBoxID] = boxRecord{Box: Box{ID: sourceBoxID, Phase: "deleted", ImportedImageID: sourceImportedID,
-					ImageID: "sha256:" + strings.Repeat("f", 64)}, ClientID: "client-b"}
 				st.Archives["arc-44444444444444444444444444444444"] = archiveRecord{Archive: Archive{
 					ID: "arc-44444444444444444444444444444444", SourceBoxID: sourceBoxID,
+					ManifestVersion: 1, ImportedImageID: sourceImportedID, PreparedImage: prepared, Portable: true,
 					ImageID: "sha256:" + strings.Repeat("f", 64),
 				}, ClientID: "client-b"}
 				return nil
@@ -282,16 +278,14 @@ func TestNonportableArchiveBlocksDeletedDockerSourceImageByImportedIdentity(t *t
 			wantStatus(t, status, 200, body)
 			usage := decodeResponse[imageUsage](t, body)
 			if usage.Deletable || !slices.Contains(usage.Blockers, "archives-reference-image") {
-				t.Fatalf("nonportable archive did not block Docker image deletion: %+v", usage)
+				t.Fatalf("archive did not block image deletion without its source box: %+v", usage)
 			}
 			if useAlias && !usage.ManifestShared {
 				t.Fatalf("alias record did not share the prepared manifest: %+v", usage)
 			}
 
 			if err := f.service.store.Update(func(st *State) error {
-				archive := st.Archives["arc-44444444444444444444444444444444"]
-				archive.Archive.Portable = true
-				st.Archives[archive.Archive.ID] = archive
+				delete(st.Archives, "arc-44444444444444444444444444444444")
 				return nil
 			}); err != nil {
 				t.Fatal(err)
@@ -299,7 +293,7 @@ func TestNonportableArchiveBlocksDeletedDockerSourceImageByImportedIdentity(t *t
 			status, body = f.call(t, "GET", "/v1/images/"+targetID+"/usage", testClientToken, "", nil)
 			wantStatus(t, status, 200, body)
 			if usage := decodeResponse[imageUsage](t, body); !usage.Deletable {
-				t.Fatalf("portable archive blocked image deletion: %+v", usage)
+				t.Fatalf("removed archive blocked image deletion: %+v", usage)
 			}
 		})
 	}

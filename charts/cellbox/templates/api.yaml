@@ -21,7 +21,6 @@ spec:
         checksum/object-storage: {{ include "cellbox.objectStorageConfig" . | sha256sum }}
         {{- if .Values.api.manageSecrets }}
         checksum/api-config: {{ toJson .Values.api.config | sha256sum }}
-        checksum/client-tokens: {{ toJson .Values.api.clientTokens | sha256sum }}
         {{- end }}
         {{- if .Values.buildkit.enabled }}
         checksum/buildkit-config: {{ include (print $.Template.BasePath "/buildkit-config.yaml") . | sha256sum }}
@@ -89,9 +88,6 @@ spec:
             - {{ .Values.buildkit.registryHost | quote }}
             {{- end }}
             {{- end }}
-          envFrom:
-            - secretRef:
-                name: {{ .Values.api.clientTokensSecret }}
           env:
             - name: HOME
               value: /tmp

@@ -122,7 +122,7 @@ func TestS3IntegrationAPIRestartWithoutLocalDataAndArchiveRestore(t *testing.T) 
 	payload := makeArchiveTestData(t, archiveTestEntry{"main.go", tar.TypeReg, "package main\nfunc main() {}\n"})
 	var restored atomic.Bool
 	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+testGuestToken {
+		if r.Header.Get("Authorization") != "" {
 			http.Error(w, "unauthorized", 401)
 			return
 		}

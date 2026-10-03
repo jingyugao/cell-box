@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"os"
 	"path"
 	"regexp"
 	"strings"
@@ -27,12 +26,18 @@ func LoadConfig(r io.Reader) (Config, error) {
 	if err := d.Decode(new(any)); err != io.EOF {
 		return c, fmt.Errorf("configuration must contain one JSON object")
 	}
-	for i := range c.Clients {
-		c.Clients[i].Token = os.Getenv(c.Clients[i].TokenEnv)
-	}
 	return c, c.Validate()
 }
 func (c *Config) Validate() error {
+	if c.OperationRetentionSeconds == 0 {
+		c.OperationRetentionSeconds = 86400
+	}
+	if c.ExecutionRetentionSeconds == 0 {
+		c.ExecutionRetentionSeconds = 3600
+	}
+	if c.OperationRetentionSeconds < 3600 || c.OperationRetentionSeconds > 30*86400 || c.ExecutionRetentionSeconds < 300 || c.ExecutionRetentionSeconds > c.OperationRetentionSeconds {
+		return fmt.Errorf("operation retention must be 1 hour..30 days; execution retention must be 5 minutes..operation retention")
+	}
 	if c.ObjectStorage != (objectstorage.Config{}) {
 		if err := c.ObjectStorage.Validate(); err != nil {
 			return err
@@ -66,26 +71,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("serviceDomain must be a lowercase DNS name")
 		}
 	}
-	clients := map[string]bool{}
-	tokens := map[string]bool{}
-	if len(c.Clients) == 0 {
-		return fmt.Errorf("at least one authenticated client is required")
+	if c.ClientID == "" {
+		c.ClientID = "internal"
 	}
-	for _, cl := range c.Clients {
-		if !validName.MatchString(cl.ID) || clients[cl.ID] {
-			return fmt.Errorf("invalid or duplicate client ID")
-		}
-		if len(cl.Token) < 32 || tokens[cl.Token] {
-			return fmt.Errorf("client tokens must be distinct and at least 32 bytes (check tokenEnv)")
-		}
-		clients[cl.ID] = true
-		tokens[cl.Token] = true
-		if cl.AuthorizeURL != "" {
-			u, e := url.Parse(cl.AuthorizeURL)
-			if e != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" {
-				return fmt.Errorf("authorizeUrl must be an HTTPS URL")
-			}
-		}
+	if !validName.MatchString(c.ClientID) {
+		return fmt.Errorf("invalid client namespace")
 	}
 	profiles := map[string]bool{}
 	for i := range c.Profiles {
@@ -155,14 +145,7 @@ func (c *Config) Validate() error {
 		if p.Guest.Agent.UID == 0 || p.Guest.Agent.GID == 0 || (p.Guest.Debug.UID == 0) != (p.Guest.Debug.GID == 0) || p.Guest.Agent.UID == p.Guest.Debug.UID || p.Guest.Agent.GID == p.Guest.Debug.GID {
 			return fmt.Errorf("agent must be non-root and distinct from debug; root debug requires UID/GID zero")
 		}
-		if len(p.Clients) == 0 {
-			return fmt.Errorf("profile %s requires explicit clients", p.ID)
-		}
-		for _, id := range p.Clients {
-			if !clients[id] {
-				return fmt.Errorf("profile %s references unknown client", p.ID)
-			}
-		}
+
 	}
 	return nil
 }

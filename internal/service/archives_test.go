@@ -201,7 +201,7 @@ func TestCaptureSurvivesBoxDeletionAndRestores(t *testing.T) {
 	payload := makeArchiveTestData(t, archiveTestEntry{"work.txt", tar.TypeReg, "durable"})
 	var restored atomic.Bool
 	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+testGuestToken {
+		if r.Header.Get("Authorization") != "" {
 			http.Error(w, "unauthorized", 401)
 			return
 		}

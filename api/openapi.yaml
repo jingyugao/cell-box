@@ -2,7 +2,10 @@ components:
   parameters:
     IdempotencyKey:
       description: Scoped by client, action and target. Reuse identical input to retrieve
-        original operation, including after restart.
+        original operation, including after restart. Completed operation details are
+        retained for operationRetentionSeconds (default 86400). After history expires,
+        the key remains reserved and returns 410 OPERATION_EXPIRED without executing
+        the request again. Running or unknown executions are not expired.
       in: header
       name: Idempotency-Key
       required: true
@@ -17,37 +20,9 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
       description: 'Structured error: 400 invalid input, 401 unauthenticated, 403
-        denied, 404 missing or not owned, 409 conflict/busy/stale generation, 422
+        denied, 404 missing or not owned, 409 conflict/busy/stale generation, 410 expired result or operation, 422
         unsupported, 502 runtime failure, 504 timeout.'
   schemas:
-    AccessRequest:
-      additionalProperties: false
-      properties:
-        approved:
-          type: boolean
-        boxId:
-          type: string
-        callbackUrl:
-          format: uri
-          type: string
-        consumed:
-          type: boolean
-        expiresAt:
-          format: date-time
-          type: string
-        id:
-          type: string
-        routeId:
-          type: string
-      required:
-      - id
-      - routeId
-      - boxId
-      - callbackUrl
-      - expiresAt
-      - approved
-      - consumed
-      type: object
     Archive:
       additionalProperties: false
       properties:
@@ -63,6 +38,15 @@ components:
           type: string
         imageId:
           type: string
+        importedImageId:
+          description: Imported image required by default when restoring this archive.
+          type: string
+        preparedImage:
+          description: Prepared image reference captured independently of the source box.
+          type: string
+        manifestVersion:
+          description: Version 1 includes image dependencies independently of the source box.
+          type: integer
         portable:
           type: boolean
         profileId:
@@ -175,7 +159,7 @@ components:
           description: The API accepts generation-fenced batch credential writes. Older Guest images may require the single-slot endpoint.
         internalServices:
           type: boolean
-          description: Owning API clients can connect to HTTP/WebSocket services without creating browser routes or grants.
+          description: Clients can connect to HTTP/WebSocket services without creating browser routes or grants.
         rootDebug:
           type: boolean
           description: Admitted tools run as debug UID/GID zero and can read agent-owned private workspace files without permission changes.
@@ -324,65 +308,6 @@ components:
       - name
       - directory
       - size
-      type: object
-    Grant:
-      additionalProperties: false
-      properties:
-        expiresAt:
-          format: date-time
-          type: string
-        id:
-          type: string
-        revoked:
-          type: boolean
-        routeId:
-          type: string
-        subject:
-          type: string
-      required:
-      - id
-      - routeId
-      - subject
-      - expiresAt
-      - revoked
-      type: object
-    GrantCreated:
-      additionalProperties: false
-      properties:
-        grant:
-          $ref: '#/components/schemas/Grant'
-        token:
-          description: Returned once; store only in the calling product. Never put
-            this token in URLs.
-          type: string
-      required:
-      - grant
-      - token
-      type: object
-    GrantInput:
-      additionalProperties: false
-      properties:
-        subject:
-          maxLength: 256
-          minLength: 1
-          type: string
-        ttlSeconds:
-          default: 900
-          maximum: 3600
-          minimum: 1
-          type: integer
-      required:
-      - subject
-      type: object
-    GrantRenewInput:
-      additionalProperties: false
-      properties:
-        ttlSeconds:
-          maximum: 3600
-          minimum: 1
-          type: integer
-      required:
-      - ttlSeconds
       type: object
     Identity:
       additionalProperties: false
@@ -551,6 +476,7 @@ components:
       type: object
     Route:
       additionalProperties: false
+      description: Process-local preview route; recreate it after API restart.
       properties:
         boxId:
           type: string
@@ -708,17 +634,11 @@ components:
             password:
               type: string
               writeOnly: true
-  securitySchemes:
-    ClientBearer:
-      description: Registered product client token from tokenEnv. Keep server-side;
-        never send to sandbox or browser.
-      scheme: bearer
-      type: http
 info:
-  description: Reusable Go sandbox infrastructure. CoCell and other products authenticate
-    as registered API clients, select admitted profiles, and enforce their own end-user
-    authorization. Single-writer durable state; no automatic command replay or implicit
-    wake.
+  description: Internal-network sandbox infrastructure. Control and service APIs require
+    no token or browser authorization. X-Cellbox-Client-ID optionally selects a data
+    and idempotency namespace, not an authenticated identity; the default is config.clientId,
+    or internal. Single-writer durable state; no automatic command replay or implicit wake.
   title: Cellbox REST API
   version: 0.1.0
 openapi: 3.1.0
@@ -744,60 +664,6 @@ paths:
           $ref: '#/components/responses/Error'
       security: []
       summary: Service process health
-  /v1/access-requests/{id}:
-    get:
-      operationId: getAccessRequest
-      parameters:
-      - in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      responses:
-        "200":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AccessRequest'
-          description: Success
-        default:
-          $ref: '#/components/responses/Error'
-      summary: Inspect a browser authorization transaction
-  /v1/access-requests/{id}:approve:
-    post:
-      description: CoCell authenticates the user and checks permission for the returned
-        boxId before approving. Redirect browser to returned exact URL. One approval
-        and one browser-bound callback only.
-      operationId: approveAccessRequest
-      parameters:
-      - in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/GrantInput'
-        required: true
-      responses:
-        "200":
-          content:
-            application/json:
-              schema:
-                additionalProperties: false
-                properties:
-                  redirectUrl:
-                    format: uri
-                    type: string
-                required:
-                - redirectUrl
-                type: object
-          description: Success
-        default:
-          $ref: '#/components/responses/Error'
-      summary: Authorize a browser after product permission checks
   /v1/archives:
     get:
       operationId: listArchives
@@ -935,7 +801,7 @@ paths:
       summary: List checkpoint resources directly from object storage
       description: |
         Lists checkpoint metadata objects and reads each record directly from OSS.
-        Records are scoped to the authenticated client. No lifecycle phase is
+        Records are scoped to the selected client namespace. No lifecycle phase is
         filtered: checkpointing, suspending, suspended, resuming, failed, and deleting
         records remain visible until the underlying resource is physically removed.
         Suspended records require a committed snapshot and released source Pod.
@@ -1122,7 +988,7 @@ paths:
   /v1/boxes/{id}/services/{port}/{path}:
     get:
       summary: Connect an owning backend client to a box HTTP or WebSocket service
-      description: Uses API bearer authentication, rejects browser Origin headers and the private control port, and holds a lifecycle fence for the live connection. No route, grant, lease or ledger write is required. API credentials are never forwarded to the application. Other HTTP methods are also proxied.
+      description: Requires no authentication. Rejects the private control port and holds a lifecycle fence for the live connection. No route, grant, lease or ledger write is required. Application Authorization is forwarded separately from guest transport credentials. Other HTTP methods are also proxied.
       operationId: internalService
       parameters:
       - in: path
@@ -1545,6 +1411,9 @@ paths:
       summary: Restore an archive into a new staged box
   /v1/execs/{id}:
     get:
+      description: Completed output is retained for executionRetentionSeconds (default
+        3600), then returns 410 RESULT_EXPIRED. After operation history is pruned the
+        execution returns 404. Running or unknown executions are retained.
       operationId: getExec
       parameters:
       - in: path
@@ -1562,46 +1431,6 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       summary: Get recorded execution output and status
-  /v1/grants/{id}:
-    delete:
-      operationId: revokeGrant
-      parameters:
-      - in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      responses:
-        "204":
-          description: Success
-        default:
-          $ref: '#/components/responses/Error'
-      summary: Revoke a grant and close its active streams
-    patch:
-      operationId: renewGrant
-      description: Extends validity to at least now plus ttlSeconds; never shortens the current expiry. Expired or revoked grants cannot be renewed.
-      parameters:
-      - in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/GrantRenewInput'
-        required: true
-      responses:
-        "200":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Grant'
-          description: Success
-        default:
-          $ref: '#/components/responses/Error'
-      summary: Renew an owned, unexpired service grant without replacing its token
   /v1/leases/{id}:
     delete:
       operationId: releaseLease
@@ -1696,11 +1525,11 @@ paths:
           description: Success
         default:
           $ref: '#/components/responses/Error'
-      summary: List admitted profiles for the authenticated client
+      summary: List configured profiles without authentication
   /v1/routes:
     post:
       description: One route per box/port; duplicate registration returns the existing
-        route. Browser session auth requires serviceDomain and per-route HTTPS hostnames.
+        route. No browser session, bearer token or grant is required.
       operationId: createRoute
       parameters: []
       requestBody:
@@ -1718,32 +1547,7 @@ paths:
           description: Success
         default:
           $ref: '#/components/responses/Error'
-      summary: Register an authenticated service route
-  /v1/routes/{id}/grants:
-    post:
-      operationId: createGrant
-      parameters:
-      - in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/GrantInput'
-        required: true
-      responses:
-        "201":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GrantCreated'
-          description: Success
-        default:
-          $ref: '#/components/responses/Error'
-      summary: Issue a short-lived box-port grant
+      summary: Register a service route without authentication
   /v1/images:import:
     post:
       operationId: importImage
@@ -1820,8 +1624,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ImageUsage'
         default: *id001
-security:
-- ClientBearer: []
+security: []
 servers:
 - description: Local default; use TLS for remote deployment
   url: http://127.0.0.1:8090

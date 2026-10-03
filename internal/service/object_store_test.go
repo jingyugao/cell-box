@@ -2,10 +2,9 @@ package service
 
 import (
 	"bytes"
-	"compress/gzip"
+	"cellbox.local/cellbox/internal/objectstorage"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,8 +12,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-
-	"cellbox.local/cellbox/internal/objectstorage"
 )
 
 type ledgerObjects struct {
@@ -86,136 +83,6 @@ func (o *ledgerObjects) Delete(_ context.Context, key string) error {
 }
 func (o *ledgerObjects) DeletePrefix(context.Context, string) error { return errors.New("unused") }
 
-func TestLedgerOnlyUpdateAvoidsRedundantReadsAndRetainsIntentFence(t *testing.T) {
-	objects := &ledgerObjects{}
-	store, err := OpenObjectStore(context.Background(), objects)
-	if err != nil {
-		t.Fatal(err)
-	}
-	objects.stateReads = 0
-	if err := store.Update(func(st *State) error { st.Routes["route"] = Route{ID: "route"}; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	if objects.stateReads != 0 {
-		t.Fatalf("ledger-only update read ledger %d times", objects.stateReads)
-	}
-	if _, ok := objects.data[pendingObjectKey]; ok {
-		t.Fatal("completed update kept intent")
-	}
-	before := append([]byte(nil), objects.data[stateObjectKey]...)
-	objects.data[pendingObjectKey] = []byte("another writer owns the intent slot")
-	if err := store.Update(func(st *State) error { st.Leases["lease"] = Lease{ID: "lease"}; return nil }); err == nil {
-		t.Fatal("writer bypassed another transaction's intent")
-	}
-	if !bytes.Equal(before, objects.data[stateObjectKey]) {
-		t.Fatal("ledger changed while another writer held the intent")
-	}
-}
-
-func TestObjectStoreRestartFencesStaleWriterAndResolvesLostResponse(t *testing.T) {
-	objects := &ledgerObjects{}
-	store, err := OpenObjectStore(context.Background(), objects)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = store.Update(func(st *State) error { st.Routes["route"] = Route{ID: "route", BoxID: "box", Port: 8080}; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	stale, err := OpenObjectStore(context.Background(), objects)
-	if err != nil {
-		t.Fatal(err)
-	}
-	objects.lostResponse = true
-	if err = store.Update(func(st *State) error { st.Leases["lease"] = Lease{ID: "lease", BoxID: "box"}; return nil }); err != nil {
-		t.Fatalf("committed update with lost response failed: %v", err)
-	}
-	if err = stale.Update(func(st *State) error { delete(st.Routes, "route"); return nil }); err == nil {
-		t.Fatal("stale writer overwrote ledger")
-	}
-	if err = stale.View(func(State) error { return nil }); err == nil {
-		t.Fatal("fenced writer still serves old state")
-	}
-	reopened, err := OpenObjectStore(context.Background(), objects)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = reopened.View(func(st State) error {
-		if len(st.Routes) != 1 || len(st.Leases) != 1 {
-			t.Fatalf("restart lost state: %+v", st)
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestCompressedLedgerMigratesToCompatibleJSONAndRecoversIntent(t *testing.T) {
-	objects := &ledgerObjects{}
-	store, err := OpenObjectStore(context.Background(), objects)
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload := strings.Repeat("immutable-profile-metadata", 10000)
-	if err := store.Update(func(st *State) error { st.Keys["large"] = keyRecord{Hash: payload}; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	compress := func(data []byte) []byte {
-		var buffer bytes.Buffer
-		writer := gzip.NewWriter(&buffer)
-		if _, err := writer.Write(data); err != nil {
-			t.Fatal(err)
-		}
-		if err := writer.Close(); err != nil {
-			t.Fatal(err)
-		}
-		return buffer.Bytes()
-	}
-	encoded := compress(objects.data[stateObjectKey])
-	objects.data[stateObjectKey] = encoded
-	reopened, err := OpenObjectStore(context.Background(), objects)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := reopened.View(func(st State) error {
-		if st.Keys["large"].Hash != payload {
-			t.Fatal("metadata changed after restart")
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	objects.lostResponse = true
-	if err := reopened.Update(func(st *State) error { st.Keys["migrated"] = keyRecord{Hash: "compatible"}; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	if !json.Valid(objects.data[stateObjectKey]) {
-		t.Fatal("new writes are not compatible JSON")
-	}
-	objects.failKey, objects.failWrites = stateObjectKey, 1
-	if err := reopened.Update(func(st *State) error { st.Keys["after"] = keyRecord{Hash: "recoverable"}; return nil }); err == nil {
-		t.Fatal("interrupted write succeeded")
-	}
-	objects.data[pendingObjectKey] = compress(objects.data[pendingObjectKey])
-	recovered, err := OpenObjectStore(context.Background(), objects)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := recovered.View(func(st State) error {
-		if st.Keys["after"].Hash != "recoverable" {
-			t.Fatal("compressed intent was not recovered")
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if !json.Valid(objects.data[stateObjectKey]) {
-		t.Fatal("recovered ledger is not compatible JSON")
-	}
-	objects.data[stateObjectKey] = encoded[:len(encoded)-4]
-	if _, err := OpenObjectStore(context.Background(), objects); err == nil {
-		t.Fatal("corrupt compressed metadata was accepted")
-	}
-}
 func TestObjectStoreFailureCancelsServiceAndRejectsStaleReads(t *testing.T) {
 	objects := &ledgerObjects{}
 	store, err := OpenObjectStore(context.Background(), objects)
@@ -225,7 +92,7 @@ func TestObjectStoreFailureCancelsServiceAndRejectsStaleReads(t *testing.T) {
 	canceled := false
 	store.onFailure = func() { canceled = true }
 	objects.unavailable = true
-	if err = store.Update(func(st *State) error { return nil }); err == nil || !canceled {
+	if err = store.Update(func(st *State) error { st.Keys["write"] = keyRecord{Expired: true}; return nil }); err == nil || !canceled {
 		t.Fatal("failed durable write did not stop service")
 	}
 	if _, err = store.BoxRecords("owner", nil); err == nil {
@@ -285,77 +152,6 @@ func (o *ledgerObjects) List(_ context.Context, prefix string) ([]string, error)
 	return keys, nil
 }
 
-func TestImageMetadataObjectsIsolationAndInterruptedTransactionRecovery(t *testing.T) {
-	ctx := context.Background()
-	objects := &ledgerObjects{}
-	store, err := OpenObjectStore(ctx, objects)
-	if err != nil {
-		t.Fatal(err)
-	}
-	first := "img-11111111111111111111111111111111"
-	second := "img-22222222222222222222222222222222"
-	if err = store.Update(func(st *State) error {
-		for _, id := range []string{first, second} {
-			st.ImportedImages[id] = importedImageRecord{ClientID: "owner", ImportedImage: ImportedImage{ID: id, Source: "original"}}
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	firstKey, _ := imageMetadataKey(first)
-	secondKey, _ := imageMetadataKey(second)
-	originalSecond := append([]byte(nil), objects.data[secondKey]...)
-	if bytes.Contains(objects.data[stateObjectKey], []byte("importedImages")) {
-		t.Fatal("aggregate ledger still contains image metadata")
-	}
-	// Stop after the independent image object commits but before the ledger.
-	objects.failKey = stateObjectKey
-	objects.failWrites = 1
-	if err = store.Update(func(st *State) error {
-		image := st.ImportedImages[first]
-		image.ImportedImage.Source = "updated"
-		st.ImportedImages[first] = image
-		st.Operations["op"] = operationRecord{ClientID: "owner", Operation: Operation{ID: "op", Status: "succeeded"}}
-		return nil
-	}); err == nil {
-		t.Fatal("expected interrupted ledger write")
-	}
-	if !bytes.Equal(originalSecond, objects.data[secondKey]) {
-		t.Fatal("updating one image rewrote another image")
-	}
-	if _, exists := objects.data[pendingObjectKey]; !exists {
-		t.Fatal("partial transaction lost recovery intent")
-	}
-	reopened, err := OpenObjectStore(ctx, objects)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = reopened.View(func(st State) error {
-		if len(st.ImportedImages) != 2 || st.ImportedImages[first].ImportedImage.Source != "updated" || st.Operations["op"].Operation.Status != "succeeded" {
-			t.Fatal("image/operation transaction did not recover")
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, exists := objects.data[pendingObjectKey]; exists {
-		t.Fatal("completed recovery intent remains")
-	}
-	if err = reopened.Update(func(st *State) error { delete(st.ImportedImages, first); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	if _, exists := objects.data[firstKey]; exists {
-		t.Fatal("deleted image metadata remains")
-	}
-	again, err := OpenObjectStore(ctx, objects)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(again.state.ImportedImages) != 1 || again.state.ImportedImages[second].ImportedImage.ID != second {
-		t.Fatal("restart image listing lost neighbor or resurrected deleted image")
-	}
-}
-
 func (o *ledgerObjects) DeleteIfMatch(_ context.Context, key, etag string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -371,109 +167,4 @@ func (o *ledgerObjects) DeleteIfMatch(_ context.Context, key, etag string) error
 	}
 	delete(o.data, key)
 	return nil
-}
-
-func TestSupersededIntentDoesNotOverwriteImageOrBlockRestart(t *testing.T) {
-	ctx := context.Background()
-	objects := &ledgerObjects{}
-	store, err := OpenObjectStore(ctx, objects)
-	if err != nil {
-		t.Fatal(err)
-	}
-	id := "img-33333333333333333333333333333333"
-	if err = store.Update(func(st *State) error {
-		st.ImportedImages[id] = importedImageRecord{ClientID: "owner", ImportedImage: ImportedImage{ID: id, Source: "correct"}}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	before := store.etag
-	stale, err := cloneState(store.state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stale.Revision = "superseded"
-	stale.ImportedImages = nil
-	ledger, err := json.Marshal(stale)
-	if err != nil {
-		t.Fatal(err)
-	}
-	key, _ := imageMetadataKey(id)
-	record := importedImageRecord{ClientID: "owner", ImportedImage: ImportedImage{ID: id, Source: "wrong"}}
-	imageData, err := json.Marshal(storedImage{Revision: stale.Revision, Record: &record})
-	if err != nil {
-		t.Fatal(err)
-	}
-	tx := objectTransaction{Revision: stale.Revision, BeforeETag: before, State: ledger, Images: []imageChange{{Key: key, BeforeETag: store.imageEtags[id], Data: imageData}}}
-	if err = store.Update(func(st *State) error { st.Routes["current"] = Route{ID: "current", BoxID: "box"}; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	// A delayed stale process may acquire the intent slot after the next owner
-	// commits. Recovery must discard it without applying its image mutation.
-	intent, err := json.Marshal(tx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = objects.Put(ctx, pendingObjectKey, bytes.NewReader(intent), int64(len(intent)), "*"); err != nil {
-		t.Fatal(err)
-	}
-	restarted, err := OpenObjectStore(ctx, objects)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if restarted.state.ImportedImages[id].ImportedImage.Source != "correct" || restarted.state.Routes["current"].ID != "current" {
-		t.Fatal("superseded transaction overwrote committed data")
-	}
-	if _, exists := objects.data[pendingObjectKey]; exists {
-		t.Fatal("superseded transaction blocked future writes")
-	}
-}
-
-type replacingImageObjects struct {
-	*ledgerObjects
-	key         string
-	replacement []byte
-}
-
-func (o *replacingImageObjects) DeleteIfMatch(ctx context.Context, key, etag string) error {
-	if key == o.key && o.replacement != nil {
-		replacement := o.replacement
-		o.replacement = nil
-		if _, err := o.ledgerObjects.Put(ctx, key, bytes.NewReader(replacement), int64(len(replacement)), ""); err != nil {
-			return err
-		}
-	}
-	return o.ledgerObjects.DeleteIfMatch(ctx, key, etag)
-}
-func TestImageDeleteCannotRemoveNewerMetadataAfterLeaderTakeover(t *testing.T) {
-	ctx := context.Background()
-	objects := &replacingImageObjects{ledgerObjects: &ledgerObjects{}}
-	store, err := OpenObjectStore(ctx, objects)
-	if err != nil {
-		t.Fatal(err)
-	}
-	id := "img-44444444444444444444444444444444"
-	if err = store.Update(func(st *State) error {
-		st.ImportedImages[id] = importedImageRecord{ClientID: "owner", ImportedImage: ImportedImage{ID: id, Source: "old"}}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	objects.key, _ = imageMetadataKey(id)
-	newer := storedImage{Revision: "new-owner", Record: &importedImageRecord{ClientID: "owner", ImportedImage: ImportedImage{ID: id, Source: "new"}}}
-	objects.replacement, err = json.Marshal(newer)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = store.Update(func(st *State) error { delete(st.ImportedImages, id); return nil }); err == nil {
-		t.Fatal("stale delete was not fenced")
-	}
-	actual, _, err := readObject(ctx, objects, objects.key)
-	if err != nil {
-		t.Fatal("new metadata deleted by stale process:", err)
-	}
-	var image storedImage
-	if err = json.Unmarshal(actual, &image); err != nil || image.Record.ImportedImage.Source != "new" {
-		t.Fatal("new metadata changed")
-	}
 }

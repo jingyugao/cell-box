@@ -66,7 +66,7 @@ func TestOpenAPIResponseShapesAndReferences(t *testing.T) {
 	}
 	walk(doc)
 	schemas := doc["components"].(map[string]any)["schemas"].(map[string]any)
-	types := map[string]any{"ImportedImage": service.ImportedImage{}, "Box": service.Box{}, "Operation": service.Operation{}, "Execution": service.Execution{}, "Capabilities": service.Capabilities{}, "Lease": service.Lease{}, "Route": service.Route{}, "Grant": service.Grant{}, "AccessRequest": service.AccessRequest{}, "Archive": service.Archive{}, "Identity": guestapi.Identity{}, "ExecResult": guestapi.ExecResult{}, "FileEntry": guestapi.FileEntry{}}
+	types := map[string]any{"ImportedImage": service.ImportedImage{}, "Box": service.Box{}, "Operation": service.Operation{}, "Execution": service.Execution{}, "Capabilities": service.Capabilities{}, "Lease": service.Lease{}, "Route": service.Route{}, "Archive": service.Archive{}, "Identity": guestapi.Identity{}, "ExecResult": guestapi.ExecResult{}, "FileEntry": guestapi.FileEntry{}}
 	for name, value := range types {
 		t.Run(name, func(t *testing.T) {
 			schema := schemas[name].(map[string]any)

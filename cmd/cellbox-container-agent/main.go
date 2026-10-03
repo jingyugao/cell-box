@@ -23,21 +23,11 @@ func main() {
 
 func mainErr() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: cellbox-container-agent serve|token|tool")
+		return errors.New("usage: cellbox-container-agent serve|tool")
 	}
 	switch os.Args[1] {
 	case "__child":
 		return guest.RunChild(os.Args[2:])
-	case "token":
-		if os.Geteuid() != 0 {
-			return errors.New("token discovery requires root")
-		}
-		b, err := os.ReadFile(guestapi.TokenPath)
-		if err != nil {
-			return err
-		}
-		_, err = os.Stdout.Write(b)
-		return err
 	case "tool":
 		if len(os.Args) < 3 {
 			return errors.New("usage: cellbox-container-agent tool <id> [args...]")
@@ -75,15 +65,14 @@ func mainErr() error {
 		if err := d.Decode(&c); err != nil {
 			return err
 		}
-		token, err := guest.Bootstrap(c)
-		if err != nil {
+		if err := guest.Bootstrap(c); err != nil {
 			return err
 		}
 		self, err := os.Executable()
 		if err != nil {
 			return err
 		}
-		s, err := guest.NewServer(c, token, self, *staged)
+		s, err := guest.NewServer(c, self, *staged)
 		if err != nil {
 			return err
 		}

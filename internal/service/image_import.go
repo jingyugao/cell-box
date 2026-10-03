@@ -357,32 +357,11 @@ func (s *Service) imageUsage(st State, id string) imageUsage {
 		}
 	}
 	for _, rec := range st.Archives {
-		if rec.Archive.Portable {
-			continue
-		}
-		if matchesPrepared(rec.Archive.ImageID) {
+		if rec.Archive.ImportedImageID == id || matchesPrepared(rec.Archive.PreparedImage) {
 			out.Blockers = append(out.Blockers, "archives-reference-image")
 			break
 		}
-		// Older Docker archives store the local image config digest, not the
-		// registry manifest digest. The retained source box preserves the
-		// imported-image reference needed to identify that dependency, even after
-		// the box has been destroyed. Compare the referenced record's prepared
-		// identity too, since multiple imported IDs can share one manifest.
-		source, ok := st.Boxes[rec.Archive.SourceBoxID]
-		if !ok {
-			continue
-		}
-		if source.Box.ImportedImageID == id || matchesPrepared(source.Box.Image) || matchesPrepared(source.Profile.Image) {
-			out.Blockers = append(out.Blockers, "archives-reference-image")
-			break
-		}
-		if source.Box.ImportedImageID != "" {
-			if imported, exists := st.ImportedImages[source.Box.ImportedImageID]; exists && matchesPrepared(imported.ImportedImage.Image) {
-				out.Blockers = append(out.Blockers, "archives-reference-image")
-				break
-			}
-		}
+
 	}
 	if imageBuildBusy(&st) != nil {
 		out.Blockers = append(out.Blockers, "image-operation-running")

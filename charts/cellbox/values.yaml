@@ -44,13 +44,10 @@ api:
   extraEnv: []
   nodeSelector: {}
   configSecret: cellbox-api-config
-  clientTokensSecret: cellbox-api-client-tokens
-  # Set false to use the existing configSecret and clientTokensSecret.
+  # Set false to use the existing configSecret.
   manageSecrets: true
   # Overrides for the API JSON configuration; defaults start with no profiles.
   config: {}
-  # Map of tokenEnv names to tokens (>=32 bytes); omitted tokens are generated.
-  clientTokens: {}
   # Temporary archive staging only; durable content is stored in S3.
   temporaryStorageSize: 4Gi
 

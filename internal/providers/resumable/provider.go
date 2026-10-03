@@ -7,12 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"golang.org/x/sync/singleflight"
 	"math"
 	"path"
 	"regexp"
 	"strings"
-	"sync"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/boxprovider"
@@ -34,32 +32,14 @@ const boxLabel = "cellbox.local/box-id"
 var validBoxID = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 var validImage = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}$`)
 
-// TokenExec obtains the runtime-generated token from the current guest Pod.
-// Implementations must avoid logging the token or the exec response body.
-type TokenExec interface {
-	Token(context.Context, string, string, string) (string, error)
-}
-
 type Provider struct {
 	Client client.Client
-	Exec   TokenExec
 	// ServiceDomain may be overridden for nonstandard cluster DNS suffixes.
 	ServiceDomain string
-	tokenMu       sync.Mutex
-	tokens        map[string]cachedToken
-	tokenReads    singleflight.Group
 }
 
-type cachedToken struct{ identity, token string }
-
-func (p *Provider) forgetToken(h boxprovider.Handle) {
-	p.tokenMu.Lock()
-	delete(p.tokens, h.Namespace+"/"+h.Name)
-	p.tokenMu.Unlock()
-}
-
-func New(c client.Client, exec TokenExec) *Provider { return &Provider{Client: c, Exec: exec} }
-func (*Provider) Name() string                      { return name }
+func New(c client.Client) *Provider { return &Provider{Client: c} }
+func (*Provider) Name() string      { return name }
 
 func crName(boxID string) (string, error) {
 	if len(boxID) == 0 || len(boxID) > 55 || !validBoxID.MatchString(boxID) {
@@ -203,7 +183,7 @@ func (p *Provider) Inspect(ctx context.Context, h boxprovider.Handle) (boxprovid
 	if err != nil {
 		return boxprovider.Observation{}, err
 	}
-	obs := boxprovider.Observation{ExecutionID: w.Status.PodUID, Message: w.Status.Message}
+	obs := boxprovider.Observation{ExecutionID: w.Status.PodUID, Message: w.Status.Message, Generation: uint64(w.Status.Cycle)}
 	if w.DeletionTimestamp != nil {
 		obs.Phase = "deleting"
 		return obs, nil
@@ -337,7 +317,6 @@ func (p *Provider) Action(ctx context.Context, h boxprovider.Handle, action stri
 }
 
 func (p *Provider) Destroy(ctx context.Context, h boxprovider.Handle) error {
-	p.forgetToken(h)
 	w, err := p.get(ctx, h)
 	if errors.Is(err, boxprovider.ErrNotFound) {
 		return nil
@@ -369,59 +348,12 @@ func containerIdentity(pod *core.Pod, container string) string {
 	return ""
 }
 
-func (p *Provider) guestToken(ctx context.Context, h boxprovider.Handle, w *api.ResumablePod, pod *core.Pod) (string, error) {
-	container := containerIdentity(pod, w.Spec.Container.Name)
-	// Without a container identity, do not assume a restarted process kept its token.
-	if container == "" {
-		return p.Exec.Token(ctx, w.Namespace, pod.Name, w.Spec.Container.Name)
-	}
-	key := h.Namespace + "/" + h.Name
-	identity := string(w.UID) + "/" + string(pod.UID) + "/" + container
-	value, err, _ := p.tokenReads.Do(key+"/"+identity, func() (any, error) {
-		p.tokenMu.Lock()
-		cached := p.tokens[key]
-		p.tokenMu.Unlock()
-		if cached.identity == identity {
-			return cached.token, nil
-		}
-		token, err := p.Exec.Token(ctx, w.Namespace, pod.Name, w.Spec.Container.Name)
-		if err != nil {
-			return nil, err
-		}
-		token = strings.TrimSpace(token)
-		if token == "" || strings.ContainsAny(token, "\r\n\x00") {
-			return nil, errors.New("guest returned an invalid token")
-		}
-		p.tokenMu.Lock()
-		if p.tokens == nil {
-			p.tokens = map[string]cachedToken{}
-		}
-		if len(p.tokens) >= 1024 && p.tokens[key].identity == "" {
-			for old := range p.tokens {
-				delete(p.tokens, old)
-				break
-			}
-		}
-		p.tokens[key] = cachedToken{identity: identity, token: token}
-		p.tokenMu.Unlock()
-		return token, nil
-	})
-	if err != nil {
-		return "", err
-	}
-	return value.(string), nil
-}
-
 func (p *Provider) GuestForExecution(ctx context.Context, h boxprovider.Handle, expected string) (boxprovider.Connection, error) {
-	if p.Exec == nil {
-		return boxprovider.Connection{}, errors.New("Kubernetes Pod exec is not configured")
-	}
 	w, err := p.get(ctx, h)
 	if err != nil {
 		return boxprovider.Connection{}, err
 	}
 	if w.DeletionTimestamp != nil || w.Spec.DesiredState != "Running" {
-		p.forgetToken(h)
 		return boxprovider.Connection{}, errNotReady
 	}
 	if expected != "" && w.Status.PodUID != expected {
@@ -448,29 +380,19 @@ func (p *Provider) GuestForExecution(ctx context.Context, h boxprovider.Handle, 
 	if !validPort {
 		return boxprovider.Connection{}, errors.New("guest Service port changed")
 	}
-	token, err := p.guestToken(ctx, h, w, pod)
-	if err != nil {
-		return boxprovider.Connection{}, err
-	}
-	token = strings.TrimSpace(token)
-	if token == "" || strings.ContainsAny(token, "\r\n\x00") {
-		return boxprovider.Connection{}, errors.New("guest returned an invalid token")
-	}
-	// Recheck both identities after exec: a replace/delete during token retrieval
-	// must not leak a stale token to a new execution.
+	// Resolve only the same live execution observed before the Service lookup.
 	current, err := p.get(ctx, h)
 	if err != nil {
 		return boxprovider.Connection{}, err
 	}
 	if current.DeletionTimestamp != nil || current.Spec.DesiredState != "Running" || current.Status.Phase != "Running" || current.Status.PodUID != string(pod.UID) || current.Status.PodName != pod.Name {
-		return boxprovider.Connection{}, errors.New("guest execution changed during token retrieval")
+		return boxprovider.Connection{}, errors.New("guest execution changed during connection resolution")
 	}
 	currentPod, err := p.readyPod(ctx, current)
 	if err != nil {
 		return boxprovider.Connection{}, err
 	}
 	if containerIdentity(currentPod, current.Spec.Container.Name) != containerIdentity(pod, w.Spec.Container.Name) {
-		p.forgetToken(h)
 		return boxprovider.Connection{}, boxprovider.ErrStaleExecution
 	}
 	domain := p.ServiceDomain
@@ -480,7 +402,7 @@ func (p *Provider) GuestForExecution(ctx context.Context, h boxprovider.Handle, 
 	if !regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`).MatchString(domain) {
 		return boxprovider.Connection{}, errors.New("invalid Service DNS suffix")
 	}
-	return boxprovider.Connection{URL: fmt.Sprintf("http://%s.%s.%s:%d", w.Name, w.Namespace, domain, guestapi.Port), Token: token}, nil
+	return boxprovider.Connection{URL: fmt.Sprintf("http://%s.%s.%s:%d", w.Name, w.Namespace, domain, guestapi.Port)}, nil
 }
 
 var _ boxprovider.Provider = (*Provider)(nil)

@@ -17,7 +17,7 @@ func TestCredentialBatchAdmissionAndGenerationFence(t *testing.T) {
 	var calls atomic.Int32
 	var change, fail atomic.Bool
 	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+testGuestToken {
+		if r.Header.Get("Authorization") != "" {
 			http.Error(w, "unauthorized", 401)
 			return
 		}

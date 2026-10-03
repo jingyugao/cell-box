@@ -40,7 +40,7 @@ func TestFileHTTPRangesAndHeaders(t *testing.T) {
 	if err := os.Symlink("/etc/passwd", filepath.Join(cfg.Workspace, "escape.txt")); err != nil {
 		t.Fatal(err)
 	}
-	g, err := guest.NewServer(cfg, testGuestToken, "/bin/true", true)
+	g, err := guest.NewServer(cfg, "/bin/true", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestFileStreamKeepsLeaseAndCancelsUpstream(t *testing.T) {
 	_, box := f.createBox(t, "file-stream")
 	stopped := make(chan struct{})
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+testGuestToken {
+		if r.Header.Get("Authorization") != "" {
 			t.Error("Guest authorization was not preserved")
 		}
 		w.WriteHeader(200)

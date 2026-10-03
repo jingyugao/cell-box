@@ -7,12 +7,6 @@ import (
 	"time"
 )
 
-type Client struct {
-	ID           string `json:"id"`
-	TokenEnv     string `json:"tokenEnv"`
-	AuthorizeURL string `json:"authorizeUrl,omitempty"`
-	Token        string `json:"-"`
-}
 type Profile struct {
 	ID                     string          `json:"id"`
 	Provider               string          `json:"provider"`
@@ -25,18 +19,20 @@ type Profile struct {
 	CPU                    float64         `json:"cpu,omitempty"`
 	MemoryMiB              int64           `json:"memoryMiB,omitempty"`
 	Guest                  guestapi.Config `json:"guest"`
-	Clients                []string        `json:"clients"`
 }
 type Config struct {
-	ObjectStorage         objectstorage.Config `json:"objectStorage,omitempty"`
-	Listen                string               `json:"listen"`
-	DataDir               string               `json:"dataDir"`
-	PublicURL             string               `json:"publicUrl,omitempty"`
-	ServiceDomain         string               `json:"serviceDomain,omitempty"`
-	Clients               []Client             `json:"clients"`
-	Profiles              []Profile            `json:"profiles"`
-	StartupTimeoutSeconds int                  `json:"startupTimeoutSeconds,omitempty"`
-	ImageBuild            ImageBuildConfig     `json:"imageBuild,omitempty"`
+	// ClientID is a data/idempotency namespace, not an authenticated identity.
+	ClientID                  string               `json:"clientId,omitempty"`
+	ObjectStorage             objectstorage.Config `json:"objectStorage,omitempty"`
+	Listen                    string               `json:"listen"`
+	DataDir                   string               `json:"dataDir"`
+	PublicURL                 string               `json:"publicUrl,omitempty"`
+	ServiceDomain             string               `json:"serviceDomain,omitempty"`
+	Profiles                  []Profile            `json:"profiles"`
+	StartupTimeoutSeconds     int                  `json:"startupTimeoutSeconds,omitempty"`
+	OperationRetentionSeconds int                  `json:"operationRetentionSeconds,omitempty"`
+	ExecutionRetentionSeconds int                  `json:"executionRetentionSeconds,omitempty"`
+	ImageBuild                ImageBuildConfig     `json:"imageBuild,omitempty"`
 }
 type ImageBuildConfig struct {
 	Address          string `json:"address,omitempty"`
@@ -130,48 +126,21 @@ type Route struct {
 	Port  int    `json:"port"`
 	URL   string `json:"url"`
 }
-type Grant struct {
-	ID        string    `json:"id"`
-	RouteID   string    `json:"routeId"`
-	Subject   string    `json:"subject"`
-	ExpiresAt time.Time `json:"expiresAt"`
-	Revoked   bool      `json:"revoked"`
-}
-type grantRecord struct {
-	Grant     Grant  `json:"grant"`
-	TokenHash string `json:"tokenHash"`
-}
-type AccessRequest struct {
-	ID          string    `json:"id"`
-	RouteID     string    `json:"routeId"`
-	BoxID       string    `json:"boxId"`
-	CallbackURL string    `json:"callbackUrl"`
-	ExpiresAt   time.Time `json:"expiresAt"`
-	Approved    bool      `json:"approved"`
-	Consumed    bool      `json:"consumed"`
-}
-type accessRecord struct {
-	Request     AccessRequest `json:"request"`
-	BrowserHash string        `json:"browserHash"`
-	CodeHash    string        `json:"codeHash,omitempty"`
-	GrantID     string        `json:"grantId,omitempty"`
-	ReturnPath  string        `json:"returnPath"`
-}
-type sessionRecord struct {
-	TokenHash string `json:"tokenHash"`
-	GrantID   string `json:"grantId"`
-}
 type Archive struct {
-	ID          string            `json:"id"`
-	SourceBoxID string            `json:"sourceBoxId"`
-	ProfileID   string            `json:"profileId"`
-	ImageID     string            `json:"imageId"`
-	Agent       guestapi.Identity `json:"agent"`
-	SHA256      string            `json:"sha256"`
-	Size        int64             `json:"size"`
-	Consistency string            `json:"consistency"`
-	Portable    bool              `json:"portable"`
-	CreatedAt   time.Time         `json:"createdAt"`
+	// Recovery and image deletion must not depend on a retained source Box.
+	ImportedImageID string            `json:"importedImageId,omitempty"`
+	PreparedImage   string            `json:"preparedImage,omitempty"`
+	ManifestVersion int               `json:"manifestVersion,omitempty"`
+	ID              string            `json:"id"`
+	SourceBoxID     string            `json:"sourceBoxId"`
+	ProfileID       string            `json:"profileId"`
+	ImageID         string            `json:"imageId"`
+	Agent           guestapi.Identity `json:"agent"`
+	SHA256          string            `json:"sha256"`
+	Size            int64             `json:"size"`
+	Consistency     string            `json:"consistency"`
+	Portable        bool              `json:"portable"`
+	CreatedAt       time.Time         `json:"createdAt"`
 }
 type archiveRecord struct {
 	Deleting bool    `json:"deleting,omitempty"`
@@ -180,24 +149,27 @@ type archiveRecord struct {
 }
 type keyRecord struct {
 	Hash        string `json:"hash"`
-	OperationID string `json:"operationId"`
+	OperationID string `json:"operationId,omitempty"`
+	Expired     bool   `json:"expired,omitempty"`
+}
+type executionRecord struct {
+	Execution
+	ResultObject string `json:"resultObject,omitempty"`
 }
 type State struct {
-	Revision       string                         `json:"revision,omitempty"`
 	ImportedImages map[string]importedImageRecord `json:"importedImages"`
 	Schema         int                            `json:"schema"`
 	Boxes          map[string]boxRecord           `json:"boxes"`
 	Operations     map[string]operationRecord     `json:"operations"`
-	Executions     map[string]Execution           `json:"executions"`
+	Executions     map[string]executionRecord     `json:"executions"`
 	Leases         map[string]Lease               `json:"leases"`
 	Routes         map[string]Route               `json:"routes"`
-	Grants         map[string]grantRecord         `json:"grants"`
-	Access         map[string]accessRecord        `json:"access"`
-	Sessions       map[string]sessionRecord       `json:"sessions"`
 	Archives       map[string]archiveRecord       `json:"archives"`
 	Keys           map[string]keyRecord           `json:"keys"`
 }
 
+const stateSchema = 3
+
 func newState() State {
-	return State{ImportedImages: map[string]importedImageRecord{}, Schema: 2, Boxes: map[string]boxRecord{}, Operations: map[string]operationRecord{}, Executions: map[string]Execution{}, Leases: map[string]Lease{}, Routes: map[string]Route{}, Grants: map[string]grantRecord{}, Access: map[string]accessRecord{}, Sessions: map[string]sessionRecord{}, Archives: map[string]archiveRecord{}, Keys: map[string]keyRecord{}}
+	return State{ImportedImages: map[string]importedImageRecord{}, Schema: stateSchema, Boxes: map[string]boxRecord{}, Operations: map[string]operationRecord{}, Executions: map[string]executionRecord{}, Leases: map[string]Lease{}, Routes: map[string]Route{}, Archives: map[string]archiveRecord{}, Keys: map[string]keyRecord{}}
 }

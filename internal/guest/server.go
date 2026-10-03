@@ -1,7 +1,6 @@
 package guest
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,7 +22,6 @@ import (
 
 type Server struct {
 	cfg            guestapi.Config
-	token          string
 	self           string
 	tools          map[string]compiledTool
 	staged         bool
@@ -36,19 +34,16 @@ type Server struct {
 	proxyTransport *http.Transport
 }
 
-func NewServer(c guestapi.Config, token, self string, staged bool) (*Server, error) {
+func NewServer(c guestapi.Config, self string, staged bool) (*Server, error) {
 	tools, err := validateConfig(c)
 	if err != nil {
 		return nil, err
-	}
-	if token == "" || strings.ContainsAny(token, "\r\n") {
-		return nil, errors.New("invalid control token")
 	}
 	if !filepath.IsAbs(self) {
 		return nil, errors.New("guest executable path must be absolute")
 	}
 	transport := &http.Transport{Proxy: nil, MaxIdleConns: 64, MaxIdleConnsPerHost: 8, IdleConnTimeout: 30 * time.Second, ResponseHeaderTimeout: 30 * time.Second}
-	return &Server{cfg: c, token: token, self: self, tools: tools, staged: staged, proxyTransport: transport}, nil
+	return &Server{cfg: c, self: self, tools: tools, staged: staged, proxyTransport: transport}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -68,15 +63,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/credentials", s.credentialBatchHandler)
 	mux.HandleFunc("POST /v1/tools/{id}", s.toolHandler)
 	mux.HandleFunc("/proxy/", s.proxyHandler)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		const prefix = "Bearer "
-		a := r.Header.Get("Authorization")
-		if !strings.HasPrefix(a, prefix) || subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(a, prefix)), []byte(s.token)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		mux.ServeHTTP(w, r)
-	})
+	return mux
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -206,25 +193,24 @@ func (s *Server) proxyHandler(w http.ResponseWriter, r *http.Request) {
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	old := proxy.Director
 	proxy.Director = func(out *http.Request) {
-		upstreamAuth := out.Header.Get("X-Cellbox-Upstream-Authorization")
 		out.URL.Path = "/" + sub
 		out.URL.RawPath = ""
 		if hasEscapedSub {
 			out.URL.RawPath = "/" + escapedSub
 		}
 		out.RequestURI = ""
-		out.Header.Del("Authorization")
 		out.Header.Del("Proxy-Authorization")
-		out.Header.Del("X-Cellbox-Upstream-Authorization")
+		for name := range out.Header {
+			if strings.HasPrefix(strings.ToLower(name), "x-cellbox-") {
+				out.Header.Del(name)
+			}
+		}
 		out.Header.Del("Forwarded")
 		out.Header.Del("X-Forwarded-For")
 		out.Header.Del("X-Forwarded-Host")
 		out.Header.Del("X-Forwarded-Proto")
 		old(out)
 		out.Host = target.Host
-		if upstreamAuth != "" {
-			out.Header.Set("Authorization", upstreamAuth)
-		}
 	}
 	proxy.Transport = s.proxyTransport
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) { http.Error(w, "upstream unavailable", 502) }

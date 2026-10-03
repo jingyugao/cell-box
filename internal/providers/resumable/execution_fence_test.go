@@ -11,7 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func TestGuestTokenCacheFencesExecutionAndContainerRestarts(t *testing.T) {
+func TestGuestConnectionFencesExecutionAndContainerRestarts(t *testing.T) {
 	p, spec, ctx := fixture(t)
 	h, err := p.Create(ctx, spec)
 	if err != nil {
@@ -34,17 +34,13 @@ func TestGuestTokenCacheFencesExecutionAndContainerRestarts(t *testing.T) {
 	if err := p.Client.Create(ctx, svc); err != nil {
 		t.Fatal(err)
 	}
-	exec := p.Exec.(*tokenExec)
-	if _, err := p.GuestForExecution(ctx, h, "old-pod"); !errors.Is(err, boxprovider.ErrStaleExecution) || exec.calls != 0 {
-		t.Fatal("stale generation retrieved token")
+	if _, err := p.GuestForExecution(ctx, h, "old-pod"); !errors.Is(err, boxprovider.ErrStaleExecution) {
+		t.Fatal("stale execution accepted")
 	}
 	for i := 0; i < 2; i++ {
 		if _, err := p.GuestForExecution(ctx, h, "pod-a-uid"); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if exec.calls != 1 {
-		t.Fatalf("same execution read token %d times", exec.calls)
 	}
 	pod.Status.ContainerStatuses[0].ContainerID = "containerd://two"
 	pod.Status.ContainerStatuses[0].RestartCount++
@@ -54,20 +50,19 @@ func TestGuestTokenCacheFencesExecutionAndContainerRestarts(t *testing.T) {
 	if _, err := p.GuestForExecution(ctx, h, "pod-a-uid"); err != nil {
 		t.Fatal(err)
 	}
-	if exec.calls != 2 {
-		t.Fatal("container restart reused token")
-	}
 	pod.Status.ContainerStatuses[0].ContainerID = "containerd://three"
 	if err := p.Client.Status().Update(ctx, pod); err != nil {
 		t.Fatal(err)
 	}
-	exec.after = func() {
+	originalClient := p.Client
+	p.Client = podGetHookClient{Client: originalClient, afterPodGet: func() {
+		p.Client = originalClient
 		pod.Status.ContainerStatuses[0].ContainerID = "containerd://four"
 		if err := p.Client.Status().Update(ctx, pod); err != nil {
 			t.Fatal(err)
 		}
-	}
+	}}
 	if _, err := p.GuestForExecution(ctx, h, "pod-a-uid"); !errors.Is(err, boxprovider.ErrStaleExecution) {
-		t.Fatalf("container changed during token retrieval: %v", err)
+		t.Fatalf("container changed during connection resolution: %v", err)
 	}
 }
