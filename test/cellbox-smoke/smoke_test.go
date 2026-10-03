@@ -181,5 +181,5 @@ func TestDockerREST(t *testing.T) {
 	call("GET", "/v1/archives/"+archive, nil, 200)
 	wait(call("POST", "/v1/boxes/"+candidate+":destroy", nil, 202))
 	call("DELETE", "/v1/archives/"+archive, nil, 204)
-	t.Log("agent/debug isolation, local tool, files, authenticated loopback forwarding, freeze, archive restore and cleanup passed")
+	t.Log("agent/debug isolation, local tool, files, anonymous loopback forwarding, freeze, archive restore and cleanup passed")
 }

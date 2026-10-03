@@ -2,8 +2,6 @@ package guest
 
 import (
 	"bufio"
-	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -17,19 +15,19 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func Bootstrap(c guestapi.Config) (string, error) {
+func Bootstrap(c guestapi.Config) error {
 	tools, err := validateConfig(c)
 	if err != nil {
-		return "", err
+		return err
 	}
 	if os.Geteuid() != 0 {
-		return "", errors.New("guest bootstrap requires root")
+		return errors.New("guest bootstrap requires root")
 	}
 	if err := ensureDir("/etc", 0, 0, 0755); err != nil {
-		return "", err
+		return err
 	}
 	if err := ensureAccount("cellbox-agent", c.Agent, "/home/agent"); err != nil {
-		return "", err
+		return err
 	}
 	debugHome := debugRoot
 	if c.DebugHome != "" {
@@ -37,7 +35,7 @@ func Bootstrap(c guestapi.Config) (string, error) {
 	}
 	if c.Debug.UID != 0 || c.Debug.GID != 0 {
 		if err := ensureDebugAccount(c.Debug, debugHome); err != nil {
-			return "", err
+			return err
 		}
 	}
 	for _, d := range []struct {
@@ -52,46 +50,23 @@ func Bootstrap(c guestapi.Config) (string, error) {
 		{toolRoot, 0, 0, 0755},
 	} {
 		if err := ensureDir(d.path, d.uid, d.gid, d.mode); err != nil {
-			return "", err
+			return err
 		}
 	}
 	if c.DebugHome != "" {
 		if err := validateDebugHome(c.DebugHome, c.Debug); err != nil {
-			return "", err
+			return err
 		}
 	}
 	if err := checkTrustedParents(c.Workspace, c.Agent); err != nil {
-		return "", err
+		return err
 	}
 	for _, t := range tools {
 		if err := checkImmutable(t.spec.Executable, true); err != nil {
-			return "", err
+			return err
 		}
 	}
-	var raw [32]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "", err
-	}
-	token := base64.RawURLEncoding.EncodeToString(raw[:])
-	fd, err := unix.Open(guestapi.TokenPath, unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0600)
-	if err != nil {
-		return "", err
-	}
-	f := os.NewFile(uintptr(fd), guestapi.TokenPath)
-	defer f.Close()
-	if err := f.Chmod(0600); err != nil {
-		return "", err
-	}
-	if err := f.Chown(0, 0); err != nil {
-		return "", err
-	}
-	if _, err := f.WriteString(token + "\n"); err != nil {
-		return "", err
-	}
-	if err := f.Sync(); err != nil {
-		return "", err
-	}
-	return token, nil
+	return nil
 }
 
 func validateDebugHome(path string, debug guestapi.Identity) error {

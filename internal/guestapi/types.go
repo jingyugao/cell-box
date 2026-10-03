@@ -1,4 +1,4 @@
-// Package guestapi defines the private authenticated protocol to a Cellbox guest.
+// Package guestapi defines the internal protocol to a Cellbox guest.
 package guestapi
 
 import (
@@ -11,7 +11,6 @@ import (
 
 const Port = 40000
 const Binary = "/opt/cellbox/bin/cellbox-container-agent"
-const TokenPath = "/run/cellbox/control-token"
 const MaxCredentialBytes = 1 << 20
 const MaxCredentialBatchBytes = 2 << 20
 

@@ -27,10 +27,6 @@ func newGatewayFixture(t *testing.T, upstream http.HandlerFunc) *gatewayFixture 
 	core.reopen(t)
 	_, box := core.createBox(t, "gateway-box")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+testGuestToken {
-			http.Error(w, "guest auth required", 401)
-			return
-		}
 		upstream(w, r)
 	}))
 	t.Cleanup(server.Close)
@@ -69,7 +65,7 @@ func routeHost(route Route) string {
 
 func TestGatewayNeedsNoGrantAndForwardsApplicationAuthorization(t *testing.T) {
 	f := newGatewayFixture(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Cellbox-Upstream-Authorization") != "Bearer application-token" {
+		if r.Header.Get("Authorization") != "Bearer application-token" {
 			t.Error("application authorization was lost")
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -100,8 +96,8 @@ func TestGatewayStripsControlHeadersAndForwardsApplicationCookies(t *testing.T) 
 	rec := f.gatewayCall(t, "GET", routeHost(f.route), "/headers", headers)
 	wantStatus(t, rec.Code, 200, rec.Body.Bytes())
 	upstream := <-seen
-	if upstream.Get("Authorization") != "Bearer "+testGuestToken {
-		t.Fatalf("control auth was not replaced: %q", upstream.Get("Authorization"))
+	if upstream.Get("Authorization") != "" {
+		t.Fatalf("unexpected control authorization: %q", upstream.Get("Authorization"))
 	}
 	for _, name := range []string{"X-Cellbox-Private", "X-Cellbox-Upstream-Authorization", "X-Forwarded-For", "Forwarded", "Proxy-Authorization"} {
 		if upstream.Get(name) != "" {

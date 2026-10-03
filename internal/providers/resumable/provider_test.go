@@ -66,19 +66,6 @@ func (c podGetHookClient) Get(ctx context.Context, key client.ObjectKey, obj cli
 	return err
 }
 
-type tokenExec struct {
-	calls int
-	after func()
-}
-
-func (e *tokenExec) Token(_ context.Context, _, _, _ string) (string, error) {
-	e.calls++
-	if e.after != nil {
-		e.after()
-	}
-	return "private-token\n", nil
-}
-
 func fixture(t *testing.T) (*Provider, boxprovider.Spec, context.Context) {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -89,7 +76,7 @@ func fixture(t *testing.T) (*Provider, boxprovider.Spec, context.Context) {
 		t.Fatal(err)
 	}
 	c := uidClient{fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&api.ResumablePod{}, &core.Pod{}).Build()}
-	p := New(c, &tokenExec{})
+	p := New(c)
 	s := boxprovider.Spec{BoxID: "box-1", Namespace: "boxes", NodeName: "node-a", Image: "registry.example.invalid/prepared@sha256:" + strings.Repeat("a", 64), Config: guestapi.DefaultConfig(), CPU: 0.5, MemoryMiB: 256, Staged: true}
 	return p, s, context.Background()
 }
@@ -220,9 +207,6 @@ func TestLifecycleAndGuestIdentity(t *testing.T) {
 	if _, err = p.Guest(ctx, h); !errors.Is(err, errNotReady) {
 		t.Fatalf("Guest accepted a not-ready Pod: %v", err)
 	}
-	if calls := p.Exec.(*tokenExec).calls; calls != 0 {
-		t.Fatalf("not-ready Guest invoked token exec %d times", calls)
-	}
 	pod.Status.Conditions[0].Status = core.ConditionTrue
 	if err = p.Client.Status().Update(ctx, pod); err != nil {
 		t.Fatal(err)
@@ -235,24 +219,24 @@ func TestLifecycleAndGuestIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if conn.URL != "http://cellbox-box-1.boxes.svc:40000" || conn.Token != "private-token" {
+	if conn.URL != "http://cellbox-box-1.boxes.svc:40000" {
 		t.Fatalf("guest: %#v", conn)
 	}
-	exec := p.Exec.(*tokenExec)
-	exec.after = func() {
+	originalClient := p.Client
+	p.Client = podGetHookClient{Client: originalClient, afterPodGet: func() {
+		p.Client = originalClient
 		pod.UID = "replacement"
 		if updateErr := p.Client.Update(ctx, pod); updateErr != nil {
 			t.Fatal(updateErr)
 		}
-	}
+	}}
 	if _, err = p.Guest(ctx, h); err == nil || !strings.Contains(err.Error(), "UID changed") {
-		t.Fatalf("Pod replacement during token retrieval was accepted: %v", err)
+		t.Fatalf("Pod replacement during connection resolution was accepted: %v", err)
 	}
 	obs, err = p.Inspect(ctx, h)
 	if err != nil || obs.Phase != "failed" {
 		t.Fatalf("changed Pod identity was not observed as failed: %#v %v", obs, err)
 	}
-	exec.after = nil
 	pod.UID = "pod-uid"
 	if err = p.Client.Update(ctx, pod); err != nil {
 		t.Fatal(err)

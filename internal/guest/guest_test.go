@@ -31,11 +31,8 @@ func testConfig(t *testing.T) guestapi.Config {
 	return c
 }
 
-func request(h http.Handler, method, path, token string, body io.Reader) *httptest.ResponseRecorder {
+func request(h http.Handler, method, path string, body io.Reader) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, path, body)
-	if token != "" {
-		r.Header.Set("Authorization", "Bearer "+token)
-	}
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	return w
@@ -223,52 +220,49 @@ func TestCredentialBatchValidatesBeforeWritingAndSupportsLargeFiles(t *testing.T
 	}
 }
 
-func TestAuthFilesArchiveRestore(t *testing.T) {
+func TestAnonymousFilesArchiveRestore(t *testing.T) {
 	c := testConfig(t)
-	s, err := NewServer(c, "secret", "/bin/true", true)
+	s, err := NewServer(c, "/bin/true", true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	h := s.Handler()
-	if got := request(h, "GET", "/healthz", "", nil).Code; got != 401 {
-		t.Fatalf("unauthenticated health: %d", got)
-	}
-	if got := request(h, "GET", "/healthz", "secret", nil).Code; got != 200 {
+	if got := request(h, "GET", "/healthz", nil).Code; got != 200 {
 		t.Fatalf("health: %d", got)
 	}
-	if got := request(h, "PUT", "/v1/files?path=../bad", "secret", strings.NewReader("bad")).Code; got != 400 {
+	if got := request(h, "PUT", "/v1/files?path=../bad", strings.NewReader("bad")).Code; got != 400 {
 		t.Fatalf("traversal: %d", got)
 	}
-	if got := request(h, "PUT", "/v1/files?path=hello.txt", "secret", strings.NewReader("hello")).Code; got != 204 {
+	if got := request(h, "PUT", "/v1/files?path=hello.txt", strings.NewReader("hello")).Code; got != 204 {
 		t.Fatalf("put: %d", got)
 	}
-	if got := request(h, "GET", "/v1/files?path=hello.txt", "secret", nil); got.Code != 200 || got.Body.String() != "hello" {
+	if got := request(h, "GET", "/v1/files?path=hello.txt", nil); got.Code != 200 || got.Body.String() != "hello" {
 		t.Fatalf("get: %d %q", got.Code, got.Body.String())
 	}
-	a := request(h, "GET", "/v1/archive", "secret", nil)
+	a := request(h, "GET", "/v1/archive", nil)
 	if a.Code != 200 {
 		t.Fatalf("archive: %d %s", a.Code, a.Body.String())
 	}
 	other := testConfig(t)
-	restore, err := NewServer(other, "secret", "/bin/true", true)
+	restore, err := NewServer(other, "/bin/true", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := request(restore.Handler(), "POST", "/v1/restore", "secret", bytes.NewReader(a.Body.Bytes())).Code; got != 204 {
+	if got := request(restore.Handler(), "POST", "/v1/restore", bytes.NewReader(a.Body.Bytes())).Code; got != 204 {
 		t.Fatalf("restore: %d", got)
 	}
 	b, err := os.ReadFile(filepath.Join(other.Workspace, "hello.txt"))
 	if err != nil || string(b) != "hello" {
 		t.Fatalf("restored: %q %v", b, err)
 	}
-	if got := request(restore.Handler(), "POST", "/v1/restore", "secret", bytes.NewReader(a.Body.Bytes())).Code; got != 409 {
+	if got := request(restore.Handler(), "POST", "/v1/restore", bytes.NewReader(a.Body.Bytes())).Code; got != 409 {
 		t.Fatalf("nonempty restore: %d", got)
 	}
 }
 
 func TestRestoreRejectsTraversal(t *testing.T) {
 	c := testConfig(t)
-	s, _ := NewServer(c, "secret", "/bin/true", true)
+	s, _ := NewServer(c, "/bin/true", true)
 	var body bytes.Buffer
 	gz := gzip.NewWriter(&body)
 	tw := tar.NewWriter(gz)
@@ -276,7 +270,7 @@ func TestRestoreRejectsTraversal(t *testing.T) {
 	_, _ = tw.Write([]byte("x"))
 	_ = tw.Close()
 	_ = gz.Close()
-	if got := request(s.Handler(), "POST", "/v1/restore", "secret", &body); got.Code != 400 {
+	if got := request(s.Handler(), "POST", "/v1/restore", &body); got.Code != 400 {
 		t.Fatalf("traversal restore: %d %s", got.Code, got.Body.String())
 	}
 }
@@ -284,7 +278,7 @@ func TestRestoreRejectsTraversal(t *testing.T) {
 func TestQuiesceAndToolArguments(t *testing.T) {
 	c := testConfig(t)
 	c.Tools = []guestapi.Tool{{ID: "safe", Executable: "/opt/cellbox/tools/safe", InputPatterns: []string{`[a-z]+`}}}
-	s, err := NewServer(c, "secret", "/bin/true", true)
+	s, err := NewServer(c, "/bin/true", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,17 +287,17 @@ func TestQuiesceAndToolArguments(t *testing.T) {
 		t.Fatal("unsafe argument accepted")
 	}
 	s.busy = 1
-	if got := request(s.Handler(), "POST", "/v1/quiesce", "secret", nil).Code; got != 409 {
+	if got := request(s.Handler(), "POST", "/v1/quiesce", nil).Code; got != 409 {
 		t.Fatalf("busy quiesce: %d", got)
 	}
 	s.busy = 0
-	if got := request(s.Handler(), "POST", "/v1/quiesce", "secret", nil).Code; got != 204 {
+	if got := request(s.Handler(), "POST", "/v1/quiesce", nil).Code; got != 204 {
 		t.Fatalf("quiesce: %d", got)
 	}
-	if got := request(s.Handler(), "POST", "/v1/exec", "secret", strings.NewReader(`{"argv":["/bin/true"]}`)).Code; got != 409 {
+	if got := request(s.Handler(), "POST", "/v1/exec", strings.NewReader(`{"argv":["/bin/true"]}`)).Code; got != 409 {
 		t.Fatalf("quiesced exec: %d", got)
 	}
-	if got := request(s.Handler(), "POST", "/v1/unquiesce", "secret", nil).Code; got != 204 {
+	if got := request(s.Handler(), "POST", "/v1/unquiesce", nil).Code; got != 204 {
 		t.Fatalf("unquiesce: %d", got)
 	}
 }
@@ -351,7 +345,7 @@ func TestPassThroughToolArguments(t *testing.T) {
 
 func TestIdleGuestActivation(t *testing.T) {
 	c := testConfig(t)
-	s, err := NewServer(c, "secret", "/bin/true", false)
+	s, err := NewServer(c, "/bin/true", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,10 +367,10 @@ func TestProxyUpstreamAuthorization(t *testing.T) {
 	defer up.Close()
 	_, p, _ := net.SplitHostPort(strings.TrimPrefix(up.URL, "http://"))
 	c := testConfig(t)
-	s, _ := NewServer(c, "control", "/bin/true", true)
+	s, _ := NewServer(c, "/bin/true", true)
 	r := httptest.NewRequest("POST", "/proxy/"+p+"/api/items?x=1", strings.NewReader("body"))
-	r.Header.Set("Authorization", "Bearer control")
-	r.Header.Set("X-Cellbox-Upstream-Authorization", "Bearer app")
+	r.Header.Set("Authorization", "Bearer app")
+	r.Header.Set("X-Cellbox-Upstream-Authorization", "Bearer spoofed")
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
 	if w.Code != 200 {
@@ -385,15 +379,15 @@ func TestProxyUpstreamAuthorization(t *testing.T) {
 	if !strings.Contains(w.Body.String(), `"authorization":"Bearer app"`) || !strings.Contains(w.Body.String(), `"path":"/api/items"`) {
 		t.Fatalf("proxy did not preserve target request: %s", w.Body.String())
 	}
-	escaped := request(s.Handler(), "GET", "/proxy/"+p+"/api%2Fitems", "control", nil)
+	escaped := request(s.Handler(), "GET", "/proxy/"+p+"/api%2Fitems", nil)
 	if escaped.Code != 200 || !strings.Contains(escaped.Body.String(), `"escapedPath":"/api%2Fitems"`) {
 		t.Fatalf("escaped path changed: %d %s", escaped.Code, escaped.Body.String())
 	}
-	if got := request(s.Handler(), "GET", "/proxy/40000/", "control", nil).Code; got != 400 {
+	if got := request(s.Handler(), "GET", "/proxy/40000/", nil).Code; got != 400 {
 		t.Fatalf("control port forwarded: %d", got)
 	}
-	first := request(s.Handler(), "GET", "/proxy/"+p+"/reuse-one", "control", nil)
-	second := request(s.Handler(), "GET", "/proxy/"+p+"/reuse-two", "control", nil)
+	first := request(s.Handler(), "GET", "/proxy/"+p+"/reuse-one", nil)
+	second := request(s.Handler(), "GET", "/proxy/"+p+"/reuse-two", nil)
 	var a, b map[string]string
 	if first.Code != 200 || second.Code != 200 || json.Unmarshal(first.Body.Bytes(), &a) != nil || json.Unmarshal(second.Body.Bytes(), &b) != nil || a["remoteAddr"] == "" || a["remoteAddr"] != b["remoteAddr"] {
 		t.Fatalf("proxy did not reuse upstream connection: first=%s second=%s", first.Body.String(), second.Body.String())
@@ -427,7 +421,7 @@ func TestProxyWebSocketUpgrade(t *testing.T) {
 	defer up.Close()
 	_, p, _ := net.SplitHostPort(strings.TrimPrefix(up.URL, "http://"))
 	cfg := testConfig(t)
-	s, _ := NewServer(cfg, "secret", "/bin/true", true)
+	s, _ := NewServer(cfg, "/bin/true", true)
 	guest := httptest.NewServer(s.Handler())
 	defer guest.Close()
 	conn, err := net.DialTimeout("tcp", strings.TrimPrefix(guest.URL, "http://"), time.Second)
@@ -436,7 +430,7 @@ func TestProxyWebSocketUpgrade(t *testing.T) {
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-	_, err = fmt.Fprintf(conn, "GET /proxy/%s/ws HTTP/1.1\r\nHost: guest\r\nAuthorization: Bearer secret\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n", p)
+	_, err = fmt.Fprintf(conn, "GET /proxy/%s/ws HTTP/1.1\r\nHost: guest\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n", p)
 	if err != nil {
 		t.Fatal(err)
 	}

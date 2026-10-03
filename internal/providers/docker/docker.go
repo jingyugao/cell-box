@@ -31,7 +31,6 @@ const (
 
 var boxIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 var imageIDPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
-var tokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 
 type Runner interface {
 	Run(context.Context, []string) ([]byte, error)
@@ -367,17 +366,5 @@ func (p *Provider) Guest(ctx context.Context, h boxprovider.Handle) (boxprovider
 	if err != nil || port < 1 || port > 65535 {
 		return boxprovider.Connection{}, errors.New("invalid guest host port")
 	}
-	// Token is returned to the caller only. Never include command output in errors.
-	out, err := p.run(ctx, []string{"exec", "--user", "0", c.ID, guestapi.Binary, "token"})
-	if err != nil {
-		if ctx.Err() != nil {
-			return boxprovider.Connection{}, ctx.Err()
-		}
-		return boxprovider.Connection{}, errors.New("guest token retrieval failed")
-	}
-	token := strings.TrimSpace(string(out))
-	if !tokenPattern.MatchString(token) {
-		return boxprovider.Connection{}, errors.New("invalid guest token")
-	}
-	return boxprovider.Connection{URL: "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), Token: token}, nil
+	return boxprovider.Connection{URL: "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(port))}, nil
 }

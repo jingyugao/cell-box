@@ -45,8 +45,7 @@ type Observation struct {
 }
 
 type Connection struct {
-	URL   string
-	Token string
+	URL string
 }
 
 type Provider interface {
@@ -58,7 +57,7 @@ type Provider interface {
 	Guest(context.Context, Handle) (Connection, error)
 }
 
-// FencedGuestProvider validates the execution while resolving its authenticated
+// FencedGuestProvider validates the execution while resolving its
 // connection, avoiding a second, independent lifecycle inspection.
 type FencedGuestProvider interface {
 	GuestForExecution(context.Context, Handle, string) (Connection, error)

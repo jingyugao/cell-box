@@ -521,7 +521,6 @@ func (s *Service) guestRequestHeaders(client *http.Client, ctx context.Context, 
 	if r.Header == nil {
 		r.Header = make(http.Header)
 	}
-	r.Header.Set("Authorization", "Bearer "+conn.Token)
 	if r.Header.Get("Content-Type") == "" {
 		r.Header.Set("Content-Type", "application/json")
 	}

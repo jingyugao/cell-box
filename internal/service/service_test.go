@@ -20,7 +20,6 @@ import (
 
 const testClientToken = "client-a-secret-abcdefghijklmnopqrstuvwxyz"
 const otherClientToken = "client-b-secret-abcdefghijklmnopqrstuvwxyz"
-const testGuestToken = "local-test-guest-token"
 
 func TestProfilePreservesExplicitRootDebugAndDefaultsOmittedIdentity(t *testing.T) {
 	f := newCoreFixture(t)
@@ -95,7 +94,7 @@ func (p *fakeCoreProvider) Guest(_ context.Context, _ boxprovider.Handle) (boxpr
 	if !p.created {
 		return boxprovider.Connection{}, boxprovider.ErrNotFound
 	}
-	return boxprovider.Connection{URL: p.guestURL, Token: testGuestToken}, nil
+	return boxprovider.Connection{URL: p.guestURL}, nil
 }
 func (p *fakeCoreProvider) guestCount() int          { p.mu.Lock(); defer p.mu.Unlock(); return p.guestCalls }
 func (p *fakeCoreProvider) setExecutionID(id string) { p.mu.Lock(); p.executionID = id; p.mu.Unlock() }
@@ -118,7 +117,7 @@ func newCoreFixture(t *testing.T) *coreFixture {
 	t.Helper()
 	f := &coreFixture{}
 	f.guest = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+testGuestToken {
+		if r.Header.Get("Authorization") != "" {
 			http.Error(w, "unauthorized", 401)
 			return
 		}

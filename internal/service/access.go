@@ -130,8 +130,6 @@ func (s *Service) gateway(w http.ResponseWriter, r *http.Request, routeID, tail 
 		fail(w, err)
 		return
 	}
-	// Authorization belongs to the application now; Cellbox has no bearer gate.
-	upstreamAuth := r.Header.Get("Authorization")
 	escapedTail := r.URL.EscapedPath()
 	if !hostMode {
 		escapedTail = strings.TrimPrefix(escapedTail, "/s/"+routeID)
@@ -139,7 +137,7 @@ func (s *Service) gateway(w http.ResponseWriter, r *http.Request, routeID, tail 
 			escapedTail = "/"
 		}
 	}
-	s.proxyService(w, r, ctx, conn, route.Port, tail, escapedTail, upstreamAuth)
+	s.proxyService(w, r, ctx, conn, route.Port, tail, escapedTail)
 }
 
 // Internal product connections use their live stream as the lifecycle fence;
@@ -170,10 +168,10 @@ func (s *Service) internalService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	prefix := "/v1/boxes/" + url.PathEscape(b.Box.ID) + "/services/" + r.PathValue("port")
-	s.proxyService(w, r, ctx, conn, port, "/"+r.PathValue("path"), strings.TrimPrefix(r.URL.EscapedPath(), prefix), r.Header.Get("Authorization"))
+	s.proxyService(w, r, ctx, conn, port, "/"+r.PathValue("path"), strings.TrimPrefix(r.URL.EscapedPath(), prefix))
 }
 
-func (s *Service) proxyService(w http.ResponseWriter, r *http.Request, ctx context.Context, conn boxprovider.Connection, port int, tail, escapedTail, upstreamAuth string) {
+func (s *Service) proxyService(w http.ResponseWriter, r *http.Request, ctx context.Context, conn boxprovider.Connection, port int, tail, escapedTail string) {
 	target, err := url.Parse(conn.URL)
 	if err != nil {
 		fail(w, err)
@@ -184,17 +182,12 @@ func (s *Service) proxyService(w http.ResponseWriter, r *http.Request, ctx conte
 		p.Out.URL.Path = "/proxy/" + strconv.Itoa(port) + tail
 		p.Out.URL.RawPath = "/proxy/" + strconv.Itoa(port) + escapedTail
 		p.Out.Host = target.Host
-		// Neither callers nor an application can inject control-plane credentials.
+		// Preserve application Authorization while removing proxy control headers.
 		for name := range p.Out.Header {
 			lower := strings.ToLower(name)
 			if strings.HasPrefix(lower, "x-cellbox-") || strings.HasPrefix(lower, "x-forwarded-") || lower == "forwarded" || lower == "proxy-authorization" {
 				p.Out.Header.Del(name)
 			}
-		}
-		p.Out.Header.Del("Authorization")
-		p.Out.Header.Set("Authorization", "Bearer "+conn.Token)
-		if upstreamAuth != "" {
-			p.Out.Header.Set("X-Cellbox-Upstream-Authorization", upstreamAuth)
 		}
 	}, Transport: streamTransport{s.http.Transport}, ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 		fail(w, apiError("UPSTREAM_UNAVAILABLE", "Box service is unavailable"))
