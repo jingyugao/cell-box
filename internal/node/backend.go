@@ -31,11 +31,15 @@ type Backend struct {
 	Images             cri.ImageServiceClient
 	// Objects is optional for local-only installations. When configured, sealed
 	// snapshots are durable in object storage and Base is only a node cache.
-	Objects        objectstorage.Objects
-	forgetMu       sync.Mutex
-	forgetSuccess  map[forgetKey]struct{}
-	inventoryMu    sync.Mutex
-	inventoryState map[string]string
+	Objects           objectstorage.Objects
+	forgetMu          sync.Mutex
+	forgetSuccess     map[forgetKey]struct{}
+	inventoryMu       sync.Mutex
+	inventoryLocks    sync.Map
+	inventoryState    map[string]string
+	inventoryVersions map[string]string
+	durableMu         sync.Mutex
+	durableSnapshots  map[string]bool
 }
 
 type forgetKey struct {
@@ -121,7 +125,7 @@ func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.P
 		return err
 	}
 	if _, err = os.Stat(path); err == nil {
-		if _, err = Verify(path, string(r.UID), r.Status.SpecHash, b.Runsc); err != nil {
+		if _, err = VerifyCached(path, string(r.UID), r.Status.SpecHash, b.Runsc); err != nil {
 			return err
 		}
 		return b.uploadSnapshot(ctx, r, path)
@@ -196,11 +200,14 @@ func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.P
 	if err = SyncDir(filepath.Dir(path)); err != nil {
 		return err
 	}
+	if _, err = VerifyCached(path, string(r.UID), r.Status.SpecHash, b.Runsc); err != nil {
+		return err
+	}
 	return b.uploadSnapshot(ctx, r, path)
 }
 
 func (b *Backend) verifySnapshotImage(ctx context.Context, r *api.ResumablePod, path string) (*Manifest, error) {
-	m, err := Verify(path, string(r.UID), r.Status.SpecHash, b.Runsc)
+	m, err := VerifyCached(path, string(r.UID), r.Status.SpecHash, b.Runsc)
 	if err != nil {
 		return nil, err
 	}
@@ -214,8 +221,11 @@ func (b *Backend) verifySnapshotImage(ctx context.Context, r *api.ResumablePod, 
 	return m, nil
 }
 
-func (b *Backend) Prepare(ctx context.Context, r *api.ResumablePod, p *core.Pod) error {
+func (b *Backend) prepareSnapshot(ctx context.Context, r *api.ResumablePod) error {
 	if r.Status.Snapshot != "" {
+		if b.snapshotConsumed(string(r.UID), r.Status.Snapshot) {
+			return fmt.Errorf("checkpoint was consumed by a previous execution")
+		}
 		path, err := SnapshotPath(b.Base, string(r.UID), r.Status.Snapshot)
 		if err != nil {
 			return err
@@ -236,11 +246,22 @@ func (b *Backend) Prepare(ctx context.Context, r *api.ResumablePod, p *core.Pod)
 			return err
 		}
 	}
+	return nil
+}
+
+func (b *Backend) Prepare(ctx context.Context, r *api.ResumablePod, p *core.Pod) error {
+	if err := b.prepareSnapshot(ctx, r); err != nil {
+		return err
+	}
 	return AtomicJSON(filepath.Join(b.Base, "tickets", string(p.UID)+".json"), Ticket{OwnerUID: string(r.UID), PodUID: string(p.UID), Namespace: p.Namespace, PodName: p.Name, Snapshot: r.Status.Snapshot, SpecHash: r.Status.SpecHash})
 }
 func (b *Backend) Cleanup(ctx context.Context, p *core.Pod) error {
 	if p.UID == "" {
 		return nil
+	}
+	// Retire a warm lease before revoking tickets or touching the runtime.
+	if err := RetireWarm(b.Base, string(p.UID)); err != nil {
+		return err
 	}
 	// Revoke tickets before terminating runtimes; failed/retried creates cannot restore again.
 	if err := os.Remove(filepath.Join(b.Base, "tickets", string(p.UID)+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -304,6 +325,9 @@ func (b *Backend) Cleanup(ctx context.Context, p *core.Pod) error {
 			}
 		}
 	}
+	if err = b.removeChildren(string(p.UID)); err != nil {
+		return err
+	}
 	if err = os.Remove(filepath.Join(b.Base, "claims", string(p.UID))); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -328,7 +352,17 @@ func (b *Backend) Forget(ctx context.Context, r *api.ResumablePod) error {
 		}
 		b.clearInventoryState(key.owner)
 	}
+	b.durableMu.Lock()
+	for k := range b.durableSnapshots {
+		if strings.HasPrefix(k, string(r.UID)+"/") {
+			delete(b.durableSnapshots, k)
+		}
+	}
+	b.durableMu.Unlock()
 	if err := os.RemoveAll(filepath.Join(b.Base, "workloads", string(r.UID))); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(filepath.Join(b.Base, "garbage", string(r.UID))); err != nil {
 		return err
 	}
 	if b.Objects != nil && !deleting {

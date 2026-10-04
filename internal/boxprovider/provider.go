@@ -12,6 +12,7 @@ import (
 var ErrNotFound = errors.New("runtime not found")
 var ErrUnsupported = errors.New("unsupported runtime operation")
 var ErrStaleExecution = errors.New("runtime execution changed")
+var ErrNotReady = errors.New("current runtime is not ready")
 
 type Spec struct {
 	Inventory              json.RawMessage
@@ -61,6 +62,11 @@ type Provider interface {
 // connection, avoiding a second, independent lifecycle inspection.
 type FencedGuestProvider interface {
 	GuestForExecution(context.Context, Handle, string) (Connection, error)
+}
+
+// ChangeProvider wakes lifecycle waiters when the runtime resource changes.
+type ChangeProvider interface {
+	WatchChanges(context.Context, Handle) (<-chan struct{}, error)
 }
 
 // InventoryProvider enumerates workloads from the runtime, without the service ledger.

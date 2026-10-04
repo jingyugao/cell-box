@@ -17,6 +17,7 @@ import (
 	"os"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	controlleroptions "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metrics "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
@@ -30,6 +31,8 @@ func main() {
 func run() error {
 	var nodeName, namespace, leaderNamespace, socket, objectStorageConfig string
 	var showVersion, hostMountNamespace bool
+	var warmPoolSize int
+	flag.IntVar(&warmPoolSize, "warm-pool-size", 2, "maximum unassigned warm Pods per node (0 disables, one extra during rotation)")
 	flag.BoolVar(&showVersion, "version", false, "print build version and exit")
 	flag.BoolVar(&hostMountNamespace, "host-mount-namespace", false, "run runsc in the host mount/root namespace (requires privileged hostPID Pod)")
 	flag.StringVar(&nodeName, "node", "", "Kubernetes node name (must equal kubernetes.io/hostname)")
@@ -41,6 +44,9 @@ func run() error {
 	if showVersion {
 		fmt.Println(version.String("cellbox-node-controller"))
 		return nil
+	}
+	if warmPoolSize < 0 || warmPoolSize > 32 {
+		return fmt.Errorf("warm pool size must be between 0 and 32")
 	}
 	if nodeName == "" {
 		return fmt.Errorf("--node is required")
@@ -83,7 +89,15 @@ func run() error {
 		return err
 	}
 	r.Client = direct
-	if err = ctrl.NewControllerManagedBy(mgr).For(&api.ResumablePod{}).Owns(&core.Pod{}).Complete(r); err != nil {
+	pool := &controller.WarmPool{Reconciler: r, Namespace: namespace, Size: warmPoolSize}
+	r.WarmPool = pool
+	if err = mgr.Add(pool); err != nil {
+		return err
+	}
+	if err = mgr.Add(&node.GarbageCollector{Backend: backend}); err != nil {
+		return err
+	}
+	if err = ctrl.NewControllerManagedBy(mgr).For(&api.ResumablePod{}).Owns(&core.Pod{}).WithOptions(controlleroptions.Options{MaxConcurrentReconciles: 4}).Complete(r); err != nil {
 		return err
 	}
 	return mgr.Start(ctrl.SetupSignalHandler())

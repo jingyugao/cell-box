@@ -40,11 +40,18 @@ func (b *Backend) uploadSnapshot(ctx context.Context, r *api.ResumablePod, snaps
 	if err != nil {
 		return err
 	}
-	if _, err = Verify(snapshotPath, string(r.UID), r.Status.SpecHash, b.Runsc); err != nil {
+	if _, err = VerifyCached(snapshotPath, string(r.UID), r.Status.SpecHash, b.Runsc); err != nil {
 		return err
+	}
+	b.durableMu.Lock()
+	durable := b.durableSnapshots[string(r.UID)+"/"+r.Status.Snapshot]
+	b.durableMu.Unlock()
+	if durable {
+		return nil
 	}
 	if body, _, _, getErr := b.Objects.Get(ctx, key); getErr == nil {
 		_ = body.Close()
+		b.rememberDurable(r)
 		b.clearForgetSuccess(r)
 		return nil
 	} else if !errors.Is(getErr, objectstorage.ErrNotFound) {
@@ -141,6 +148,7 @@ func (b *Backend) uploadSnapshot(ctx context.Context, r *api.ResumablePod, snaps
 	if err != nil {
 		err = retryableStorage(err)
 	} else {
+		b.rememberDurable(r)
 		b.clearForgetSuccess(r)
 	}
 	if closeErr := tmp.Close(); err == nil {
@@ -232,7 +240,11 @@ func (b *Backend) downloadSnapshot(ctx context.Context, r *api.ResumablePod, fin
 	if err = os.Rename(stage, finalPath); err != nil {
 		return err
 	}
-	return SyncDir(filepath.Dir(finalPath))
+	if err = SyncDir(filepath.Dir(finalPath)); err != nil {
+		return err
+	}
+	b.rememberDurable(r)
+	return nil
 }
 
 type archiveFileWriter struct {
@@ -345,4 +357,13 @@ func extractCheckpointArchive(archivePath, destination string) error {
 		}
 	}
 	return SyncDir(destination)
+}
+
+func (b *Backend) rememberDurable(r *api.ResumablePod) {
+	b.durableMu.Lock()
+	defer b.durableMu.Unlock()
+	if b.durableSnapshots == nil {
+		b.durableSnapshots = map[string]bool{}
+	}
+	b.durableSnapshots[string(r.UID)+"/"+r.Status.Snapshot] = true
 }

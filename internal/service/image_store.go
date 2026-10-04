@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -48,14 +49,51 @@ func readObject(ctx context.Context, objects objectstorage.Objects, key string) 
 	if int64(len(data)) != size {
 		return nil, "", errors.New("metadata object size mismatch")
 	}
+	if len(data) >= 2 && data[0] == 0x1f && data[1] == 0x8b {
+		compressed, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return nil, "", err
+		}
+		data, err = io.ReadAll(io.LimitReader(compressed, stateObjectLimit+1))
+		closeErr := compressed.Close()
+		if err != nil {
+			return nil, "", err
+		}
+		if closeErr != nil {
+			return nil, "", closeErr
+		}
+		if len(data) == 0 || int64(len(data)) > stateObjectLimit {
+			return nil, "", errors.New("invalid expanded metadata object size")
+		}
+	}
 	return data, etag, nil
 }
 func writeObject(ctx context.Context, objects objectstorage.Objects, key string, data []byte, before string) (string, error) {
+	if len(data) == 0 || int64(len(data)) > stateObjectLimit {
+		return "", errors.New("invalid metadata object size")
+	}
+	wire := data
+	// Operation/idempotency histories contain repeated JSON keys and IDs.
+	// Compress larger objects so their growth does not add network round trips
+	// to each lifecycle commit. Small metadata stays directly readable JSON.
+	if len(data) >= 16<<10 {
+		var buffer bytes.Buffer
+		compressor, _ := gzip.NewWriterLevel(&buffer, gzip.BestSpeed)
+		if _, err := compressor.Write(data); err != nil {
+			return "", err
+		}
+		if err := compressor.Close(); err != nil {
+			return "", err
+		}
+		if buffer.Len() < len(data) {
+			wire = buffer.Bytes()
+		}
+	}
 	condition := before
 	if condition == "" {
 		condition = "*"
 	}
-	etag, err := objects.Put(ctx, key, bytes.NewReader(data), int64(len(data)), condition)
+	etag, err := objects.Put(ctx, key, bytes.NewReader(wire), int64(len(wire)), condition)
 	if err == nil && etag != "" {
 		return etag, nil
 	}

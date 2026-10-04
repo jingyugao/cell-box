@@ -28,6 +28,7 @@ type memoryObjects struct {
 	objects          map[string][]byte
 	putFailures      int
 	putCalls         int
+	getCalls         int
 	deleteFailures   int
 	deleteCalls      int
 	deletedPrefix    string
@@ -35,6 +36,7 @@ type memoryObjects struct {
 }
 
 func (m *memoryObjects) Get(_ context.Context, key string) (io.ReadCloser, int64, string, error) {
+	m.getCalls++
 	b, ok := m.objects[key]
 	if !ok {
 		return nil, 0, "", objectstorage.ErrNotFound
@@ -444,12 +446,14 @@ func TestSuspendedInventoryPublishesAfterSnapshotAndRepairsAfterRestart(t *testi
 		t.Fatal("suspended inventory index was not repaired")
 	}
 
-	// A resume updates the lifecycle phase but retains the checkpoint until Forget.
+	// Resume state belongs to the CR/API; the durable checkpoint descriptor
+	// stays unchanged until invalidation, with no redundant OSS write.
+	puts := objects.putCalls
 	resume := workload.DeepCopy()
 	resume.Spec.DesiredState = "Running"
 	resume.Status.Phase = "Restoring"
 	resume.Status.Cycle++
-	if err = restarted.SyncInventory(context.Background(), resume); err != nil {
+	if err = restarted.SyncInventory(context.Background(), resume); err != nil || objects.putCalls != puts {
 		t.Fatal("update index before restore:", err)
 	}
 	if _, ok := objects.objects[indexKey]; !ok {
@@ -463,7 +467,7 @@ func TestSuspendedInventoryPublishesAfterSnapshotAndRepairsAfterRestart(t *testi
 		t.Fatal(err)
 	}
 	phase = ""
-	if err = json.Unmarshal(publishedBox["phase"], &phase); err != nil || phase != "resuming" {
+	if err = json.Unmarshal(publishedBox["phase"], &phase); err != nil || phase != "suspended" {
 		t.Fatalf("resume index phase = %q, err=%v", phase, err)
 	}
 	if err = restarted.Forget(context.Background(), resume); err != nil {
@@ -556,3 +560,69 @@ func TestSuspendedInventoryRequiresDurableSnapshot(t *testing.T) {
 }
 
 func typesUID(s string) types.UID { return types.UID(s) }
+
+func TestWarmPrepareUsesLocalCacheAndRestartRechecksDurability(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	bin := filepath.Join(base, "runsc")
+	if err := os.WriteFile(bin, []byte("runtime"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	objects := &memoryObjects{}
+	w := testWorkload("owner", "snapshot", "spec", "image")
+	p := &core.Pod{ObjectMeta: meta.ObjectMeta{UID: "pod", Name: "pod", Namespace: "test"}}
+	path := testCheckpoint(t, base, "owner", "snapshot", "spec", "image-id", bin)
+	b := &Backend{Base: base, Runsc: bin, Objects: objects, Images: imageClient{id: "image-id"}}
+	if err := b.Checkpoint(ctx, w, nil); err != nil {
+		t.Fatal(err)
+	}
+	gets, puts := objects.getCalls, objects.putCalls
+	if err := b.Prepare(ctx, w, p); err != nil {
+		t.Fatal(err)
+	}
+	if objects.getCalls != gets || objects.putCalls != puts {
+		t.Fatal("warm prepare accessed OSS")
+	}
+	if _, err := VerifyPrepared(path, "owner", "spec", bin); err != nil {
+		t.Fatal(err)
+	}
+	restarted := &Backend{Base: base, Runsc: bin, Objects: objects, Images: imageClient{id: "image-id"}}
+	if err := restarted.Prepare(ctx, w, p); err != nil {
+		t.Fatal(err)
+	}
+	if objects.getCalls != gets+1 || objects.putCalls != puts {
+		t.Fatal("restart must reestablish remote durability once")
+	}
+	if err := restarted.Prepare(ctx, w, p); err != nil {
+		t.Fatal(err)
+	}
+	if objects.getCalls != gets+1 {
+		t.Fatal("repeated prepare re-read OSS")
+	}
+	for _, change := range []string{"file", "runtime"} {
+		target := filepath.Join(path, "checkpoint.img")
+		if change == "runtime" {
+			target = bin
+		}
+		before, _ := os.Stat(target)
+		data, _ := os.ReadFile(target)
+		data[0] ^= 1
+		if err := os.WriteFile(target, data, before.Mode()); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(target, before.ModTime(), before.ModTime()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := VerifyPrepared(path, "owner", "spec", bin); err == nil {
+			t.Fatal("changed file accepted", change)
+		}
+		if _, err := VerifyCached(path, "owner", "spec", bin); err == nil {
+			t.Fatal("corrupt file revalidated", change)
+		}
+		data[0] ^= 1
+		os.WriteFile(target, data, before.Mode())
+		if _, err := VerifyCached(path, "owner", "spec", bin); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

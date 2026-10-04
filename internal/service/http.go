@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -319,7 +320,16 @@ func (s *Service) operation(client, id string) (Operation, error) {
 	return s.store.Operation(client, id)
 }
 func (s *Service) getOperation(w http.ResponseWriter, r *http.Request) {
-	op, err := s.operation(clientID(r), r.PathValue("id"))
+	wait := 0
+	if value := r.URL.Query().Get("waitMs"); value != "" {
+		var err error
+		wait, err = strconv.Atoi(value)
+		if err != nil || wait < 0 || wait > 10000 {
+			fail(w, apiError("INVALID_REQUEST", "waitMs must be 0..10000"))
+			return
+		}
+	}
+	op, err := s.waitOperation(r.Context(), clientID(r), r.PathValue("id"), time.Duration(wait)*time.Millisecond)
 	if err != nil {
 		fail(w, err)
 		return
@@ -364,6 +374,11 @@ func (s *Service) operationEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	version := uint64(0)
 	for {
+		changed := s.store.Changes()
+		op, err = s.operation(clientID(r), op.ID)
+		if err != nil {
+			return
+		}
 		if op.Version != version {
 			data, _ := json.Marshal(op)
 			fmt.Fprintf(w, "id: %d\nevent: snapshot\ndata: %s\n\n", op.Version, data)
@@ -378,11 +393,8 @@ func (s *Service) operationEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-s.ctx.Done():
 			return
-		case <-time.After(time.Second):
-			op, err = s.operation(clientID(r), op.ID)
-			if err != nil {
-				return
-			}
+		case <-changed:
+		case <-time.After(15 * time.Second):
 			fmt.Fprint(w, ": keepalive\n\n")
 			f.Flush()
 		}

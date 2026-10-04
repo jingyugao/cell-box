@@ -204,10 +204,26 @@ func TestLifecycleAndGuestIdentity(t *testing.T) {
 	if err != nil || obs.Phase != "running" || obs.ExecutionID != "pod-uid" || obs.Generation != 7 {
 		t.Fatalf("not-ready Pod changed lifecycle: %#v %v", obs, err)
 	}
-	if _, err = p.Guest(ctx, h); !errors.Is(err, errNotReady) {
+	if _, err = p.Guest(ctx, h); !errors.Is(err, boxprovider.ErrNotReady) {
 		t.Fatalf("Guest accepted a not-ready Pod: %v", err)
 	}
 	pod.Status.Conditions[0].Status = core.ConditionTrue
+	if err = p.Client.Status().Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = p.Guest(ctx, h); !errors.Is(err, boxprovider.ErrNotReady) {
+		t.Fatalf("Guest accepted a Pod before the controller allowed traffic: %v", err)
+	}
+	pod.Labels = map[string]string{api.ServingLabel: "true"}
+	if err = p.Client.Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = p.Guest(ctx, h); !errors.Is(err, boxprovider.ErrNotReady) {
+		t.Fatalf("Guest accepted a Pod without an IP address: %v", err)
+	}
+	pod.Status.PodIP = "10.42.0.12"
+	pod.Status.ContainerStatuses = []core.ContainerStatus{{Name: w.Spec.Container.Name, ContainerID: "containerd://one", State: core.ContainerState{Running: &core.ContainerStateRunning{}}}}
+	pod.Status.Conditions[0].Status = core.ConditionFalse
 	if err = p.Client.Status().Update(ctx, pod); err != nil {
 		t.Fatal(err)
 	}
@@ -219,8 +235,11 @@ func TestLifecycleAndGuestIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if conn.URL != "http://cellbox-box-1.boxes.svc:40000" {
+	if conn.URL != "http://10.42.0.12:40000" {
 		t.Fatalf("guest: %#v", conn)
+	}
+	if _, err = p.GuestForExecution(ctx, h, "old-pod"); !errors.Is(err, boxprovider.ErrStaleExecution) {
+		t.Fatalf("Guest accepted a stale execution: %v", err)
 	}
 	originalClient := p.Client
 	p.Client = podGetHookClient{Client: originalClient, afterPodGet: func() {
@@ -300,6 +319,19 @@ func TestInspectRejectsExecutionSwitchDuringPodRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := p.Client
+	p.Client = podGetHookClient{Client: base, afterPodGet: func() {
+		latest := &api.ResumablePod{}
+		if err := base.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, latest); err != nil {
+			t.Fatal(err)
+		}
+		latest.Status.Conditions = []meta.Condition{{Type: "Ready", Status: meta.ConditionTrue, Reason: "ProbeCompleted", LastTransitionTime: meta.Now()}}
+		if err := base.Status().Update(ctx, latest); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	if observed, err := p.Inspect(ctx, h); err != nil || observed.Phase != "running" {
+		t.Fatalf("readiness-only update interrupted execution observation: %+v %v", observed, err)
+	}
 	p.Client = podGetHookClient{Client: base, afterPodGet: func() {
 		latest := &api.ResumablePod{}
 		if getErr := base.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, latest); getErr != nil {

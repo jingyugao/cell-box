@@ -31,10 +31,17 @@ type Reconciler struct {
 	client.Client
 	Runtime  runtime.Backend
 	NodeName string
+	WarmPool *WarmPool
 }
 
 type inventoryRuntime interface {
 	SyncInventory(context.Context, *api.ResumablePod) error
+}
+type snapshotInvalidator interface {
+	InvalidateSnapshot(context.Context, *api.ResumablePod) error
+}
+type executionRuntime interface {
+	WaitWarmStarted(context.Context, *api.ResumablePod, *core.Pod) (*api.Execution, error)
 }
 
 func (r *Reconciler) syncInventoryPhase(ctx context.Context, w *api.ResumablePod, phase string) error {
@@ -51,7 +58,7 @@ var again = ctrl.Result{RequeueAfter: time.Second}
 var errServiceCollision = stderrors.New("Service name is already owned by another workload")
 var pullableImage = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}$`)
 
-func (r *Reconciler) phase(ctx context.Context, w *api.ResumablePod, phase, message string) (ctrl.Result, error) {
+func (r *Reconciler) phase(ctx context.Context, w *api.ResumablePod, phase, message string, podReady ...bool) (ctrl.Result, error) {
 	w.Status.Message = message
 	if err := r.syncInventoryPhase(ctx, w, phase); err != nil {
 		return again, err
@@ -64,7 +71,11 @@ func (r *Reconciler) phase(ctx context.Context, w *api.ResumablePod, phase, mess
 	w.Status.ObservedGeneration = w.Generation
 	ready := meta.ConditionFalse
 	if phase == "Running" {
-		ready = meta.ConditionTrue
+		if len(podReady) == 0 {
+			ready = meta.ConditionUnknown
+		} else if podReady[0] {
+			ready = meta.ConditionTrue
+		}
 	}
 	apimeta.SetStatusCondition(&w.Status.Conditions, meta.Condition{Type: "Ready", Status: ready, Reason: phase, Message: message, ObservedGeneration: w.Generation})
 	return again, r.Status().Update(ctx, w)
@@ -261,14 +272,80 @@ func (r *Reconciler) startupFailure(ctx context.Context, p *core.Pod) string {
 	return message
 }
 func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (ctrl.Result, error) {
+	started := time.Now()
+	defer func() {
+		ctrl.LoggerFrom(ctx).Info("execution preparation finished", "podUID", w.Status.PodUID, "durationMs", time.Since(started).Milliseconds())
+	}()
+	var warm *core.Pod
 	w.Status.Cycle++
 	w.Status.PodName = fmt.Sprintf("cb-%s-%d", string(w.UID)[:8], w.Status.Cycle)
 	w.Status.PodUID = ""
+	w.Status.Execution = nil
+	if w.Status.Snapshot != "" && r.WarmPool != nil {
+		p, err := r.WarmPool.acquire(ctx, w)
+		if err != nil {
+			return again, err
+		}
+		if p != nil {
+			warm = p
+			w.Status.PodName = p.Name
+			w.Status.PodUID = string(p.UID)
+		}
+		ctrl.LoggerFrom(ctx).Info("warm Pod acquisition finished", "podUID", w.Status.PodUID, "durationMs", time.Since(started).Milliseconds())
+	}
 	phase := "Creating"
 	if w.Status.Snapshot != "" {
 		phase = "Restoring"
 	}
-	return r.phase(ctx, w, phase, "Preparing a new Pod execution")
+	result, err := r.phase(ctx, w, phase, "Preparing a new Pod execution")
+	ctrl.LoggerFrom(ctx).Info("execution assignment persisted", "podUID", w.Status.PodUID, "durationMs", time.Since(started).Milliseconds())
+	if err == nil && warm != nil {
+		if backend, ok := r.Runtime.(warmRuntime); ok {
+			_, err = backend.ActivateWarm(ctx, w, warm)
+		}
+		if err == nil {
+			return r.waitWarmStarted(ctx, w, warm)
+		}
+	}
+	return result, err
+}
+
+func (r *Reconciler) waitWarmStarted(ctx context.Context, w *api.ResumablePod, p *core.Pod) (ctrl.Result, error) {
+	backend, ok := r.Runtime.(executionRuntime)
+	if !ok {
+		return again, nil
+	}
+	execution, err := backend.WaitWarmStarted(ctx, w, p)
+	if err != nil {
+		return again, err
+	}
+	if execution == nil {
+		return ctrl.Result{RequeueAfter: 50 * time.Millisecond}, nil
+	}
+	if execution.PodUID != string(p.UID) || execution.PodUID != w.Status.PodUID {
+		return again, fmt.Errorf("runtime reported another execution")
+	}
+	w.Status.Execution = execution
+	return r.started(ctx, w, p)
+}
+
+func (r *Reconciler) started(ctx context.Context, w *api.ResumablePod, p *core.Pod) (ctrl.Result, error) {
+	if backend, ok := r.Runtime.(snapshotInvalidator); ok && w.Status.Snapshot != "" {
+		if err := backend.InvalidateSnapshot(ctx, w); err != nil {
+			return again, err
+		}
+	}
+	// Replay eligibility is removed durably before either the Service or the
+	// API may connect. Publish Running last so its notification is actionable.
+	w.Status.Snapshot = ""
+	if _, ok := r.Runtime.(snapshotInvalidator); ok {
+		if err := r.serving(ctx, p, true); err != nil {
+			return again, err
+		}
+	}
+	result, err := r.phase(ctx, w, "Running", "Container started; previous snapshot cannot be replayed", ready(p))
+	ctrl.LoggerFrom(ctx).Info("execution started", "podUID", w.Status.PodUID, "podReady", ready(p))
+	return result, err
 }
 func (r *Reconciler) service(ctx context.Context, w *api.ResumablePod) error {
 	if len(w.Spec.ServicePorts) == 0 {
@@ -378,6 +455,12 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if w.Status.Phase != "Deleting" {
 			return r.phase(ctx, w, "Deleting", "Reclaiming Pod runtime and checkpoint storage")
 		}
+		if r.WarmPool != nil {
+			done, err := r.WarmPool.cleanupUnused(ctx, w)
+			if err != nil || !done {
+				return again, err
+			}
+		}
 		done, err := r.removePod(ctx, w, p)
 		if err != nil || !done {
 			return again, err
@@ -449,12 +532,7 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			if w.Status.PodUID != "" {
 				return fail(fmt.Errorf("Pod disappeared during startup; refusing replacement"))
 			}
-			no := false
-			grace := int64(3)
-			runtime := api.RuntimeClass
-			container := *w.Spec.Container.DeepCopy()
-			container.VolumeMounts = hostMounts(w)
-			p = &core.Pod{ObjectMeta: meta.ObjectMeta{Name: w.Status.PodName, Namespace: w.Namespace, Labels: map[string]string{api.OwnerLabel: string(w.UID)}}, Spec: core.PodSpec{Containers: []core.Container{container}, Volumes: hostVolumes(w), RuntimeClassName: &runtime, RestartPolicy: core.RestartPolicyNever, AutomountServiceAccountToken: &no, EnableServiceLinks: &no, Hostname: "recoverable", TerminationGracePeriodSeconds: &grace, NodeSelector: map[string]string{"kubernetes.io/hostname": w.Spec.NodeName}, SchedulingGates: []core.PodSchedulingGate{{Name: api.Gate}}}}
+			p = executionPod(w, w.Status.PodName)
 			if err = controllerutil.SetControllerReference(w, p, r.Scheme()); err != nil {
 				return again, err
 			}
@@ -494,6 +572,21 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			p.Spec.SchedulingGates = nil
 			return again, r.Patch(ctx, p, client.MergeFrom(old))
 		}
+		if backend, ok := r.Runtime.(warmRuntime); ok && p.Labels[warmLabel] == "true" {
+			if _, err = backend.ActivateWarm(ctx, w, p); err != nil {
+				if stderrors.Is(err, runtime.ErrWarmExpired) {
+					if _, err = r.removePod(ctx, w, p); err != nil {
+						return again, err
+					}
+					return r.begin(ctx, w)
+				}
+				if stderrors.Is(err, runtime.ErrRetryableStorage) {
+					return again, err
+				}
+				return fail(err)
+			}
+		}
+
 		if p.Status.Phase == core.PodFailed || p.Status.Phase == core.PodSucceeded {
 			return fail(fmt.Errorf("Pod exited during startup: %s", podFailure(p)))
 		}
@@ -502,11 +595,8 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 				return fail(fmt.Errorf("unexpected container restart"))
 			}
 		}
-		if ready(p) {
-			// Persist snapshot invalidation before exposing this execution through
-			// the Service. A crash between these steps must not permit rollback.
-			w.Status.Snapshot = ""
-			return r.phase(ctx, w, "Running", "Pod is ready; previous snapshot cannot be replayed")
+		if api.ExecutionStarted(p, w.Spec.Container.Name) {
+			return r.started(ctx, w, p)
 		}
 		timeout := w.Spec.StartupTimeoutSeconds
 		if timeout == 0 {
@@ -515,12 +605,17 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if time.Since(w.Status.Since.Time) > time.Duration(timeout)*time.Second {
 			return fail(fmt.Errorf("startup timeout: %s", r.startupFailure(ctx, p)))
 		}
+		if p.Labels[warmLabel] == "true" {
+			return r.waitWarmStarted(ctx, w, p)
+		}
 	case "Running":
 		if p == nil || p.DeletionTimestamp != nil || p.Status.Phase == core.PodFailed || p.Status.Phase == core.PodSucceeded {
 			return fail(fmt.Errorf("active execution lost; no automatic rollback or cold start"))
 		}
-		if err = r.Runtime.Forget(ctx, w); err != nil {
-			return again, err
+		if _, asyncCleanup := r.Runtime.(snapshotInvalidator); !asyncCleanup {
+			if err = r.Runtime.Forget(ctx, w); err != nil {
+				return again, err
+			}
 		}
 		if w.Spec.DesiredState == "Suspended" {
 			if err = r.serving(ctx, p, false); err != nil {
@@ -529,7 +624,7 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			w.Status.Snapshot = fmt.Sprintf("checkpoint-%d", w.Status.Cycle)
 			return r.phase(ctx, w, "Checkpointing", "Service endpoint withdrawn; saving sandbox")
 		}
-		if err = r.serving(ctx, p, ready(p)); err != nil {
+		if err = r.serving(ctx, p, api.AvailableExecution(w, p)); err != nil {
 			return again, err
 		}
 		condition := meta.ConditionFalse

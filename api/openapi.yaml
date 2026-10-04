@@ -1322,6 +1322,9 @@ paths:
       description: An active operation, service request, or unexpired usage lease
         blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
         never reruns an interrupted exec or resumes a failed archive restore.
+        Resume completion confirms the runtime is running and the Guest has been
+        unquiesced. Guest health checks run asynchronously and report diagnostics
+        without delaying completion or changing the box lifecycle phase.
       operationId: resumeBox
       parameters:
       - in: path
@@ -1479,6 +1482,14 @@ paths:
         required: true
         schema:
           type: string
+      - in: query
+        name: waitMs
+        description: Wait for completion notification for up to 10000ms. Disconnect does not cancel the operation.
+        schema:
+          type: integer
+          minimum: 0
+          maximum: 10000
+          default: 0
       responses:
         "200":
           content:
