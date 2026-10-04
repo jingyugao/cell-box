@@ -504,8 +504,11 @@ func (s *Service) beginIO(client, id string) (boxRecord, func(), error) {
 }
 
 func (s *Service) beginIOWithPolicy(client, id string, service bool) (boxRecord, func(), error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Share admission with lifecycle acceptance, including its durable commit.
+	// Never hold the stream mutex while waiting for the metadata store: writers
+	// inspect streams while holding the store lock.
+	unlockAdmission := s.admissions.lock(id)
+	defer unlockAdmission()
 	key := randomID("io-")
 	var b boxRecord
 	err := s.store.View(func(st State) error {
@@ -528,7 +531,9 @@ func (s *Service) beginIOWithPolicy(client, id string, service bool) (boxRecord,
 	if err != nil {
 		return b, nil, err
 	}
+	s.mu.Lock()
 	s.streams[key] = activeStream{boxID: id, cancel: func() {}}
+	s.mu.Unlock()
 	return b, func() { s.mu.Lock(); delete(s.streams, key); s.mu.Unlock() }, nil
 }
 func (s *Service) files(w http.ResponseWriter, r *http.Request) {
