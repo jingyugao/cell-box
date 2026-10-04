@@ -156,7 +156,14 @@ type executionRecord struct {
 	Execution
 	ResultObject string `json:"resultObject,omitempty"`
 }
+type purgeRecord struct {
+	ClientID string   `json:"clientId"`
+	Objects  []string `json:"objects,omitempty"`
+	Records  []string `json:"records,omitempty"`
+}
+
 type State struct {
+	Purges         map[string]purgeRecord         `json:"purges,omitempty"`
 	ImportedImages map[string]importedImageRecord `json:"importedImages"`
 	Schema         int                            `json:"schema"`
 	Boxes          map[string]boxRecord           `json:"boxes"`
@@ -171,5 +178,5 @@ type State struct {
 const stateSchema = 3
 
 func newState() State {
-	return State{ImportedImages: map[string]importedImageRecord{}, Schema: stateSchema, Boxes: map[string]boxRecord{}, Operations: map[string]operationRecord{}, Executions: map[string]executionRecord{}, Leases: map[string]Lease{}, Routes: map[string]Route{}, Archives: map[string]archiveRecord{}, Keys: map[string]keyRecord{}}
+	return State{Purges: map[string]purgeRecord{}, ImportedImages: map[string]importedImageRecord{}, Schema: stateSchema, Boxes: map[string]boxRecord{}, Operations: map[string]operationRecord{}, Executions: map[string]executionRecord{}, Leases: map[string]Lease{}, Routes: map[string]Route{}, Archives: map[string]archiveRecord{}, Keys: map[string]keyRecord{}}
 }

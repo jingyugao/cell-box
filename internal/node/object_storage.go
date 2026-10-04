@@ -73,10 +73,11 @@ func (b *Backend) uploadSnapshot(ctx context.Context, r *api.ResumablePod, snaps
 	if len(names) > maxCheckpointFiles {
 		return fmt.Errorf("checkpoint contains too many files")
 	}
-	if err = os.MkdirAll(b.Base, 0700); err != nil {
+	ownerPath := filepath.Join(b.Base, "workloads", string(r.UID))
+	if err = os.MkdirAll(ownerPath, 0700); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(b.Base, ".checkpoint-upload-*.tar")
+	tmp, err := os.CreateTemp(ownerPath, ".checkpoint-upload-*.tar")
 	if err != nil {
 		return err
 	}
@@ -180,10 +181,11 @@ func (b *Backend) downloadSnapshot(ctx context.Context, r *api.ResumablePod, fin
 	if size < 0 || size > maxCheckpointArchiveBytes {
 		return fmt.Errorf("checkpoint archive exceeds size limit")
 	}
-	if err = os.MkdirAll(b.Base, 0700); err != nil {
+	ownerPath := filepath.Join(b.Base, "workloads", string(r.UID))
+	if err = os.MkdirAll(ownerPath, 0700); err != nil {
 		return err
 	}
-	archive, err := os.CreateTemp(b.Base, ".checkpoint-download-*.tar")
+	archive, err := os.CreateTemp(ownerPath, ".checkpoint-download-*.tar")
 	if err != nil {
 		return err
 	}

@@ -56,9 +56,19 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 	var objects objectstorage.Objects
 	var err error
 	if config.ObjectStorage != (objectstorage.Config{}) {
+		localLock, lockErr := lockDataDirectory(config.DataDir)
+		if lockErr != nil {
+			cancel()
+			return nil, lockErr
+		}
 		objects, err = objectstorage.New(ctx, config.ObjectStorage)
 		if err == nil {
 			store, err = OpenObjectStore(ctx, objects)
+		}
+		if err != nil {
+			localLock.Close()
+		} else {
+			store.dir, store.lock = config.DataDir, localLock
 		}
 	} else {
 		store, err = OpenStore(config.DataDir)
@@ -73,6 +83,11 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 		http:     &http.Client{Transport: &http.Transport{Proxy: nil, ResponseHeaderTimeout: 35 * time.Second}, CheckRedirect: noRedirect},
 		toolHTTP: &http.Client{Transport: &http.Transport{Proxy: nil, ResponseHeaderTimeout: 5*time.Minute + 5*time.Second}, CheckRedirect: noRedirect},
 		ctx:      ctx, cancel: cancel, streams: map[string]activeStream{}}
+	if err = s.cleanupStartupTemps(); err != nil {
+		cancel()
+		store.Close()
+		return nil, err
+	}
 	err = store.Update(func(st *State) error {
 		st.Routes = map[string]Route{}
 		now := time.Now().UTC()

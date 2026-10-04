@@ -243,7 +243,7 @@ func (s *Service) captureArchiveHTTP(ctx context.Context, b boxRecord) (Archive,
 	if err != nil {
 		return Archive{}, err
 	}
-	f, err := os.CreateTemp(dir, ".capture-*")
+	f, err := os.CreateTemp(dir, captureTempPrefix(b.Box.ID)+"*")
 	if err != nil {
 		return Archive{}, err
 	}
@@ -522,4 +522,97 @@ func (s *Service) deleteArchive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// Fixed-length ownership avoids a missing short ID matching another box's
+// capture prefix. Capture scratch content is never a retained archive.
+func captureTempPrefix(boxID string) string {
+	digest := sha256.Sum256([]byte(boxID))
+	return ".capture-" + hex.EncodeToString(digest[:]) + "-"
+}
+
+func regularTemps(dir string, matches func(string) bool) ([]string, error) {
+	if dir == "" {
+		return nil, nil
+	}
+	info, err := os.Lstat(dir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("temporary directory must be a real directory")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	names := []string{}
+	for _, entry := range entries {
+		if !matches(entry.Name()) {
+			continue
+		}
+		name := filepath.Join(dir, entry.Name())
+		info, err := os.Lstat(name)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if info.Mode().IsRegular() {
+			names = append(names, name)
+		}
+	}
+	return names, nil
+}
+
+func removeRegularTemps(dir string, matches func(string) bool) error {
+	names, err := regularTemps(dir, matches)
+	if err != nil {
+		return err
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	for _, name := range names {
+		if err := os.Remove(name); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	file, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return file.Sync()
+}
+
+func (s *Service) captureTemps(boxID string) ([]string, error) {
+	if s.config.DataDir == "" {
+		return nil, nil
+	}
+	return regularTemps(filepath.Join(s.config.DataDir, "archives"), func(name string) bool { return strings.HasPrefix(name, captureTempPrefix(boxID)) })
+}
+func (s *Service) cleanupCaptureTemps(boxID string) error {
+	if s.config.DataDir == "" {
+		return nil
+	}
+	return removeRegularTemps(filepath.Join(s.config.DataDir, "archives"), func(name string) bool { return strings.HasPrefix(name, captureTempPrefix(boxID)) })
+}
+
+// Called before any HTTP request or operation starts, while service.lock owns
+// the local data directory. Valid archive files and service metadata survive.
+func (s *Service) cleanupStartupTemps() error {
+	if s.store.lock == nil {
+		return errors.New("startup cleanup requires the data directory lock")
+	}
+	if err := removeRegularTemps(s.config.DataDir, func(name string) bool { return strings.HasPrefix(name, ".state-") }); err != nil {
+		return err
+	}
+	return removeRegularTemps(filepath.Join(s.config.DataDir, "archives"), func(name string) bool {
+		return strings.HasPrefix(name, ".capture-") || strings.HasPrefix(name, ".download-")
+	})
 }

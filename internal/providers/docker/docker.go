@@ -344,7 +344,7 @@ func (p *Provider) Destroy(ctx context.Context, h boxprovider.Handle) error {
 	if err != nil {
 		return err
 	}
-	_, err = p.run(ctx, []string{"rm", "--force", c.ID})
+	_, err = p.run(ctx, []string{"rm", "--force", "--volumes", c.ID})
 	if missing(err) {
 		return nil
 	}
