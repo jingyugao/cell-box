@@ -39,6 +39,7 @@ spec:
             - --namespace={{ .Release.Namespace }}
             - --leader-election-namespace={{ .Release.Namespace }}
             - --object-storage-config=/etc/cellbox-storage/config.json
+            - --warm-pool-size={{ if hasKey .Values.controller "warmPoolSize" }}{{ .Values.controller.warmPoolSize }}{{ else }}2{{ end }}
             - --host-mount-namespace
             - --cri-socket={{ .Values.controller.criSocket }}
           env:

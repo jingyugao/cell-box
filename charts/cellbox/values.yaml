@@ -24,6 +24,8 @@ controller:
   imagePullPolicy: IfNotPresent
   name: cellbox-controller
   serviceAccountName: cellbox-controller
+  # Shared across compatible container specs, plus one slot during rotation.
+  warmPoolSize: 2
   criDirectory: /run/containerd
   criSocket: /run/containerd/containerd.sock
   # Provision gVisor, the wrapper, and runtime configuration manually on each node.

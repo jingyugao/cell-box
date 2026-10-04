@@ -16,6 +16,9 @@ import (
 // checkpoint unrecoverable or fail an otherwise valid restore permanently.
 var ErrRetryableStorage = errors.New("retryable checkpoint storage failure")
 
+// ErrWarmExpired permits ordinary restore from the unchanged checkpoint.
+var ErrWarmExpired = errors.New("warm slot expired before assignment")
+
 // Backend performs operations only on the workload and Pod identities supplied
 // by the controller. Implementations must reject ambiguous checkpoint replay.
 // Cleanup must be idempotent, and must not report success with live owned tasks.
