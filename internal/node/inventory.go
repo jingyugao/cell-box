@@ -31,6 +31,12 @@ func (b *Backend) SyncInventory(ctx context.Context, w *api.ResumablePod) error 
 	}
 	key := "checkpoints/" + owner + "/metadata.json"
 	phase := w.Status.Phase
+	// The CR and the API operation already record an in-progress resume. Keep
+	// the durable checkpoint descriptor unchanged until exact invalidation;
+	// duplicating a transient phase here adds an OSS round trip to every restore.
+	if phase == "Restoring" || (phase == "Suspended" && w.Spec.DesiredState == "Running") {
+		return nil
+	}
 	// Runtime observations need no checkpoint index. A consumed snapshot must
 	// never be republished after an interrupted status transition.
 	if (phase == "Running" && w.Status.Snapshot == "") || (w.Status.Snapshot != "" && b.snapshotConsumed(owner, w.Status.Snapshot)) {
@@ -38,7 +44,7 @@ func (b *Backend) SyncInventory(ctx context.Context, w *api.ResumablePod) error 
 	}
 	wantPublished := (w.DeletionTimestamp == nil || phase == "Deleting") && w.Status.Snapshot != "" &&
 		(phase == "Checkpointing" || phase == "Suspending" || phase == "Suspended" ||
-			phase == "Restoring" || phase == "Failing" || phase == "Failed" || phase == "Deleting")
+			phase == "Failing" || phase == "Failed" || phase == "Deleting")
 	if phase == "Suspended" && w.Status.PodUID != "" {
 		wantPublished = false
 	}
@@ -82,11 +88,6 @@ func (b *Backend) SyncInventory(ctx context.Context, w *api.ResumablePod) error 
 		publicPhase = "suspending"
 	case "Suspended":
 		publicPhase = "suspended"
-		if w.Spec.DesiredState == "Running" {
-			publicPhase = "resuming"
-		}
-	case "Restoring":
-		publicPhase = "resuming"
 	case "Failing", "Failed":
 		publicPhase = "failed"
 	case "Deleting":

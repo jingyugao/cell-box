@@ -446,12 +446,14 @@ func TestSuspendedInventoryPublishesAfterSnapshotAndRepairsAfterRestart(t *testi
 		t.Fatal("suspended inventory index was not repaired")
 	}
 
-	// A resume updates the lifecycle phase but retains the checkpoint until Forget.
+	// Resume state belongs to the CR/API; the durable checkpoint descriptor
+	// stays unchanged until invalidation, with no redundant OSS write.
+	puts := objects.putCalls
 	resume := workload.DeepCopy()
 	resume.Spec.DesiredState = "Running"
 	resume.Status.Phase = "Restoring"
 	resume.Status.Cycle++
-	if err = restarted.SyncInventory(context.Background(), resume); err != nil {
+	if err = restarted.SyncInventory(context.Background(), resume); err != nil || objects.putCalls != puts {
 		t.Fatal("update index before restore:", err)
 	}
 	if _, ok := objects.objects[indexKey]; !ok {
@@ -465,7 +467,7 @@ func TestSuspendedInventoryPublishesAfterSnapshotAndRepairsAfterRestart(t *testi
 		t.Fatal(err)
 	}
 	phase = ""
-	if err = json.Unmarshal(publishedBox["phase"], &phase); err != nil || phase != "resuming" {
+	if err = json.Unmarshal(publishedBox["phase"], &phase); err != nil || phase != "suspended" {
 		t.Fatalf("resume index phase = %q, err=%v", phase, err)
 	}
 	if err = restarted.Forget(context.Background(), resume); err != nil {

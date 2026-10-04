@@ -110,10 +110,14 @@ func (p *WarmPool) reconcile(ctx context.Context) error {
 	}
 	templates := map[string]*api.ResumablePod{}
 	var candidates []*api.ResumablePod
+	restoring := false
 	for i := range workloads.Items {
 		w := &workloads.Items[i]
 		eligible := w.Status.Phase == "Creating" || w.Status.Phase == "Running" || w.Status.Phase == "Checkpointing" || w.Status.Phase == "Suspending" || w.Status.Phase == "Suspended" || w.Status.Phase == "Restoring"
 		if w.Spec.NodeName == r.NodeName && w.DeletionTimestamp == nil && w.Status.SpecHash != "" && eligible && validate(w) == nil {
+			if w.Status.Phase == "Restoring" && time.Since(w.Status.Since.Time) < 2*time.Second {
+				restoring = true
+			}
 			templates[w.Status.SpecHash] = w
 			candidates = append(candidates, w)
 		}
@@ -203,6 +207,12 @@ func (p *WarmPool) reconcile(ctx context.Context) error {
 	for _, hash := range keys {
 		if counts[hash] >= targets[hash] {
 			continue
+		}
+		// Give requested restores priority over speculative runtime creation.
+		// Lease retirement still runs above, and replenishment resumes on the
+		// next pool pass as soon as active restores finish.
+		if restoring {
+			return nil
 		}
 		pod := executionPod(templates[hash], "")
 		pod.GenerateName = "cb-warm-"
