@@ -136,6 +136,9 @@ func TestCreateLifecycle(t *testing.T) {
 	if err = p.Destroy(ctx, h); err != nil {
 		t.Fatal(err)
 	}
+	if got, want := f.calls[len(f.calls)-1], []string{"rm", "--force", "--volumes", h.ID}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("destroy must remove the container and its anonymous volumes: got %v, want %v", got, want)
+	}
 	if err = p.Destroy(ctx, h); err != nil {
 		t.Fatal(err)
 	}

@@ -419,6 +419,75 @@ func TestDeletionRetainsFinalizerUntilRuntimeCleanup(t *testing.T) {
 	}
 }
 
+func TestDeletionWaitsForOwnedServiceAndPreservesForeignService(t *testing.T) {
+	for _, ownedService := range []bool{true, false} {
+		name := "foreign"
+		if ownedService {
+			name = "owned"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			r, _, w := fixture(t)
+			pod := &core.Pod{}
+			if err := r.Get(ctx, types.NamespacedName{Name: "old", Namespace: w.Namespace}, pod); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Delete(ctx, pod); err != nil {
+				t.Fatal(err)
+			}
+			w.Status.Phase = "Deleting"
+			if err := r.Status().Update(ctx, w); err != nil {
+				t.Fatal(err)
+			}
+			svc := &core.Service{ObjectMeta: meta.ObjectMeta{Name: w.Name, Namespace: w.Namespace, UID: "service-uid", Finalizers: []string{"test.example/hold"}}}
+			if ownedService {
+				if err := controllerutil.SetControllerReference(w, svc, r.Scheme()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := r.Create(ctx, svc); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Delete(ctx, w); err != nil {
+				t.Fatal(err)
+			}
+			req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(w)}
+			result, err := r.Reconcile(ctx, req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = r.Get(ctx, client.ObjectKeyFromObject(svc), svc); err != nil {
+				t.Fatal("Service disappeared before its finalizer completed", err)
+			}
+			if !ownedService {
+				if svc.DeletionTimestamp != nil {
+					t.Fatal("foreign Service was deleted")
+				}
+			} else {
+				if result.RequeueAfter == 0 || svc.DeletionTimestamp == nil {
+					t.Fatal("owned Service deletion must be requested and requeued")
+				}
+				for i := 0; i < 2; i++ {
+					step(t, r, w)
+					if !controllerutil.ContainsFinalizer(w, api.Finalizer) {
+						t.Fatal("workload finalizer released while Service is terminating")
+					}
+				}
+				svc.Finalizers = nil
+				if err = r.Update(ctx, svc); err != nil {
+					t.Fatal(err)
+				}
+				if _, err = r.Reconcile(ctx, req); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err = r.Get(ctx, client.ObjectKeyFromObject(w), &api.ResumablePod{}); err == nil || client.IgnoreNotFound(err) != nil {
+				t.Fatal("workload not deleted after its owned resources were removed", err)
+			}
+		})
+	}
+}
+
 func TestInventoryFailureKeepsPausePending(t *testing.T) {
 	ctx := context.Background()
 	r, f, w := fixture(t)

@@ -468,13 +468,17 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if err = r.Runtime.Forget(ctx, w); err != nil {
 			return again, err
 		}
-		// Delete Service explicitly: finalizer completion must not depend on GC timing.
+		// Observe owned Service removal before completing the finalizer.
 		s := &core.Service{}
 		err = r.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: w.Name}, s)
 		if err == nil && owned(w, s) {
-			if err = r.Delete(ctx, s); err != nil && !errors.IsNotFound(err) {
-				return again, err
+			if s.DeletionTimestamp == nil {
+				uid := s.UID
+				if err = r.Delete(ctx, s, &client.DeleteOptions{Preconditions: &meta.Preconditions{UID: &uid}}); err != nil && !errors.IsNotFound(err) {
+					return again, err
+				}
 			}
+			return again, nil
 		} else if err != nil && !errors.IsNotFound(err) {
 			return again, err
 		}

@@ -15,6 +15,10 @@ import (
 	"cellbox.local/cellbox/internal/objectstorage"
 )
 
+// Head schema 4 fences binaries that do not understand permanent retirement.
+// Resource/local state schema remains 3; opening an existing head migrates it.
+const recordHeadSchema = 4
+
 const recordPrefix = "metadata/records"
 const profilePrefix = "metadata/profiles"
 const resultPrefix = "metadata/results"
@@ -27,6 +31,7 @@ type recordHead struct {
 	Schema   int           `json:"schema"`
 	Revision string        `json:"revision"`
 	Changes  []imageChange `json:"changes,omitempty"`
+	Retired  []string      `json:"retired,omitempty"`
 }
 
 type resourceRecords struct {
@@ -37,6 +42,7 @@ type resourceRecords struct {
 }
 
 type recordStore struct {
+	retired      map[string]bool
 	initialized  bool
 	headRevision string
 	data         map[string][]byte
@@ -59,7 +65,7 @@ func validRecordKey(key string) bool {
 	if len(parts) != 4 || parts[0]+"/"+parts[1] != recordPrefix {
 		return false
 	}
-	if parts[2] != "boxes" && parts[2] != "operations" && parts[2] != "archives" && parts[2] != "keys" {
+	if parts[2] != "boxes" && parts[2] != "operations" && parts[2] != "archives" && parts[2] != "keys" && parts[2] != "purges" {
 		return false
 	}
 	name := strings.TrimSuffix(parts[3], ".json")
@@ -69,8 +75,15 @@ func validRecordKey(key string) bool {
 
 func decodeRecordHead(data []byte) (recordHead, error) {
 	var head recordHead
-	if json.Unmarshal(data, &head) != nil || head.Schema != stateSchema || head.Revision == "" {
+	if json.Unmarshal(data, &head) != nil || (head.Schema != stateSchema && head.Schema != recordHeadSchema) || head.Revision == "" {
 		return head, errors.New("invalid core metadata head")
+	}
+	retired := map[string]bool{}
+	for _, key := range head.Retired {
+		if !validRecordKey(key) || !strings.HasPrefix(key, recordPrefix+"/") || retired[key] {
+			return head, errors.New("invalid retired metadata key")
+		}
+		retired[key] = true
 	}
 	seen := map[string]bool{}
 	for _, change := range head.Changes {
@@ -78,6 +91,9 @@ func decodeRecordHead(data []byte) (recordHead, error) {
 			return head, errors.New("invalid core metadata change")
 		}
 		seen[change.Key] = true
+		if retired[change.Key] && !change.Delete {
+			return head, errors.New("retired metadata has live change")
+		}
 		var header struct {
 			Revision string `json:"revision"`
 			Deleted  bool   `json:"deleted"`
@@ -89,9 +105,15 @@ func decodeRecordHead(data []byte) (recordHead, error) {
 	return head, nil
 }
 
-func materializeRecords(ctx context.Context, objects objectstorage.Objects, changes []imageChange, replay bool) (map[string]string, error) {
+func materializeRecords(ctx context.Context, objects objectstorage.Objects, changes []imageChange, replay bool, retired ...map[string]bool) (map[string]string, error) {
 	versions := map[string]string{}
 	for _, change := range changes {
+		if len(retired) > 0 && retired[0][change.Key] {
+			if err := deleteKnownObject(ctx, objects, change.Key); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		version := change.BeforeETag
 		if replay {
 			actual, current, err := readObject(ctx, objects, change.Key)
@@ -160,7 +182,14 @@ func OpenObjectStore(ctx context.Context, objects objectstorage.Objects) (*Store
 	if err != nil {
 		return nil, err
 	}
-	if _, err = materializeRecords(ctx, objects, head.Changes, true); err != nil {
+	s.records.retired = map[string]bool{}
+	for _, key := range head.Retired {
+		s.records.retired[key] = true
+	}
+	if _, err = materializeRecords(ctx, objects, head.Changes, true, s.records.retired); err != nil {
+		return nil, err
+	}
+	if err := s.cleanupRetired(ctx); err != nil {
 		return nil, err
 	}
 	s.records.initialized = true
@@ -169,6 +198,9 @@ func OpenObjectStore(ctx context.Context, objects objectstorage.Objects) (*Store
 		return nil, err
 	}
 	for _, key := range keys {
+		if s.records.retired[key] {
+			continue
+		}
 		if !validRecordKey(key) {
 			return nil, errors.New("invalid metadata object key")
 		}
@@ -249,7 +281,18 @@ func mergeMap[T any](dst map[string]T, src map[string]T) error {
 	return nil
 }
 func mergeRecordState(dst *State, src State) error {
-	for _, err := range []error{mergeMap(dst.Boxes, src.Boxes), mergeMap(dst.Operations, src.Operations), mergeMap(dst.Keys, src.Keys), mergeMap(dst.Executions, src.Executions), mergeMap(dst.Leases, src.Leases), mergeMap(dst.Archives, src.Archives)} {
+	// Compaction can leave the same expired replay fence in an older standalone
+	// record. Both representations deny replay; live duplicates still fail.
+	for id, fence := range src.Keys {
+		if previous, exists := dst.Keys[id]; exists {
+			if !previous.Expired || !fence.Expired {
+				return errors.New("duplicate core metadata record")
+			}
+			continue
+		}
+		dst.Keys[id] = fence
+	}
+	for _, err := range []error{mergeMap(dst.Boxes, src.Boxes), mergeMap(dst.Operations, src.Operations), mergeMap(dst.Executions, src.Executions), mergeMap(dst.Leases, src.Leases), mergeMap(dst.Archives, src.Archives), mergeMap(dst.Purges, src.Purges)} {
 		if err != nil {
 			return err
 		}
@@ -334,6 +377,9 @@ func (s *Store) projectRecords(ctx context.Context, state *State) (map[string][]
 	}
 	for id, key := range state.Keys {
 		objectKey := recordKey("keys", id)
+		if key.Expired {
+			objectKey = recordKey("keys", "expired-replay-fences")
+		}
 		if op, exists := state.Operations[key.OperationID]; exists {
 			objectKey = operationKey(op)
 		}
@@ -359,6 +405,9 @@ func (s *Store) projectRecords(ctx context.Context, state *State) (map[string][]
 	}
 	for id, lease := range state.Leases {
 		group(recordKey("boxes", lease.BoxID)).Leases[id] = lease
+	}
+	for id, purge := range state.Purges {
+		group(recordKey("purges", "pending")).Purges[id] = purge
 	}
 	for id, archive := range state.Archives {
 		group(recordKey("archives", id)).Archives[id] = archive
@@ -400,16 +449,35 @@ func (s *Store) persistRecords(next State) error {
 	for key := range projected {
 		keys[key] = true
 	}
+	retired := map[string]bool{}
+	for key := range s.records.retired {
+		retired[key] = true
+	}
+	for _, purge := range next.Purges {
+		for _, key := range purge.Records {
+			retired[key] = true
+			keys[key] = true
+		}
+	}
+	for key := range retired {
+		if _, exists := projected[key]; exists {
+			return errors.New("retired metadata cannot be recreated")
+		}
+	}
 	ordered := make([]string, 0, len(keys))
 	for key := range keys {
 		ordered = append(ordered, key)
 	}
 	sort.Strings(ordered)
-	head := recordHead{Schema: stateSchema, Revision: revision}
+	head := recordHead{Schema: recordHeadSchema, Revision: revision}
+	for key := range retired {
+		head.Retired = append(head.Retired, key)
+	}
+	sort.Strings(head.Retired)
 	for _, key := range ordered {
 		before, existed := s.records.data[key]
 		after, exists := projected[key]
-		if existed == exists && bytes.Equal(before, after) {
+		if existed == exists && bytes.Equal(before, after) && !(retired[key] && !s.records.retired[key]) {
 			continue
 		}
 		var data []byte
@@ -451,7 +519,7 @@ func (s *Store) persistRecords(next State) error {
 	if err != nil {
 		return err
 	}
-	versions, err := materializeRecords(ctx, s.objects, head.Changes, false)
+	versions, err := materializeRecords(ctx, s.objects, head.Changes, false, retired)
 	if err != nil {
 		return err
 	}
@@ -462,6 +530,7 @@ func (s *Store) persistRecords(next State) error {
 		s.records.etags[key] = version
 	}
 	s.records.data = projected
+	s.records.retired = retired
 	s.etag = etag
 	s.records.headRevision = revision
 	s.records.initialized = true

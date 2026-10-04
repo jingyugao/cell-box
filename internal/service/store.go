@@ -28,7 +28,7 @@ type Store struct {
 	lock      *os.File
 }
 
-func OpenStore(dir string) (*Store, error) {
+func lockDataDirectory(dir string) (*os.File, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
@@ -39,9 +39,8 @@ func OpenStore(dir string) (*Store, error) {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return nil, fmt.Errorf("data directory must be a real directory")
 	}
-	if err = os.Chmod(dir, 0700); err != nil {
-		return nil, err
-	}
+	// Existing volumes may be owned by the provisioner and writable through
+	// fsGroup. Preserve their permissions; the service cannot chmod them.
 	fd, err := unix.Open(filepath.Join(dir, "service.lock"), unix.O_CREAT|unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
 	if err != nil {
 		return nil, err
@@ -50,6 +49,14 @@ func OpenStore(dir string) (*Store, error) {
 	if err = unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("another Cellbox service owns this data directory: %w", err)
+	}
+	return f, nil
+}
+
+func OpenStore(dir string) (*Store, error) {
+	f, err := lockDataDirectory(dir)
+	if err != nil {
+		return nil, err
 	}
 	s := &Store{dir: dir, lock: f, state: newState()}
 	name := filepath.Join(dir, "state.json")
@@ -67,6 +74,9 @@ func OpenStore(dir string) (*Store, error) {
 		if err = json.Unmarshal(b, &s.state); err != nil {
 			s.Close()
 			return nil, fmt.Errorf("invalid state file: %w", err)
+		}
+		if s.state.Purges == nil {
+			s.state.Purges = map[string]purgeRecord{}
 		}
 		if s.state.Schema != stateSchema {
 			s.Close()

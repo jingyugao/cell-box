@@ -33,6 +33,8 @@ type memoryObjects struct {
 	deleteCalls      int
 	deletedPrefix    string
 	interruptedReads int
+	onPut            func(io.ReadSeeker)
+	onRead           func()
 }
 
 func (m *memoryObjects) Get(_ context.Context, key string) (io.ReadCloser, int64, string, error) {
@@ -46,7 +48,20 @@ func (m *memoryObjects) Get(_ context.Context, key string) (io.ReadCloser, int64
 		m.interruptedReads--
 		return io.NopCloser(&interruptedReadCloser{reader: bytes.NewReader(copyOf)}), int64(len(copyOf)), "etag", nil
 	}
-	return io.NopCloser(bytes.NewReader(copyOf)), int64(len(copyOf)), "etag", nil
+	return &observedArchiveReader{ReadCloser: io.NopCloser(bytes.NewReader(copyOf)), onRead: m.onRead}, int64(len(copyOf)), "etag", nil
+}
+
+type observedArchiveReader struct {
+	io.ReadCloser
+	onRead func()
+}
+
+func (r *observedArchiveReader) Read(p []byte) (int, error) {
+	if r.onRead != nil {
+		r.onRead()
+		r.onRead = nil
+	}
+	return r.ReadCloser.Read(p)
 }
 
 type interruptedReadCloser struct {
@@ -70,6 +85,9 @@ func (r *interruptedReadCloser) Read(p []byte) (int, error) {
 func (*interruptedReadCloser) Close() error { return nil }
 func (m *memoryObjects) Put(_ context.Context, key string, body io.ReadSeeker, size int64, _ string) (string, error) {
 	m.putCalls++
+	if m.onPut != nil {
+		m.onPut(body)
+	}
 	if m.putFailures > 0 {
 		m.putFailures--
 		return "", errors.New("temporary upload failure")
@@ -333,6 +351,68 @@ func TestForgetRetriesScopedRemoteDelete(t *testing.T) {
 	}
 	if _, err := os.Stat(ownerPath); !os.IsNotExist(err) {
 		t.Fatal("local cache was not cleared after remote deletion")
+	}
+}
+
+func TestForgetRemovesAbandonedCheckpointTransfersForOnlyTheirOwner(t *testing.T) {
+	base := t.TempDir()
+	runsc := filepath.Join(base, "runsc")
+	if err := os.WriteFile(runsc, []byte("runsc"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	objects := &memoryObjects{}
+	b := &Backend{Base: base, Runsc: runsc, Objects: objects}
+	abandoned := map[string][]string{}
+	for _, owner := range []string{"owner", "other"} {
+		ownerPath := filepath.Join(base, "workloads", owner)
+		leaveAbandoned := func(path string) {
+			t.Helper()
+			if filepath.Dir(path) != ownerPath {
+				t.Fatalf("checkpoint transfer escaped owner directory: %s", path)
+			}
+			// Preserve a transfer file as if the process died before deferred cleanup.
+			leftover := path + ".abandoned"
+			if err := os.WriteFile(leftover, []byte("partial transfer"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			abandoned[owner] = append(abandoned[owner], leftover)
+		}
+		objects.onPut = func(body io.ReadSeeker) { leaveAbandoned(body.(*os.File).Name()) }
+		objects.onRead = func() {
+			paths, err := filepath.Glob(filepath.Join(ownerPath, ".checkpoint-download-*.tar"))
+			if err != nil || len(paths) != 1 {
+				t.Fatalf("missing owner-specific download transfer: paths=%v err=%v", paths, err)
+			}
+			leaveAbandoned(paths[0])
+		}
+		workload := testWorkload(owner, "snapshot", "spec", "image")
+		path := testCheckpoint(t, base, owner, "snapshot", "spec", "image-id", runsc)
+		if err := b.uploadSnapshot(context.Background(), workload, path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.downloadSnapshot(context.Background(), workload, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shared := filepath.Join(base, ".checkpoint-upload-legacy.tar")
+	if err := os.WriteFile(shared, []byte("unknown owner"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Forget(context.Background(), testWorkload("owner", "snapshot", "spec", "image")); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range abandoned["owner"] {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("abandoned owner transfer survived Forget: %s, err=%v", path, err)
+		}
+	}
+	for _, path := range append(abandoned["other"], shared) {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("Forget removed another owner's or shared file: %s, err=%v", path, err)
+		}
 	}
 }
 

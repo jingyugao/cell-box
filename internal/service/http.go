@@ -146,6 +146,10 @@ func (s *Service) Handler() http.Handler {
 			fail(w, apiError("NOT_FOUND", "Endpoint not found"))
 			return
 		}
+		if action == "purge" {
+			s.purgeBoxHandler(w, r, id)
+			return
+		}
 		op, err := s.action(clientID(r), r.Header.Get("Idempotency-Key"), id, action)
 		if err != nil {
 			fail(w, err)

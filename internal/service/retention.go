@@ -98,6 +98,11 @@ func pruneState(st *State, now time.Time, operations, outputs time.Duration) []s
 func (s *Service) pruneMetadata(now time.Time) error {
 	s.gcMu.Lock()
 	defer s.gcMu.Unlock()
+	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+	defer cancel()
+	if err := s.recoverPurges(ctx); err != nil {
+		return err
+	}
 	var garbage []string
 	err := s.store.Update(func(st *State) error {
 		garbage = pruneState(st, now, time.Duration(s.config.OperationRetentionSeconds)*time.Second, time.Duration(s.config.ExecutionRetentionSeconds)*time.Second)
@@ -122,8 +127,6 @@ func (s *Service) pruneMetadata(now time.Time) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
-	defer cancel()
 	// A failed deletion or a crash before publishing a result leaves an orphan.
 	// Scan again on every sweep, and give newly observed orphans more than the
 	// 30-second transaction timeout before deleting them. Result keys include the
