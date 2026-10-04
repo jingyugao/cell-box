@@ -18,6 +18,25 @@ type poolRuntime struct {
 	deadlines map[string]time.Time
 }
 
+type cachedCandidates struct {
+	client.Client
+	snapshot core.PodList
+	reads    int
+}
+
+func (c *cachedCandidates) List(ctx context.Context, list client.ObjectList, options ...client.ListOption) error {
+	opts := &client.ListOptions{}
+	for _, option := range options {
+		option.ApplyToList(opts)
+	}
+	if pods, ok := list.(*core.PodList); ok && opts.Raw != nil && opts.Raw.ResourceVersion == "0" {
+		c.reads++
+		*pods = *c.snapshot.DeepCopy()
+		return nil
+	}
+	return c.Client.List(ctx, list, options...)
+}
+
 func (*poolRuntime) RegisterWarm(context.Context, *core.Pod, string) error { return nil }
 func (f *poolRuntime) WarmState(_ context.Context, p *core.Pod) (string, time.Time, error) {
 	return "waiting", f.deadlines[string(p.UID)], nil
@@ -48,6 +67,13 @@ func TestWarmPoolConcurrentAdoptionRestartAndTemplateMiss(t *testing.T) {
 	other := w.DeepCopy()
 	other.Name = "other"
 	other.UID = "87654321-bbbb"
+	// Both claimers see the same stale cache snapshot. The second must skip
+	// the first one's CAS conflict and adopt the other slot immediately.
+	cached := &cachedCandidates{Client: r.Client}
+	if err := r.List(ctx, &cached.snapshot, client.MatchingLabels{warmLabel: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	r.Client = cached
 	type result struct {
 		pod   *core.Pod
 		err   error
@@ -78,6 +104,10 @@ func TestWarmPoolConcurrentAdoptionRestartAndTemplateMiss(t *testing.T) {
 			t.Fatal("wrong owner")
 		}
 	}
+	if cached.reads != 2 {
+		t.Fatalf("cached candidate reads: %d", cached.reads)
+	}
+	r.Client = cached.Client
 	restarted := &WarmPool{Reconciler: r, Namespace: w.Namespace, Size: 2}
 	pod, err := restarted.acquire(ctx, w)
 	if err != nil || pod == nil || meta.GetControllerOf(pod).UID != w.UID {

@@ -61,9 +61,10 @@ func executionPod(w *api.ResumablePod, name string) *core.Pod {
 	return &core.Pod{ObjectMeta: meta.ObjectMeta{Name: name, Namespace: w.Namespace, Labels: map[string]string{api.OwnerLabel: string(w.UID)}}, Spec: core.PodSpec{Containers: []core.Container{container}, Volumes: hostVolumes(w), RuntimeClassName: &runtime, RestartPolicy: core.RestartPolicyNever, AutomountServiceAccountToken: &no, EnableServiceLinks: &no, Hostname: "recoverable", TerminationGracePeriodSeconds: &grace, NodeSelector: map[string]string{"kubernetes.io/hostname": w.Spec.NodeName}, SchedulingGates: []core.PodSchedulingGate{{Name: api.Gate}}}}
 }
 
-func (p *WarmPool) pods(ctx context.Context) ([]core.Pod, error) {
+func (p *WarmPool) pods(ctx context.Context, options ...client.ListOption) ([]core.Pod, error) {
 	var list core.PodList
-	if err := p.Reconciler.List(ctx, &list, client.InNamespace(p.Namespace), client.MatchingLabels{warmLabel: "true"}); err != nil {
+	options = append(options, client.InNamespace(p.Namespace), client.MatchingLabels{warmLabel: "true"})
+	if err := p.Reconciler.List(ctx, &list, options...); err != nil {
 		return nil, err
 	}
 	out := []core.Pod{}
@@ -238,7 +239,10 @@ func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (*core.Pod,
 	}()
 	r := p.Reconciler
 	backend := r.Runtime.(warmRuntime)
-	pods, err := p.pods(ctx)
+	// Candidate discovery needs no quorum read: the node lease and the
+	// optimistic adoption write are the authority. Keep maintenance/reaping
+	// on fresh lists so a stale omission can never retire a live slot.
+	pods, err := p.pods(ctx, &client.ListOptions{Raw: &meta.ListOptions{ResourceVersion: "0", ResourceVersionMatch: meta.ResourceVersionMatchNotOlderThan}})
 	listed = time.Now()
 	if err != nil {
 		return nil, err
@@ -251,6 +255,20 @@ func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (*core.Pod,
 		}
 		if pod.Annotations[warmSpec] != w.Status.SpecHash || pod.DeletionTimestamp != nil {
 			continue
+		}
+		if owned(w, pod) {
+			// Recovery of an interrupted adoption still verifies live ownership.
+			current := &core.Pod{}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(pod), current); err != nil {
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				return nil, err
+			}
+			if current.UID != pod.UID || !owned(w, current) || current.DeletionTimestamp != nil || current.Annotations[warmSpec] != w.Status.SpecHash {
+				continue
+			}
+			pod = current
 		}
 		stateStarted := time.Now()
 		phase, deadline, err := backend.WarmState(ctx, pod)
@@ -274,6 +292,9 @@ func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (*core.Pod,
 			err = r.Patch(ctx, pod, client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{}))
 			patchTime += time.Since(patchStarted)
 			if err != nil {
+				if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+					continue // A cached candidate was already claimed or retired.
+				}
 				return nil, err
 			}
 		}
