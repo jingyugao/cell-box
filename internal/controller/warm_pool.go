@@ -227,11 +227,19 @@ func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (*core.Pod,
 	if p.Size == 0 {
 		return nil, nil
 	}
+	started := time.Now()
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	locked := time.Now()
+	var listed time.Time
+	var stateTime, patchTime time.Duration
+	defer func() {
+		ctrl.LoggerFrom(ctx).Info("warm acquisition timing", "lockMs", locked.Sub(started).Milliseconds(), "listMs", listed.Sub(locked).Milliseconds(), "leaseMs", stateTime.Milliseconds(), "patchMs", patchTime.Milliseconds())
+	}()
 	r := p.Reconciler
 	backend := r.Runtime.(warmRuntime)
 	pods, err := p.pods(ctx)
+	listed = time.Now()
 	if err != nil {
 		return nil, err
 	}
@@ -244,7 +252,9 @@ func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (*core.Pod,
 		if pod.Annotations[warmSpec] != w.Status.SpecHash || pod.DeletionTimestamp != nil {
 			continue
 		}
+		stateStarted := time.Now()
 		phase, deadline, err := backend.WarmState(ctx, pod)
+		stateTime += time.Since(stateStarted)
 		if err != nil || phase != "waiting" || time.Until(deadline) < 5*time.Second {
 			// Recover an adoption whose CR status update was interrupted.
 			if owned(w, pod) {
@@ -260,7 +270,10 @@ func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (*core.Pod,
 				return nil, err
 			}
 			pod.Labels[api.OwnerLabel] = string(w.UID)
-			if err = r.Patch(ctx, pod, client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{})); err != nil {
+			patchStarted := time.Now()
+			err = r.Patch(ctx, pod, client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{}))
+			patchTime += time.Since(patchStarted)
+			if err != nil {
 				return nil, err
 			}
 		}
