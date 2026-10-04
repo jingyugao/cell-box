@@ -222,6 +222,8 @@ func TestLifecycleAndGuestIdentity(t *testing.T) {
 		t.Fatalf("Guest accepted a Pod without an IP address: %v", err)
 	}
 	pod.Status.PodIP = "10.42.0.12"
+	pod.Status.ContainerStatuses = []core.ContainerStatus{{Name: w.Spec.Container.Name, ContainerID: "containerd://one", State: core.ContainerState{Running: &core.ContainerStateRunning{}}}}
+	pod.Status.Conditions[0].Status = core.ConditionFalse
 	if err = p.Client.Status().Update(ctx, pod); err != nil {
 		t.Fatal(err)
 	}

@@ -217,9 +217,8 @@ func (p *Provider) Inspect(ctx context.Context, h boxprovider.Handle) (boxprovid
 	return obs, nil
 }
 
-// inspectRunning observes execution identity and terminal Pod state only. Pod
-// readiness is intentionally left to readyPod so a readiness probe failure
-// does not change the box lifecycle phase.
+// inspectRunning observes execution identity and terminal Pod state only.
+// Asynchronous readiness probes do not change the box lifecycle phase.
 func (p *Provider) inspectRunning(ctx context.Context, h boxprovider.Handle, w *api.ResumablePod) (string, error) {
 	if w.Status.PodName == "" || w.Status.PodUID == "" {
 		return "failed", nil
@@ -277,10 +276,8 @@ func (p *Provider) readyPod(ctx context.Context, w *api.ResumablePod) (*core.Pod
 	if pod.Labels[api.ServingLabel] != "true" {
 		return nil, boxprovider.ErrNotReady
 	}
-	for _, condition := range pod.Status.Conditions {
-		if condition.Type == core.PodReady && condition.Status == core.ConditionTrue && pod.Status.Phase == core.PodRunning {
-			return pod, nil
-		}
+	if api.ExecutionStarted(pod, w.Spec.Container.Name) {
+		return pod, nil
 	}
 	return nil, boxprovider.ErrNotReady
 }

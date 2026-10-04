@@ -47,9 +47,10 @@ func TestGuestConnectionFencesExecutionAndContainerRestarts(t *testing.T) {
 	if err := p.Client.Status().Update(ctx, pod); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.GuestForExecution(ctx, h, "pod-a-uid"); err != nil {
-		t.Fatal(err)
+	if _, err := p.GuestForExecution(ctx, h, "pod-a-uid"); !errors.Is(err, boxprovider.ErrNotReady) {
+		t.Fatalf("restarted execution accepted: %v", err)
 	}
+	pod.Status.ContainerStatuses[0].RestartCount = 0
 	pod.Status.ContainerStatuses[0].ContainerID = "containerd://three"
 	if err := p.Client.Status().Update(ctx, pod); err != nil {
 		t.Fatal(err)

@@ -111,7 +111,7 @@ func fixture(t *testing.T) (*Reconciler, *fakeRuntime, *api.ResumablePod) {
 	api.AddToScheme(s)
 	w := &api.ResumablePod{TypeMeta: meta.TypeMeta{APIVersion: api.GroupVersion.String(), Kind: api.Kind}, ObjectMeta: meta.ObjectMeta{Name: "counter", Namespace: "test", UID: "12345678-aaaa", Finalizers: []string{api.Finalizer}}, Spec: api.Spec{NodeName: "node", DesiredState: "Running", Container: core.Container{Name: "server", Image: "image:local", ImagePullPolicy: core.PullNever}}, Status: api.Status{Phase: "Running", PodName: "old", PodUID: "old-uid", Cycle: 1, Since: meta.Now()}}
 	w.Status.SpecHash = fingerprint(w)
-	p := &core.Pod{ObjectMeta: meta.ObjectMeta{Name: "old", Namespace: "test", UID: "old-uid"}, Spec: core.PodSpec{Containers: []core.Container{w.Spec.Container}}, Status: core.PodStatus{Phase: core.PodRunning, Conditions: []core.PodCondition{{Type: core.PodReady, Status: core.ConditionTrue}}}}
+	p := &core.Pod{ObjectMeta: meta.ObjectMeta{Name: "old", Namespace: "test", UID: "old-uid"}, Spec: core.PodSpec{Containers: []core.Container{w.Spec.Container}}, Status: core.PodStatus{Phase: core.PodRunning, PodIP: "10.42.0.12", ContainerStatuses: []core.ContainerStatus{{Name: w.Spec.Container.Name, ContainerID: "containerd://one", State: core.ContainerState{Running: &core.ContainerStateRunning{}}}}, Conditions: []core.PodCondition{{Type: core.PodReady, Status: core.ConditionTrue}}}}
 	no := false
 	runtimeClass := api.RuntimeClass
 	p.Spec.RestartPolicy = core.RestartPolicyNever
@@ -199,7 +199,7 @@ func TestSuspendResumeAndControllerRestart(t *testing.T) {
 	if p.Annotations[api.TicketAnnotation] != "new-uid" || len(p.Spec.SchedulingGates) != 0 {
 		t.Fatal(p)
 	}
-	p.Status = core.PodStatus{Phase: core.PodRunning, Conditions: []core.PodCondition{{Type: core.PodReady, Status: core.ConditionTrue}}}
+	p.Status = core.PodStatus{Phase: core.PodRunning, PodIP: "10.42.0.12", ContainerStatuses: []core.ContainerStatus{{Name: w.Spec.Container.Name, ContainerID: "containerd://restored", State: core.ContainerState{Running: &core.ContainerStateRunning{}}}}, Conditions: []core.PodCondition{{Type: core.PodReady, Status: core.ConditionFalse}}}
 	r.Status().Update(ctx, p)
 	step(t, r, w)
 	if w.Status.Phase != "Running" || w.Status.Snapshot != "" {
