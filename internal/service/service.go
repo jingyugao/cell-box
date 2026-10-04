@@ -552,7 +552,7 @@ func (s *Service) guestAction(ctx context.Context, b boxRecord, path string) err
 	defer res.Body.Close()
 	return guestSuccess(res)
 }
-func (s *Service) waitState(ctx context.Context, id, want string) (Box, error) {
+func (s *Service) waitState(ctx context.Context, id, want string, checkHealth bool) (Box, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(s.config.StartupTimeoutSeconds)*time.Second)
 	defer cancel()
 	for {
@@ -562,7 +562,7 @@ func (s *Service) waitState(ctx context.Context, id, want string) (Box, error) {
 		}
 		box, err := s.observe(ctx, b)
 		if err == nil && box.Phase == want {
-			if want != "running" && want != "staged" && want != "restoring" {
+			if !checkHealth || (want != "running" && want != "staged" && want != "restoring") {
 				return box, nil
 			}
 			updated, _ := s.rawBox(id)
@@ -592,6 +592,61 @@ func (s *Service) waitState(ctx context.Context, id, want string) (Box, error) {
 		}
 	}
 }
+
+// Restored Guests are already listening when the runtime becomes ready. Their
+// diagnostic health check does not gate operation completion or change state.
+func (s *Service) checkHealthAsync(b boxRecord) {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		ctx, cancel := context.WithTimeout(s.ctx, min(10*time.Second, time.Duration(s.config.StartupTimeoutSeconds)*time.Second))
+		defer cancel()
+		for ctx.Err() == nil {
+			current, err := s.rawBox(b.Box.ID)
+			if err != nil || current.ExecutionID != b.ExecutionID || current.Box.Generation != b.Box.Generation || current.Box.Phase != b.Box.Phase || (current.Box.OperationID != "" && current.Box.OperationID != b.Box.OperationID) {
+				return
+			}
+			probe, stop := context.WithTimeout(ctx, time.Second)
+			started := time.Now()
+			res, err := s.guestRequest(probe, b, "GET", "/healthz", nil)
+			if err == nil {
+				res.Body.Close()
+				if res.StatusCode != http.StatusOK {
+					err = fmt.Errorf("Guest health check returned HTTP %d", res.StatusCode)
+				}
+			}
+			stop()
+			runtimeTiming(b.Box.ID, "cellbox.health_probe_async", started, err)
+			if err == nil {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(250 * time.Millisecond):
+			}
+		}
+	}()
+}
+
+func (s *Service) resumeGuest(ctx context.Context, b boxRecord) error {
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(s.config.StartupTimeoutSeconds)*time.Second)
+	defer cancel()
+	for {
+		err := s.guestAction(ctx, b, "/v1/unquiesce")
+		if !errors.Is(err, boxprovider.ErrNotReady) {
+			return err
+		}
+		// Running can precede the controller allowing traffic. Wait for that
+		// boundary without issuing a request to an unpublished Service endpoint.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
 func (s *Service) provision(ctx context.Context, id string) (Box, error) {
 	b, err := s.rawBox(id)
 	if err != nil {
@@ -617,7 +672,7 @@ func (s *Service) provision(ctx context.Context, id string) (Box, error) {
 		}
 	}
 	waitStarted := time.Now()
-	box, err := s.waitState(ctx, id, want)
+	box, err := s.waitState(ctx, id, want, true)
 	runtimeTiming(id, "cellbox.wait_"+want, waitStarted, err)
 	return box, err
 }
@@ -795,7 +850,7 @@ func (s *Service) action(client, key, id, action string) (Operation, error) {
 				if err := p.Destroy(ctx, b.Handle); err != nil {
 					return nil, err
 				}
-				if _, err := s.waitState(ctx, id, "deleted"); err != nil {
+				if _, err := s.waitState(ctx, id, "deleted", false); err != nil {
 					return nil, err
 				}
 			} else {
@@ -842,14 +897,21 @@ func (s *Service) action(client, key, id, action string) (Operation, error) {
 				return nil, err
 			}
 			want := map[string]string{"freeze": "frozen", "unfreeze": "running", "suspend": "suspended", "resume": "running"}[action]
-			if _, err := s.waitState(ctx, id, want); err != nil {
+			if _, err := s.waitState(ctx, id, want, action != "resume"); err != nil {
 				return nil, err
 			}
 			if action == "resume" {
-				updated, _ := s.rawBox(id)
-				if err := s.guestAction(ctx, updated, "/v1/unquiesce"); err != nil {
+				updated, err := s.rawBox(id)
+				if err != nil {
 					return nil, err
 				}
+				started := time.Now()
+				err = s.resumeGuest(ctx, updated)
+				runtimeTiming(id, "cellbox.unquiesce", started, err)
+				if err != nil {
+					return nil, err
+				}
+				s.checkHealthAsync(updated)
 			}
 		}
 		return map[string]string{"boxId": id}, nil

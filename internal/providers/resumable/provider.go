@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"path"
 	"regexp"
 	"strings"
@@ -34,8 +35,6 @@ var validImage = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}
 
 type Provider struct {
 	Client client.Client
-	// ServiceDomain may be overridden for nonstandard cluster DNS suffixes.
-	ServiceDomain string
 }
 
 func New(c client.Client) *Provider { return &Provider{Client: c} }
@@ -252,12 +251,11 @@ func (p *Provider) inspectRunning(ctx context.Context, h boxprovider.Handle, w *
 	return "running", nil
 }
 
-var errNotReady = errors.New("current Pod is not ready")
 var errExecutionLost = errors.New("current Pod execution lost")
 
 func (p *Provider) readyPod(ctx context.Context, w *api.ResumablePod) (*core.Pod, error) {
 	if w.Status.Phase != "Running" || w.Status.PodName == "" || w.Status.PodUID == "" {
-		return nil, errNotReady
+		return nil, boxprovider.ErrNotReady
 	}
 	pod := &core.Pod{}
 	err := p.Client.Get(ctx, client.ObjectKey{Namespace: w.Namespace, Name: w.Status.PodName}, pod)
@@ -274,12 +272,17 @@ func (p *Provider) readyPod(ctx context.Context, w *api.ResumablePod) (*core.Pod
 	if pod.DeletionTimestamp != nil || pod.Status.Phase == core.PodFailed || pod.Status.Phase == core.PodSucceeded {
 		return nil, fmt.Errorf("%w: Pod exited or is deleting", errExecutionLost)
 	}
+	// Direct Guest traffic must respect the controller's snapshot invalidation
+	// boundary, just as traffic selected by the Service does.
+	if pod.Labels[api.ServingLabel] != "true" {
+		return nil, boxprovider.ErrNotReady
+	}
 	for _, condition := range pod.Status.Conditions {
 		if condition.Type == core.PodReady && condition.Status == core.ConditionTrue && pod.Status.Phase == core.PodRunning {
 			return pod, nil
 		}
 	}
-	return nil, errNotReady
+	return nil, boxprovider.ErrNotReady
 }
 
 func (p *Provider) Action(ctx context.Context, h boxprovider.Handle, action string) error {
@@ -354,7 +357,7 @@ func (p *Provider) GuestForExecution(ctx context.Context, h boxprovider.Handle, 
 		return boxprovider.Connection{}, err
 	}
 	if w.DeletionTimestamp != nil || w.Spec.DesiredState != "Running" {
-		return boxprovider.Connection{}, errNotReady
+		return boxprovider.Connection{}, boxprovider.ErrNotReady
 	}
 	if expected != "" && w.Status.PodUID != expected {
 		return boxprovider.Connection{}, boxprovider.ErrStaleExecution
@@ -395,14 +398,12 @@ func (p *Provider) GuestForExecution(ctx context.Context, h boxprovider.Handle, 
 	if containerIdentity(currentPod, current.Spec.Container.Name) != containerIdentity(pod, w.Spec.Container.Name) {
 		return boxprovider.Connection{}, boxprovider.ErrStaleExecution
 	}
-	domain := p.ServiceDomain
-	if domain == "" {
-		domain = "svc"
+	if net.ParseIP(currentPod.Status.PodIP) == nil {
+		return boxprovider.Connection{}, boxprovider.ErrNotReady
 	}
-	if !regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`).MatchString(domain) {
-		return boxprovider.Connection{}, errors.New("invalid Service DNS suffix")
-	}
-	return boxprovider.Connection{URL: fmt.Sprintf("http://%s.%s.%s:%d", w.Name, w.Namespace, domain, guestapi.Port)}, nil
+	// The API already resolved and fenced this execution. Avoid waiting for
+	// EndpointSlice and Service routing to catch up after a restore.
+	return boxprovider.Connection{URL: "http://" + net.JoinHostPort(currentPod.Status.PodIP, fmt.Sprint(guestapi.Port))}, nil
 }
 
 var _ boxprovider.Provider = (*Provider)(nil)

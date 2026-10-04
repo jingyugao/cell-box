@@ -365,7 +365,7 @@ func TestReadinessRetriesAStalledEndpointWithinStartupDeadline(t *testing.T) {
 	f.provider.mu.Lock()
 	f.provider.guestURL = endpoint.URL
 	f.provider.mu.Unlock()
-	if _, err := f.service.waitState(context.Background(), box.ID, "running"); err != nil {
+	if _, err := f.service.waitState(context.Background(), box.ID, "running", true); err != nil {
 		t.Fatalf("transient endpoint stall exhausted startup deadline: %v", err)
 	}
 	if attempts.Load() < 2 {
@@ -375,6 +375,100 @@ func TestReadinessRetriesAStalledEndpointWithinStartupDeadline(t *testing.T) {
 	case <-stalledCanceled:
 	case <-time.After(time.Second):
 		t.Fatal("stalled readiness request was not canceled")
+	}
+}
+
+func TestResumeCompletesWithUnhealthyGuestAndCancelsBackgroundProbe(t *testing.T) {
+	for _, stalled := range []bool{false, true} {
+		name := "HTTP503"
+		if stalled {
+			name = "stalled"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newCoreFixture(t)
+			var unquiesced atomic.Bool
+			probeStarted := make(chan struct{}, 1)
+			probeCanceled := make(chan struct{}, 1)
+			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/unquiesce":
+					unquiesced.Store(true)
+					w.WriteHeader(http.StatusNoContent)
+				case "/healthz":
+					select {
+					case probeStarted <- struct{}{}:
+					default:
+					}
+					if stalled {
+						<-r.Context().Done()
+						select {
+						case probeCanceled <- struct{}{}:
+						default:
+						}
+						return
+					}
+					w.WriteHeader(http.StatusServiceUnavailable)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(func() { f.service.cancel(); endpoint.Close() })
+			f.provider.mu.Lock()
+			f.provider.guestURL = endpoint.URL
+			f.provider.created = true
+			f.provider.mu.Unlock()
+			f.service.providers["resumable-k8s-pod"] = f.provider
+			profile := f.config.Profiles[0]
+			profile.Provider = "resumable-k8s-pod"
+			if err := f.service.store.Update(func(st *State) error {
+				st.Boxes["box-resume"] = boxRecord{
+					Box:      Box{ID: "box-resume", Phase: "suspended", Generation: 1},
+					ClientID: "client-a", Profile: profile,
+					Handle:      boxprovider.Handle{Provider: profile.Provider, ID: "runtime-resume"},
+					ExecutionID: "previous-execution",
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			op, err := f.service.action("client-a", "resume-async", "box-resume", "resume")
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.waitOperation(t, op.ID, "succeeded")
+			if !unquiesced.Load() {
+				t.Fatal("resume completed before Guest accepted work")
+			}
+			select {
+			case <-probeStarted:
+			case <-time.After(time.Second):
+				t.Fatal("background health check did not start")
+			}
+			// A later lifecycle transition must not be overwritten by an old probe.
+			if err := f.service.store.Update(func(st *State) error {
+				b := st.Boxes[op.TargetID]
+				b.Box.Phase = "suspending"
+				b.Box.OperationID = "next-operation"
+				st.Boxes[op.TargetID] = b
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.service.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if stalled {
+				select {
+				case <-probeCanceled:
+				case <-time.After(time.Second):
+					t.Fatal("service shutdown did not cancel the background probe")
+				}
+			}
+			b, err := f.service.rawBox(op.TargetID)
+			if err != nil || b.Box.Phase != "suspending" || b.Box.OperationID != "next-operation" || b.Box.Error != nil {
+				t.Fatalf("background probe changed lifecycle state: %+v, %v", b.Box, err)
+			}
+		})
 	}
 }
 
