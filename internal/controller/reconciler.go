@@ -557,13 +557,15 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			// Persist snapshot invalidation before exposing this execution through
 			// the Service. A crash between these steps must not permit rollback.
 			w.Status.Snapshot = ""
-			result, err := r.phase(ctx, w, "Running", "Container started; previous snapshot cannot be replayed")
-			ctrl.LoggerFrom(ctx).Info("execution started", "podUID", w.Status.PodUID, "podReady", ready(p))
-			if err == nil {
-				if _, ok := r.Runtime.(snapshotInvalidator); ok {
-					err = r.serving(ctx, p, true)
+			if _, ok := r.Runtime.(snapshotInvalidator); ok {
+				if err = r.serving(ctx, p, true); err != nil {
+					return again, err
 				}
 			}
+			// Publish Running last: its watch notification allows the API to
+			// connect immediately, so the Pod must already permit that traffic.
+			result, err := r.phase(ctx, w, "Running", "Container started; previous snapshot cannot be replayed")
+			ctrl.LoggerFrom(ctx).Info("execution started", "podUID", w.Status.PodUID, "podReady", ready(p))
 			return result, err
 		}
 		timeout := w.Spec.StartupTimeoutSeconds
