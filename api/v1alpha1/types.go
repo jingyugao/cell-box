@@ -45,6 +45,7 @@ type Status struct {
 	Cycle              int64            `json:"cycle,omitempty"`
 	PodName            string           `json:"podName,omitempty"`
 	PodUID             string           `json:"podUID,omitempty"`
+	Execution          *Execution       `json:"execution,omitempty"`
 	Snapshot           string           `json:"snapshot,omitempty"`
 	RetryNonce         string           `json:"retryNonce,omitempty"`
 	Since              meta.Time        `json:"since,omitempty"`
@@ -77,6 +78,10 @@ func (r *ResumablePod) DeepCopy() *ResumablePod {
 		}
 	}
 	out.Status.Conditions = append([]meta.Condition(nil), r.Status.Conditions...)
+	if r.Status.Execution != nil {
+		execution := *r.Status.Execution
+		out.Status.Execution = &execution
+	}
 	return &out
 }
 func (r *ResumablePodList) DeepCopyObject() runtime.Object {

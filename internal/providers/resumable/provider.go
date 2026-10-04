@@ -276,7 +276,7 @@ func (p *Provider) readyPod(ctx context.Context, w *api.ResumablePod) (*core.Pod
 	if pod.Labels[api.ServingLabel] != "true" {
 		return nil, boxprovider.ErrNotReady
 	}
-	if api.ExecutionStarted(pod, w.Spec.Container.Name) {
+	if api.AvailableExecution(w, pod) {
 		return pod, nil
 	}
 	return nil, boxprovider.ErrNotReady
@@ -392,15 +392,25 @@ func (p *Provider) GuestForExecution(ctx context.Context, h boxprovider.Handle, 
 	if err != nil {
 		return boxprovider.Connection{}, err
 	}
-	if containerIdentity(currentPod, current.Spec.Container.Name) != containerIdentity(pod, w.Spec.Container.Name) {
+	identity := func(resource *api.ResumablePod, pod *core.Pod) string {
+		if api.ConfirmedExecution(resource, pod) {
+			return resource.Status.Execution.ContainerID
+		}
+		return containerIdentity(pod, resource.Spec.Container.Name)
+	}
+	if identity(current, currentPod) != identity(w, pod) {
 		return boxprovider.Connection{}, boxprovider.ErrStaleExecution
 	}
-	if net.ParseIP(currentPod.Status.PodIP) == nil {
+	ip := currentPod.Status.PodIP
+	if api.ConfirmedExecution(current, currentPod) {
+		ip = current.Status.Execution.PodIP
+	}
+	if net.ParseIP(ip) == nil {
 		return boxprovider.Connection{}, boxprovider.ErrNotReady
 	}
 	// The API already resolved and fenced this execution. Avoid waiting for
 	// EndpointSlice and Service routing to catch up after a restore.
-	return boxprovider.Connection{URL: "http://" + net.JoinHostPort(currentPod.Status.PodIP, fmt.Sprint(guestapi.Port))}, nil
+	return boxprovider.Connection{URL: "http://" + net.JoinHostPort(ip, fmt.Sprint(guestapi.Port))}, nil
 }
 
 var _ boxprovider.Provider = (*Provider)(nil)
