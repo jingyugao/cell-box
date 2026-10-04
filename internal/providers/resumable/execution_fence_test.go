@@ -25,8 +25,8 @@ func TestGuestConnectionFencesExecutionAndContainerRestarts(t *testing.T) {
 	if err := p.Client.Status().Update(ctx, w); err != nil {
 		t.Fatal(err)
 	}
-	pod := &core.Pod{ObjectMeta: meta.ObjectMeta{Name: "pod-a", Namespace: h.Namespace, UID: "pod-a-uid", OwnerReferences: []meta.OwnerReference{{APIVersion: api.GroupVersion.String(), Kind: api.Kind, Name: w.Name, UID: w.UID, Controller: boolPtr(true)}}},
-		Status: core.PodStatus{Phase: core.PodRunning, Conditions: []core.PodCondition{{Type: core.PodReady, Status: core.ConditionTrue}}, ContainerStatuses: []core.ContainerStatus{{Name: w.Spec.Container.Name, ContainerID: "containerd://one", State: core.ContainerState{Running: &core.ContainerStateRunning{StartedAt: meta.Now()}}}}}}
+	pod := &core.Pod{ObjectMeta: meta.ObjectMeta{Name: "pod-a", Namespace: h.Namespace, UID: "pod-a-uid", Labels: map[string]string{api.ServingLabel: "true"}, OwnerReferences: []meta.OwnerReference{{APIVersion: api.GroupVersion.String(), Kind: api.Kind, Name: w.Name, UID: w.UID, Controller: boolPtr(true)}}},
+		Status: core.PodStatus{Phase: core.PodRunning, PodIP: "10.42.0.12", Conditions: []core.PodCondition{{Type: core.PodReady, Status: core.ConditionTrue}}, ContainerStatuses: []core.ContainerStatus{{Name: w.Spec.Container.Name, ContainerID: "containerd://one", State: core.ContainerState{Running: &core.ContainerStateRunning{StartedAt: meta.Now()}}}}}}
 	if err := p.Client.Create(ctx, pod); err != nil {
 		t.Fatal(err)
 	}

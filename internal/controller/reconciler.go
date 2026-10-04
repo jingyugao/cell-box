@@ -31,6 +31,7 @@ type Reconciler struct {
 	client.Client
 	Runtime  runtime.Backend
 	NodeName string
+	WarmPool *WarmPool
 }
 
 type inventoryRuntime interface {
@@ -264,6 +265,16 @@ func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (ctrl.Resul
 	w.Status.Cycle++
 	w.Status.PodName = fmt.Sprintf("cb-%s-%d", string(w.UID)[:8], w.Status.Cycle)
 	w.Status.PodUID = ""
+	if w.Status.Snapshot != "" && r.WarmPool != nil {
+		p, err := r.WarmPool.acquire(ctx, w)
+		if err != nil {
+			return again, err
+		}
+		if p != nil {
+			w.Status.PodName = p.Name
+			w.Status.PodUID = string(p.UID)
+		}
+	}
 	phase := "Creating"
 	if w.Status.Snapshot != "" {
 		phase = "Restoring"
@@ -378,6 +389,12 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if w.Status.Phase != "Deleting" {
 			return r.phase(ctx, w, "Deleting", "Reclaiming Pod runtime and checkpoint storage")
 		}
+		if r.WarmPool != nil {
+			done, err := r.WarmPool.cleanupUnused(ctx, w)
+			if err != nil || !done {
+				return again, err
+			}
+		}
 		done, err := r.removePod(ctx, w, p)
 		if err != nil || !done {
 			return again, err
@@ -449,12 +466,7 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			if w.Status.PodUID != "" {
 				return fail(fmt.Errorf("Pod disappeared during startup; refusing replacement"))
 			}
-			no := false
-			grace := int64(3)
-			runtime := api.RuntimeClass
-			container := *w.Spec.Container.DeepCopy()
-			container.VolumeMounts = hostMounts(w)
-			p = &core.Pod{ObjectMeta: meta.ObjectMeta{Name: w.Status.PodName, Namespace: w.Namespace, Labels: map[string]string{api.OwnerLabel: string(w.UID)}}, Spec: core.PodSpec{Containers: []core.Container{container}, Volumes: hostVolumes(w), RuntimeClassName: &runtime, RestartPolicy: core.RestartPolicyNever, AutomountServiceAccountToken: &no, EnableServiceLinks: &no, Hostname: "recoverable", TerminationGracePeriodSeconds: &grace, NodeSelector: map[string]string{"kubernetes.io/hostname": w.Spec.NodeName}, SchedulingGates: []core.PodSchedulingGate{{Name: api.Gate}}}}
+			p = executionPod(w, w.Status.PodName)
 			if err = controllerutil.SetControllerReference(w, p, r.Scheme()); err != nil {
 				return again, err
 			}
@@ -494,6 +506,21 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			p.Spec.SchedulingGates = nil
 			return again, r.Patch(ctx, p, client.MergeFrom(old))
 		}
+		if backend, ok := r.Runtime.(warmRuntime); ok && p.Labels[warmLabel] == "true" {
+			if _, err = backend.ActivateWarm(ctx, w, p); err != nil {
+				if stderrors.Is(err, runtime.ErrWarmExpired) {
+					if _, err = r.removePod(ctx, w, p); err != nil {
+						return again, err
+					}
+					return r.begin(ctx, w)
+				}
+				if stderrors.Is(err, runtime.ErrRetryableStorage) {
+					return again, err
+				}
+				return fail(err)
+			}
+		}
+
 		if p.Status.Phase == core.PodFailed || p.Status.Phase == core.PodSucceeded {
 			return fail(fmt.Errorf("Pod exited during startup: %s", podFailure(p)))
 		}

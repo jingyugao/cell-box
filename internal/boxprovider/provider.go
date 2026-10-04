@@ -12,6 +12,7 @@ import (
 var ErrNotFound = errors.New("runtime not found")
 var ErrUnsupported = errors.New("unsupported runtime operation")
 var ErrStaleExecution = errors.New("runtime execution changed")
+var ErrNotReady = errors.New("current runtime is not ready")
 
 type Spec struct {
 	Inventory              json.RawMessage

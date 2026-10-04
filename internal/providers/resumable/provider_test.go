@@ -204,10 +204,24 @@ func TestLifecycleAndGuestIdentity(t *testing.T) {
 	if err != nil || obs.Phase != "running" || obs.ExecutionID != "pod-uid" || obs.Generation != 7 {
 		t.Fatalf("not-ready Pod changed lifecycle: %#v %v", obs, err)
 	}
-	if _, err = p.Guest(ctx, h); !errors.Is(err, errNotReady) {
+	if _, err = p.Guest(ctx, h); !errors.Is(err, boxprovider.ErrNotReady) {
 		t.Fatalf("Guest accepted a not-ready Pod: %v", err)
 	}
 	pod.Status.Conditions[0].Status = core.ConditionTrue
+	if err = p.Client.Status().Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = p.Guest(ctx, h); !errors.Is(err, boxprovider.ErrNotReady) {
+		t.Fatalf("Guest accepted a Pod before the controller allowed traffic: %v", err)
+	}
+	pod.Labels = map[string]string{api.ServingLabel: "true"}
+	if err = p.Client.Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = p.Guest(ctx, h); !errors.Is(err, boxprovider.ErrNotReady) {
+		t.Fatalf("Guest accepted a Pod without an IP address: %v", err)
+	}
+	pod.Status.PodIP = "10.42.0.12"
 	if err = p.Client.Status().Update(ctx, pod); err != nil {
 		t.Fatal(err)
 	}
@@ -219,8 +233,11 @@ func TestLifecycleAndGuestIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if conn.URL != "http://cellbox-box-1.boxes.svc:40000" {
+	if conn.URL != "http://10.42.0.12:40000" {
 		t.Fatalf("guest: %#v", conn)
+	}
+	if _, err = p.GuestForExecution(ctx, h, "old-pod"); !errors.Is(err, boxprovider.ErrStaleExecution) {
+		t.Fatalf("Guest accepted a stale execution: %v", err)
 	}
 	originalClient := p.Client
 	p.Client = podGetHookClient{Client: originalClient, afterPodGet: func() {

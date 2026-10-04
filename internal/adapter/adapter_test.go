@@ -46,19 +46,32 @@ func TestAuthorizationAndSingleExecution(t *testing.T) {
 	}
 }
 
-func TestMissingRootRecordNeverFallsBackToColdStart(t *testing.T) {
+func TestChildIdentityDoesNotUseStateOrAllowColdRootStart(t *testing.T) {
 	base := t.TempDir()
-	binary := filepath.Join(base, "runsc")
-	a := Adapter{Base: base, Runsc: binary}
-	id := strings.Repeat("c", 64)
-	for _, kind := range []string{"sandbox", "container", "unknown"} {
-		contents := "#!/bin/sh\nprintf '%s\\n' '{\"annotations\":{\"io.kubernetes.cri.container-type\":\"" + kind + "\"}}'\n"
-		if err := os.WriteFile(binary, []byte(contents), 0700); err != nil {
-			t.Fatal(err)
-		}
-		_, err := a.Rewrite([]string{"--root=/run/test", "start", id})
-		if (kind == "container") != (err == nil) {
-			t.Fatalf("kind=%s err=%v", kind, err)
-		}
+	a := Adapter{Base: base, Runsc: "/must-not-execute-runsc-state"}
+	sid, id := strings.Repeat("c", 64), strings.Repeat("d", 64)
+	if _, err := a.Rewrite([]string{"start", sid}); err == nil {
+		t.Fatal("missing root accepted")
+	}
+	ticket := node.Ticket{OwnerUID: "owner", PodUID: "pod", PodName: "name", Namespace: "test"}
+	node.AtomicJSON(filepath.Join(base, "tickets", "pod.json"), ticket)
+	node.AtomicJSON(filepath.Join(base, "requests", sid+".json"), ticket)
+	annotations := map[string]string{"io.kubernetes.cri.sandbox-id": sid, "io.kubernetes.cri.sandbox-uid": "pod", "io.kubernetes.cri.sandbox-name": "name", "io.kubernetes.cri.sandbox-namespace": "test"}
+	if err := a.childCreate(id, annotations); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Rewrite([]string{"start", id}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Rewrite([]string{"start", id}); err == nil {
+		t.Fatal("duplicate child start accepted")
+	}
+	second := strings.Repeat("e", 64)
+	if err := a.childCreate(second, annotations); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(filepath.Join(base, "tickets", "pod.json"))
+	if _, err := a.Rewrite([]string{"start", second}); err == nil {
+		t.Fatal("revoked child accepted")
 	}
 }

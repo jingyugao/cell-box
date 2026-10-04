@@ -5,11 +5,9 @@
 package adapter
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -60,8 +58,20 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 		if err := node.ReadJSON(filepath.Join(bundle, "config.json"), &spec); err != nil {
 			return nil, err
 		}
+		if spec.Annotations["io.kubernetes.cri.container-type"] == "container" {
+			return args, a.childCreate(id, spec.Annotations)
+		}
 		if spec.Annotations["io.kubernetes.cri.container-type"] != "sandbox" {
-			return args, nil
+			return nil, fmt.Errorf("unknown OCI container type")
+		}
+		podUID := spec.Annotations["io.kubernetes.cri.sandbox-uid"]
+		if node.ValidID(podUID) {
+			if _, err := os.Stat(filepath.Join(a.Base, "warm", podUID+".json")); err == nil {
+				_, err = node.BindWarm(a.Base, podUID, spec.Annotations["io.kubernetes.cri.sandbox-name"], spec.Annotations["io.kubernetes.cri.sandbox-namespace"], id)
+				return args, err
+			} else if !os.IsNotExist(err) {
+				return nil, err
+			}
 		}
 		uid := spec.Annotations[api.TicketAnnotation]
 		if !node.ValidID(uid) {
@@ -79,7 +89,7 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 			if err != nil {
 				return nil, err
 			}
-			if _, err = node.Verify(path, t.OwnerUID, t.SpecHash, a.Runsc); err != nil {
+			if _, err = node.VerifyPrepared(path, t.OwnerUID, t.SpecHash, a.Runsc); err != nil {
 				return nil, fmt.Errorf("refusing restore: %w", err)
 			}
 		}
@@ -117,30 +127,23 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 		var t node.Ticket
 		err := node.ReadJSON(request, &t)
 		if os.IsNotExist(err) {
-			// Child containers use ordinary Start, but a missing root request
-			// must never turn a restore into a cold sandbox start.
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			command := exec.CommandContext(ctx, a.Runsc, append(append([]string{}, args[:idx]...), "state", id)...)
-			command.WaitDelay = time.Second
-			data, stateErr := command.Output()
-			if stateErr != nil {
-				return nil, fmt.Errorf("cannot verify Start container identity: %w", stateErr)
-			}
-			var state struct {
-				Annotations map[string]string `json:"annotations"`
-			}
-			if err = json.Unmarshal(data, &state); err != nil {
-				return nil, err
-			}
-			if state.Annotations["io.kubernetes.cri.container-type"] != "container" {
-				return nil, fmt.Errorf("sandbox authorization record missing; refusing cold start")
-			}
-			return args, nil
+			return args, a.childStart(id)
 		}
 		if err != nil {
 			return nil, err
 		}
+		if _, warmErr := os.Stat(filepath.Join(a.Base, "warm", t.PodUID+".json")); warmErr == nil {
+			t, err = node.WaitWarm(a.Base, t.PodUID, id)
+			if err != nil {
+				return nil, err
+			}
+			if err = node.AtomicJSON(request, t); err != nil {
+				return nil, err
+			}
+		} else if !os.IsNotExist(warmErr) {
+			return nil, warmErr
+		}
+
 		var live node.Ticket
 		if err = node.ReadJSON(filepath.Join(a.Base, "tickets", t.PodUID+".json"), &live); err != nil {
 			return nil, fmt.Errorf("authorization revoked: %w", err)
@@ -164,6 +167,9 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 		if t.Snapshot != "" {
 			path, err := node.SnapshotPath(a.Base, t.OwnerUID, t.Snapshot)
 			if err != nil {
+				return nil, err
+			}
+			if _, err = node.VerifyPrepared(path, t.OwnerUID, t.SpecHash, a.Runsc); err != nil {
 				return nil, err
 			}
 			return append(append([]string{}, args[:idx]...), "restore", "--detach", "--image-path="+path, id), nil
@@ -190,4 +196,51 @@ func Main() {
 		}
 	}
 	os.Exit(1)
+}
+
+func (a Adapter) childCreate(id string, annotations map[string]string) error {
+	sid := annotations["io.kubernetes.cri.sandbox-id"]
+	if !sandboxID.MatchString(sid) {
+		return fmt.Errorf("invalid child sandbox ID")
+	}
+	var t, live node.Ticket
+	if err := node.ReadJSON(filepath.Join(a.Base, "requests", sid+".json"), &t); err != nil {
+		return err
+	}
+	if t.PodUID != annotations["io.kubernetes.cri.sandbox-uid"] || t.PodName != annotations["io.kubernetes.cri.sandbox-name"] || t.Namespace != annotations["io.kubernetes.cri.sandbox-namespace"] {
+		return fmt.Errorf("child Pod identity mismatch")
+	}
+	if err := node.ReadJSON(filepath.Join(a.Base, "tickets", t.PodUID+".json"), &live); err != nil {
+		return err
+	}
+	if live != t {
+		return fmt.Errorf("child sandbox revoked")
+	}
+	return node.AtomicJSON(filepath.Join(a.Base, "children", id+".json"), node.ChildRecord{Ticket: t, SandboxID: sid})
+}
+func (a Adapter) childStart(id string) error {
+	var c node.ChildRecord
+	if err := node.ReadJSON(filepath.Join(a.Base, "children", id+".json"), &c); err != nil {
+		return fmt.Errorf("missing container identity: %w", err)
+	}
+	var live, parent node.Ticket
+	if err := node.ReadJSON(filepath.Join(a.Base, "tickets", c.Ticket.PodUID+".json"), &live); err != nil {
+		return err
+	}
+	if err := node.ReadJSON(filepath.Join(a.Base, "requests", c.SandboxID+".json"), &parent); err != nil {
+		return err
+	}
+	if live != c.Ticket || parent != c.Ticket {
+		return fmt.Errorf("child sandbox revoked")
+	}
+	path := filepath.Join(a.Base, "children", id+".json.started")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err = f.Sync(); err != nil {
+		return err
+	}
+	return node.SyncDir(filepath.Dir(path))
 }
