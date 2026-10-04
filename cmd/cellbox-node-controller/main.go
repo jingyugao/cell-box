@@ -94,6 +94,9 @@ func run() error {
 	if err = mgr.Add(pool); err != nil {
 		return err
 	}
+	if err = mgr.Add(&node.GarbageCollector{Backend: backend}); err != nil {
+		return err
+	}
 	if err = ctrl.NewControllerManagedBy(mgr).For(&api.ResumablePod{}).Owns(&core.Pod{}).WithOptions(controlleroptions.Options{MaxConcurrentReconciles: 4}).Complete(r); err != nil {
 		return err
 	}

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/inventory"
@@ -30,10 +31,9 @@ func (b *Backend) SyncInventory(ctx context.Context, w *api.ResumablePod) error 
 	}
 	key := "checkpoints/" + owner + "/metadata.json"
 	phase := w.Status.Phase
-	// Running invalidates replay eligibility, but the index and blob are removed
-	// together by Forget on the next Running reconcile. Keep the last checkpoint
-	// record through this boundary instead of exposing an index-less race.
-	if phase == "Running" && w.Status.Snapshot == "" {
+	// Runtime observations need no checkpoint index. A consumed snapshot must
+	// never be republished after an interrupted status transition.
+	if (phase == "Running" && w.Status.Snapshot == "") || (w.Status.Snapshot != "" && b.snapshotConsumed(owner, w.Status.Snapshot)) {
 		return nil
 	}
 	wantPublished := (w.DeletionTimestamp == nil || phase == "Deleting") && w.Status.Snapshot != "" &&
@@ -43,13 +43,13 @@ func (b *Backend) SyncInventory(ctx context.Context, w *api.ResumablePod) error 
 		wantPublished = false
 	}
 
+	lock, _ := b.inventoryLocks.LoadOrStore(owner, &sync.Mutex{})
+	lock.(*sync.Mutex).Lock()
+	defer lock.(*sync.Mutex).Unlock()
 	b.inventoryMu.Lock()
-	defer b.inventoryMu.Unlock()
-	if b.inventoryState == nil {
-		b.inventoryState = map[string]string{}
-	}
+	state, cached := b.inventoryState[owner]
+	b.inventoryMu.Unlock()
 	if !wantPublished {
-		state, cached := b.inventoryState[owner]
 		if cached && state == "" {
 			return nil
 		}
@@ -60,12 +60,12 @@ func (b *Backend) SyncInventory(ctx context.Context, w *api.ResumablePod) error 
 		}
 		if err := b.Objects.Delete(ctx, key); err != nil {
 			if errors.Is(err, objectstorage.ErrNotFound) {
-				b.inventoryState[owner] = ""
+				b.setInventoryState(owner, "", "")
 				return nil
 			}
 			return retryableStorage(err)
 		}
-		b.inventoryState[owner] = ""
+		b.setInventoryState(owner, "", "")
 		return nil
 	}
 
@@ -100,7 +100,7 @@ func (b *Backend) SyncInventory(ctx context.Context, w *api.ResumablePod) error 
 	if err != nil {
 		return err
 	}
-	if state, ok := b.inventoryState[owner]; ok && state == string(data) {
+	if cached && state == string(data) {
 		return nil
 	}
 	if phase == "Suspended" {
@@ -109,18 +109,21 @@ func (b *Backend) SyncInventory(ctx context.Context, w *api.ResumablePod) error 
 		}
 	}
 
-	current, _, err := readInventoryObject(ctx, b.Objects, key)
-	if err == nil && bytes.Equal(current, data) {
-		b.inventoryState[owner] = string(data)
-		return nil
+	if !cached {
+		current, version, err := readInventoryObject(ctx, b.Objects, key)
+		if err == nil && bytes.Equal(current, data) {
+			b.setInventoryState(owner, string(data), version)
+			return nil
+		}
+		if err != nil && !errors.Is(err, objectstorage.ErrNotFound) {
+			return retryableStorage(err)
+		}
 	}
-	if err != nil && !errors.Is(err, objectstorage.ErrNotFound) {
+	version, err := b.Objects.Put(ctx, key, bytes.NewReader(data), int64(len(data)), "")
+	if err != nil {
 		return retryableStorage(err)
 	}
-	if _, err = b.Objects.Put(ctx, key, bytes.NewReader(data), int64(len(data)), ""); err != nil {
-		return retryableStorage(err)
-	}
-	b.inventoryState[owner] = string(data)
+	b.setInventoryState(owner, string(data), version)
 	return nil
 }
 
@@ -168,5 +171,19 @@ func readInventoryObject(ctx context.Context, objects objectstorage.Objects, key
 func (b *Backend) clearInventoryState(owner string) {
 	b.inventoryMu.Lock()
 	delete(b.inventoryState, owner)
+	delete(b.inventoryVersions, owner)
 	b.inventoryMu.Unlock()
+}
+
+func (b *Backend) setInventoryState(owner, state, version string) {
+	b.inventoryMu.Lock()
+	defer b.inventoryMu.Unlock()
+	if b.inventoryState == nil {
+		b.inventoryState = map[string]string{}
+	}
+	if b.inventoryVersions == nil {
+		b.inventoryVersions = map[string]string{}
+	}
+	b.inventoryState[owner] = state
+	b.inventoryVersions[owner] = version
 }

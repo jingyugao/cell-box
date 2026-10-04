@@ -103,7 +103,7 @@ func (s *Service) gateway(w http.ResponseWriter, r *http.Request, routeID, tail 
 	stop := context.AfterFunc(s.ctx, cancel)
 	defer stop()
 	streamID := randomID("stream-")
-	s.mu.Lock()
+	unlockAdmission := s.admissions.lock(route.BoxID)
 	err = s.store.View(func(st State) error {
 		b = st.Boxes[route.BoxID]
 		if op, ok := st.Operations[b.Box.OperationID]; ok && op.Operation.Kind != "exec" && op.Operation.Kind != "archive" {
@@ -117,9 +117,11 @@ func (s *Service) gateway(w http.ResponseWriter, r *http.Request, routeID, tail 
 		return nil
 	})
 	if err == nil {
+		s.mu.Lock()
 		s.streams[streamID] = activeStream{boxID: b.Box.ID, cancel: cancel}
+		s.mu.Unlock()
 	}
-	s.mu.Unlock()
+	unlockAdmission()
 	if err != nil {
 		fail(w, err)
 		return

@@ -64,6 +64,11 @@ type FencedGuestProvider interface {
 	GuestForExecution(context.Context, Handle, string) (Connection, error)
 }
 
+// ChangeProvider wakes lifecycle waiters when the runtime resource changes.
+type ChangeProvider interface {
+	WatchChanges(context.Context, Handle) (<-chan struct{}, error)
+}
+
 // InventoryProvider enumerates workloads from the runtime, without the service ledger.
 type InventoryProvider interface {
 	List(context.Context, string, string) ([]inventory.Record, error)

@@ -32,7 +32,7 @@ func NewForConfig(cfg *rest.Config) (*Provider, error) {
 	if err := api.AddToScheme(scheme); err != nil {
 		return nil, err
 	}
-	c, err := client.New(cfg, client.Options{Scheme: scheme})
+	c, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
 	if err != nil {
 		return nil, err
 	}

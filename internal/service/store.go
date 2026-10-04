@@ -14,13 +14,15 @@ import (
 type Store struct {
 	// Writers remain serialized for cross-resource invariants. Readers only hold
 	// mu while copying committed memory, never while object storage is accessed.
-	writeMu   sync.Mutex
+	writeMu   sync.RWMutex
+	boxWrites keyedLocks
 	records   *recordStore
 	objects   objectstorage.Objects
 	etag      string
 	failure   error
 	onFailure func()
 	mu        sync.Mutex
+	changes   chan struct{}
 	state     State
 	dir       string
 	lock      *os.File
@@ -175,8 +177,14 @@ func sameObservationBase(a, b boxRecord) bool {
 // UpdateObservedBox performs the compare even when update reports no changes.
 // It persists only when the observation changed the box.
 func (s *Store) UpdateObservedBox(base boxRecord, update func(*boxRecord) (bool, error)) (boxRecord, error) {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	var unlock func()
+	if base.Profile.Provider == "resumable-k8s-pod" {
+		unlock = s.lockBoxWriter(base.Box.ID)
+	} else {
+		s.writeMu.Lock()
+		unlock = s.writeMu.Unlock
+	}
+	defer unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.failure != nil {
@@ -280,6 +288,7 @@ func (s *Store) persistLocked(next State) error {
 			return s.failRemote()
 		}
 		s.state = next
+		s.notifyLocked()
 		return nil
 	}
 	persisted := next
@@ -312,6 +321,7 @@ func (s *Store) persistLocked(next State) error {
 	}
 	// Rename already committed; keep memory aligned even if directory fsync fails.
 	s.state = next
+	s.notifyLocked()
 	d, err := os.Open(s.dir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Cellbox: state committed but directory sync unavailable")

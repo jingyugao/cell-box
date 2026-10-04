@@ -30,17 +30,19 @@ type recordHead struct {
 }
 
 type resourceRecords struct {
-	Revision string `json:"revision"`
-	Deleted  bool   `json:"deleted,omitempty"`
-	State    *State `json:"state,omitempty"`
+	Revision       string `json:"revision"`
+	ParentRevision string `json:"parentRevision,omitempty"`
+	Deleted        bool   `json:"deleted,omitempty"`
+	State          *State `json:"state,omitempty"`
 }
 
 type recordStore struct {
-	initialized bool
-	data        map[string][]byte
-	etags       map[string]string
-	profiles    map[string]Profile
-	orphans     map[string]time.Time
+	initialized  bool
+	headRevision string
+	data         map[string][]byte
+	etags        map[string]string
+	profiles     map[string]Profile
+	orphans      map[string]time.Time
 }
 
 func recordKey(kind, id string) string {
@@ -103,7 +105,16 @@ func materializeRecords(ctx context.Context, objects objectstorage.Objects, chan
 				versions[change.Key] = current
 				continue
 			} else if current != version {
-				return nil, objectstorage.ErrConflict
+				// A box-local CAS may supersede an already materialized head.
+				// Its parent is the exact head it observed, so replay must not
+				// roll that newer resource back to the global transaction.
+				var descendant resourceRecords
+				var committed resourceRecords
+				if !strings.HasPrefix(change.Key, recordPrefix+"/boxes/") || json.Unmarshal(actual, &descendant) != nil || json.Unmarshal(change.Data, &committed) != nil || descendant.ParentRevision != committed.Revision || descendant.Revision == "" {
+					return nil, objectstorage.ErrConflict
+				}
+				versions[change.Key] = current
+				continue
 			}
 		}
 		// Deleted records become small tombstones. Physically removing the key
@@ -220,6 +231,9 @@ func OpenObjectStore(ctx context.Context, objects objectstorage.Objects) (*Store
 	// replaced process could still commit using the head this instance loaded.
 	s.records.initialized = false
 	if err := s.Update(func(*State) error { return nil }); err != nil {
+		return nil, err
+	}
+	if err := s.claimBoxRecords(ctx); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -449,6 +463,7 @@ func (s *Store) persistRecords(next State) error {
 	}
 	s.records.data = projected
 	s.etag = etag
+	s.records.headRevision = revision
 	s.records.initialized = true
 	return nil
 }

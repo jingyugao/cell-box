@@ -20,18 +20,19 @@ import (
 )
 
 type Service struct {
-	objects   objectstorage.Objects
-	config    Config
-	store     *Store
-	providers map[string]boxprovider.Provider
-	http      *http.Client
-	toolHTTP  *http.Client
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	mu        sync.Mutex
-	gcMu      sync.Mutex
-	streams   map[string]activeStream
+	objects    objectstorage.Objects
+	config     Config
+	store      *Store
+	providers  map[string]boxprovider.Provider
+	http       *http.Client
+	toolHTTP   *http.Client
+	ctx        context.Context
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	mu         sync.Mutex
+	admissions keyedLocks
+	gcMu       sync.Mutex
+	streams    map[string]activeStream
 }
 type activeStream struct {
 	boxID  string
@@ -273,12 +274,16 @@ func (s *Service) prepareOperation(client, key, kind, target string, input any, 
 			runtimeTiming(operation.TargetID, "cellbox.accept_"+kind, started, err)
 		}
 	}()
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := s.admissions.lock(target)
+	defer unlock()
 	key = client + ":" + kind + ":" + target + ":" + key
 	digest := inputHash(input)
 	fresh := false
-	err = s.store.Update(func(st *State) error {
+	update := s.store.Update
+	if kind == "resume" {
+		update = func(fn func(*State) error) error { return s.store.UpdateBox(target, fn) }
+	}
+	err = update(func(st *State) error {
 		if previous, ok := st.Keys[key]; ok {
 			if previous.Expired {
 				return apiError("OPERATION_EXPIRED", "Operation history has expired; this idempotency key cannot be reused")
@@ -290,7 +295,10 @@ func (s *Service) prepareOperation(client, key, kind, target string, input any, 
 			return nil
 		}
 		if target != "" && kind != "exec" && kind != "archive" {
-			if err := s.streamBusy(target); err != nil {
+			s.mu.Lock()
+			err := s.streamBusy(target)
+			s.mu.Unlock()
+			if err != nil {
 				return err
 			}
 		}
@@ -317,7 +325,11 @@ func (s *Service) launchWithCommit(op Operation, work func(context.Context) (map
 		defer cancel()
 		result, err := work(ctx)
 		saveStarted := time.Now()
-		saveErr := s.store.Update(func(st *State) error {
+		update := s.store.Update
+		if op.Kind == "resume" {
+			update = func(fn func(*State) error) error { return s.store.UpdateBox(op.TargetID, fn) }
+		}
+		saveErr := update(func(st *State) error {
 			if err == nil && commit != nil {
 				err = commit(st)
 			}
@@ -555,6 +567,12 @@ func (s *Service) guestAction(ctx context.Context, b boxRecord, path string) err
 func (s *Service) waitState(ctx context.Context, id, want string, checkHealth bool) (Box, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(s.config.StartupTimeoutSeconds)*time.Second)
 	defer cancel()
+	var changes <-chan struct{}
+	if b, err := s.rawBox(id); err == nil {
+		if provider, ok := s.providers[b.Profile.Provider].(boxprovider.ChangeProvider); ok {
+			changes, _ = provider.WatchChanges(ctx, b.Handle)
+		}
+	}
 	for {
 		b, err := s.rawBox(id)
 		if err != nil {
@@ -585,10 +603,18 @@ func (s *Service) waitState(ctx context.Context, id, want string, checkHealth bo
 		if err == nil && box.Phase == "failed" {
 			return box, apiError("READINESS_FAILED", "Runtime entered failed state")
 		}
+		interval := 250 * time.Millisecond
+		if changes != nil {
+			interval = 5 * time.Second
+		}
 		select {
 		case <-ctx.Done():
 			return Box{}, ctx.Err()
-		case <-time.After(250 * time.Millisecond):
+		case _, ok := <-changes:
+			if !ok {
+				changes = nil
+			}
+		case <-time.After(interval):
 		}
 	}
 }

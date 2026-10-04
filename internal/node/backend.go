@@ -31,13 +31,15 @@ type Backend struct {
 	Images             cri.ImageServiceClient
 	// Objects is optional for local-only installations. When configured, sealed
 	// snapshots are durable in object storage and Base is only a node cache.
-	Objects          objectstorage.Objects
-	forgetMu         sync.Mutex
-	forgetSuccess    map[forgetKey]struct{}
-	inventoryMu      sync.Mutex
-	inventoryState   map[string]string
-	durableMu        sync.Mutex
-	durableSnapshots map[string]bool
+	Objects           objectstorage.Objects
+	forgetMu          sync.Mutex
+	forgetSuccess     map[forgetKey]struct{}
+	inventoryMu       sync.Mutex
+	inventoryLocks    sync.Map
+	inventoryState    map[string]string
+	inventoryVersions map[string]string
+	durableMu         sync.Mutex
+	durableSnapshots  map[string]bool
 }
 
 type forgetKey struct {
@@ -221,6 +223,9 @@ func (b *Backend) verifySnapshotImage(ctx context.Context, r *api.ResumablePod, 
 
 func (b *Backend) prepareSnapshot(ctx context.Context, r *api.ResumablePod) error {
 	if r.Status.Snapshot != "" {
+		if b.snapshotConsumed(string(r.UID), r.Status.Snapshot) {
+			return fmt.Errorf("checkpoint was consumed by a previous execution")
+		}
 		path, err := SnapshotPath(b.Base, string(r.UID), r.Status.Snapshot)
 		if err != nil {
 			return err
@@ -355,6 +360,9 @@ func (b *Backend) Forget(ctx context.Context, r *api.ResumablePod) error {
 	}
 	b.durableMu.Unlock()
 	if err := os.RemoveAll(filepath.Join(b.Base, "workloads", string(r.UID))); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(filepath.Join(b.Base, "garbage", string(r.UID))); err != nil {
 		return err
 	}
 	if b.Objects != nil && !deleting {

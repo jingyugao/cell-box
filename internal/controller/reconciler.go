@@ -37,6 +37,9 @@ type Reconciler struct {
 type inventoryRuntime interface {
 	SyncInventory(context.Context, *api.ResumablePod) error
 }
+type snapshotInvalidator interface {
+	InvalidateSnapshot(context.Context, *api.ResumablePod) error
+}
 
 func (r *Reconciler) syncInventoryPhase(ctx context.Context, w *api.ResumablePod, phase string) error {
 	syncer, ok := r.Runtime.(inventoryRuntime)
@@ -262,6 +265,7 @@ func (r *Reconciler) startupFailure(ctx context.Context, p *core.Pod) string {
 	return message
 }
 func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (ctrl.Result, error) {
+	var warm *core.Pod
 	w.Status.Cycle++
 	w.Status.PodName = fmt.Sprintf("cb-%s-%d", string(w.UID)[:8], w.Status.Cycle)
 	w.Status.PodUID = ""
@@ -271,6 +275,7 @@ func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (ctrl.Resul
 			return again, err
 		}
 		if p != nil {
+			warm = p
 			w.Status.PodName = p.Name
 			w.Status.PodUID = string(p.UID)
 		}
@@ -279,7 +284,13 @@ func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (ctrl.Resul
 	if w.Status.Snapshot != "" {
 		phase = "Restoring"
 	}
-	return r.phase(ctx, w, phase, "Preparing a new Pod execution")
+	result, err := r.phase(ctx, w, phase, "Preparing a new Pod execution")
+	if err == nil && warm != nil {
+		if backend, ok := r.Runtime.(warmRuntime); ok {
+			_, err = backend.ActivateWarm(ctx, w, warm)
+		}
+	}
+	return result, err
 }
 func (r *Reconciler) service(ctx context.Context, w *api.ResumablePod) error {
 	if len(w.Spec.ServicePorts) == 0 {
@@ -530,10 +541,21 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			}
 		}
 		if ready(p) {
+			if backend, ok := r.Runtime.(snapshotInvalidator); ok && w.Status.Snapshot != "" {
+				if err = backend.InvalidateSnapshot(ctx, w); err != nil {
+					return again, err
+				}
+			}
 			// Persist snapshot invalidation before exposing this execution through
 			// the Service. A crash between these steps must not permit rollback.
 			w.Status.Snapshot = ""
-			return r.phase(ctx, w, "Running", "Pod is ready; previous snapshot cannot be replayed")
+			result, err := r.phase(ctx, w, "Running", "Pod is ready; previous snapshot cannot be replayed")
+			if err == nil {
+				if _, ok := r.Runtime.(snapshotInvalidator); ok {
+					err = r.serving(ctx, p, true)
+				}
+			}
+			return result, err
 		}
 		timeout := w.Spec.StartupTimeoutSeconds
 		if timeout == 0 {
@@ -546,8 +568,10 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if p == nil || p.DeletionTimestamp != nil || p.Status.Phase == core.PodFailed || p.Status.Phase == core.PodSucceeded {
 			return fail(fmt.Errorf("active execution lost; no automatic rollback or cold start"))
 		}
-		if err = r.Runtime.Forget(ctx, w); err != nil {
-			return again, err
+		if _, asyncCleanup := r.Runtime.(snapshotInvalidator); !asyncCleanup {
+			if err = r.Runtime.Forget(ctx, w); err != nil {
+				return again, err
+			}
 		}
 		if w.Spec.DesiredState == "Suspended" {
 			if err = r.serving(ctx, p, false); err != nil {
