@@ -234,7 +234,10 @@ func (p *Provider) inspectRunning(ctx context.Context, h boxprovider.Handle, w *
 	if getErr != nil {
 		return "", getErr
 	}
-	if current.UID != w.UID || current.ResourceVersion != w.ResourceVersion || current.Status.Phase != w.Status.Phase || current.Status.PodName != w.Status.PodName || current.Status.PodUID != w.Status.PodUID {
+	// Condition-only updates are asynchronous health observations, not a new
+	// execution. Fence lifecycle/spec changes without restarting the wait each
+	// time kubelet's readiness result propagates through the controller.
+	if current.UID != w.UID || current.Generation != w.Generation || current.DeletionTimestamp != nil || current.Spec.DesiredState != w.Spec.DesiredState || current.Status.Phase != w.Status.Phase || current.Status.Cycle != w.Status.Cycle || current.Status.PodName != w.Status.PodName || current.Status.PodUID != w.Status.PodUID || !apiequality.Semantic.DeepEqual(current.Status.Execution, w.Status.Execution) {
 		return "", errors.New("ResumablePod changed during lifecycle inspection")
 	}
 	if apierrors.IsNotFound(err) {

@@ -58,7 +58,7 @@ var again = ctrl.Result{RequeueAfter: time.Second}
 var errServiceCollision = stderrors.New("Service name is already owned by another workload")
 var pullableImage = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}$`)
 
-func (r *Reconciler) phase(ctx context.Context, w *api.ResumablePod, phase, message string) (ctrl.Result, error) {
+func (r *Reconciler) phase(ctx context.Context, w *api.ResumablePod, phase, message string, podReady ...bool) (ctrl.Result, error) {
 	w.Status.Message = message
 	if err := r.syncInventoryPhase(ctx, w, phase); err != nil {
 		return again, err
@@ -71,9 +71,11 @@ func (r *Reconciler) phase(ctx context.Context, w *api.ResumablePod, phase, mess
 	w.Status.ObservedGeneration = w.Generation
 	ready := meta.ConditionFalse
 	if phase == "Running" {
-		// Execution starts independently of the asynchronous Pod probe. The
-		// next Running reconciliation publishes the actual readiness condition.
-		ready = meta.ConditionUnknown
+		if len(podReady) == 0 {
+			ready = meta.ConditionUnknown
+		} else if podReady[0] {
+			ready = meta.ConditionTrue
+		}
 	}
 	apimeta.SetStatusCondition(&w.Status.Conditions, meta.Condition{Type: "Ready", Status: ready, Reason: phase, Message: message, ObservedGeneration: w.Generation})
 	return again, r.Status().Update(ctx, w)
@@ -341,7 +343,7 @@ func (r *Reconciler) started(ctx context.Context, w *api.ResumablePod, p *core.P
 			return again, err
 		}
 	}
-	result, err := r.phase(ctx, w, "Running", "Container started; previous snapshot cannot be replayed")
+	result, err := r.phase(ctx, w, "Running", "Container started; previous snapshot cannot be replayed", ready(p))
 	ctrl.LoggerFrom(ctx).Info("execution started", "podUID", w.Status.PodUID, "podReady", ready(p))
 	return result, err
 }

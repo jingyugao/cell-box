@@ -321,6 +321,19 @@ func TestInspectRejectsExecutionSwitchDuringPodRead(t *testing.T) {
 	base := p.Client
 	p.Client = podGetHookClient{Client: base, afterPodGet: func() {
 		latest := &api.ResumablePod{}
+		if err := base.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, latest); err != nil {
+			t.Fatal(err)
+		}
+		latest.Status.Conditions = []meta.Condition{{Type: "Ready", Status: meta.ConditionTrue, Reason: "ProbeCompleted", LastTransitionTime: meta.Now()}}
+		if err := base.Status().Update(ctx, latest); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	if observed, err := p.Inspect(ctx, h); err != nil || observed.Phase != "running" {
+		t.Fatalf("readiness-only update interrupted execution observation: %+v %v", observed, err)
+	}
+	p.Client = podGetHookClient{Client: base, afterPodGet: func() {
+		latest := &api.ResumablePod{}
 		if getErr := base.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, latest); getErr != nil {
 			t.Fatal(getErr)
 		}
