@@ -5,6 +5,7 @@ package main
 import (
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/controller"
+	"cellbox.local/cellbox/internal/imagecache"
 	"cellbox.local/cellbox/internal/node"
 	"cellbox.local/cellbox/internal/objectstorage"
 	"cellbox.local/cellbox/internal/version"
@@ -17,9 +18,11 @@ import (
 	"os"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	controlleroptions "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metrics "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
 func main() {
@@ -98,6 +101,12 @@ func run() error {
 		return err
 	}
 	if err = ctrl.NewControllerManagedBy(mgr).For(&api.ResumablePod{}).Owns(&core.Pod{}).WithOptions(controlleroptions.Options{MaxConcurrentReconciles: 4}).Complete(r); err != nil {
+		return err
+	}
+	if err = ctrl.NewControllerManagedBy(mgr).Named("image-cache").For(&core.ConfigMap{}).
+		WithEventFilter(predicate.NewPredicateFuncs(func(obj client.Object) bool { return obj.GetLabels()[imagecache.Label] == "true" })).
+		WithOptions(controlleroptions.Options{MaxConcurrentReconciles: 2}).
+		Complete(&controller.ImageCacheReconciler{Client: direct, Runtime: backend, NodeName: nodeName}); err != nil {
 		return err
 	}
 	return mgr.Start(ctrl.SetupSignalHandler())

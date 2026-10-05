@@ -1,9 +1,12 @@
 package service
 
 import (
+	api "cellbox.local/cellbox/api/v1alpha1"
+	"cellbox.local/cellbox/internal/boxprovider"
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -140,6 +143,12 @@ func (s *Service) importImage(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return nil, apiError("IMAGE_IMPORT_FAILED", "Cannot prepare and publish image; check BuildKit and registry access")
 			}
+			cacheStarted := time.Now()
+			err = s.cacheImportedImage(ctx, prepared.Image)
+			runtimeTiming(op.TargetID, "cellbox.cache_imported_image", cacheStarted, err)
+			if err != nil {
+				return nil, apiError("IMAGE_IMPORT_FAILED", "Cannot cache prepared image on runtime nodes; check node controller and registry access")
+			}
 			out := ImportedImage{ID: op.TargetID, Source: input.URL, ResolvedSource: resolved.Source, Image: prepared.Image, Platform: resolved.Platform, Command: resolved.Command, Env: resolved.Env, WorkingDir: resolved.WorkingDir, BuildCommand: input.BuildCommand, Ports: append([]int{}, run.Ports...), Warnings: append([]string{}, resolved.Warnings...), Key: prepared.Key, CreatedAt: time.Now().UTC()}
 			if err := s.store.Update(func(st *State) error {
 				st.ImportedImages[out.ID] = importedImageRecord{ImportedImage: out, ClientID: client}
@@ -151,6 +160,25 @@ func (s *Service) importImage(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusAccepted, op)
+}
+
+func (s *Service) cacheImportedImage(ctx context.Context, image string) error {
+	seen := map[string]bool{}
+	for _, profile := range s.config.Profiles {
+		key := profile.Provider + ":" + profile.NodeName + ":" + profile.Namespace
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		provider, ok := s.providers[profile.Provider].(boxprovider.ImageCacheProvider)
+		if !ok {
+			return boxprovider.ErrUnsupported
+		}
+		if err := provider.CacheImage(ctx, image, profile.NodeName, profile.Namespace); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Source credentials exist only in an operation-local 0600 file and are never
@@ -272,7 +300,10 @@ func (s *Service) importedProfile(client, id string, profile Profile) (Profile, 
 		out.Image = imported.Image
 		out.Guest.Command = imported.Command
 		out.Guest.CommandDir = imported.WorkingDir
-		out.Guest.Env = imported.Env
+		out.Guest.Env = maps.Clone(imported.Env)
+		if out.Guest.Env == nil {
+			out.Guest.Env = map[string]string{}
+		}
 		// User-owned image content cannot implement the profile's trusted debug
 		// launchers or receive access to its admitted host directories.
 		out.Guest.Tools = nil
@@ -280,6 +311,11 @@ func (s *Service) importedProfile(client, id string, profile Profile) (Profile, 
 		out.DebugReadOnlyHostPath = ""
 		out.DebugReadWriteHostPath = ""
 		for key, value := range profile.Guest.Env {
+			// Imported workloads have no shared host mount. Its environment
+			// paths must not redirect their startup into an unavailable mount.
+			if value == api.SharedMountPath || strings.HasPrefix(value, api.SharedMountPath+"/") {
+				continue
+			}
 			out.Guest.Env[key] = value
 		}
 		return nil

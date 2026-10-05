@@ -67,6 +67,11 @@ func New(binary string) *Provider {
 func NewWithRunner(r Runner) *Provider { return &Provider{runner: r} }
 func (*Provider) Name() string         { return "docker" }
 
+func (p *Provider) CacheImage(ctx context.Context, image, _, _ string) error {
+	_, err := p.run(ctx, []string{"pull", image})
+	return err
+}
+
 type imageInfo struct {
 	ID     string `json:"Id"`
 	Config struct {

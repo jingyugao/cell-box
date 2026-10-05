@@ -58,6 +58,11 @@ type Provider interface {
 	Guest(context.Context, Handle) (Connection, error)
 }
 
+// ImageCacheProvider warms the runtime image store without creating a workload.
+type ImageCacheProvider interface {
+	CacheImage(context.Context, string, string, string) error // image, node, namespace
+}
+
 // FencedGuestProvider validates the execution while resolving its
 // connection, avoiding a second, independent lifecycle inspection.
 type FencedGuestProvider interface {

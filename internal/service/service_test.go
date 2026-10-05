@@ -58,6 +58,14 @@ type fakeCoreProvider struct {
 	executionID  string
 	guestCalls   int
 	inspectErr   error
+	cacheImage   func(context.Context, string, string, string) error
+}
+
+func (p *fakeCoreProvider) CacheImage(ctx context.Context, image, node, namespace string) error {
+	if p.cacheImage != nil {
+		return p.cacheImage(ctx, image, node, namespace)
+	}
+	return nil
 }
 
 func (*fakeCoreProvider) Name() string { return "docker" }

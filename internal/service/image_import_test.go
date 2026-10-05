@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,7 +13,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/guestapi"
 	"cellbox.local/cellbox/internal/image"
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -75,9 +78,36 @@ func TestImageImportCreateIsolationAndRestart(t *testing.T) {
 	f.config.ImageBuild = ImageBuildConfig{Address: "unix:///tmp/buildkit.sock", Repository: "example.com/prepared", GuestBinary: guest, BuildctlBinary: buildctl}
 	f.reopen(t)
 	const buildCommand = "mkdir -p /opt/product && printf platform > /opt/product/platform.txt"
+	cacheStarted, cacheRelease := make(chan string, 1), make(chan struct{})
+	f.provider.cacheImage = func(ctx context.Context, image, _, _ string) error {
+		cacheStarted <- image
+		select {
+		case <-cacheRelease:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	input := importImageRequest{URL: ref.Name(), BuildCommand: buildCommand, RunCommand: "docker run -e BASE_ENV=overridden -w /tmp " + ref.Name() + " 'echo imported'", RegistryAuth: &image.RegistryAuth{Username: "import-user", Password: registryPassword}}
 	status, raw := f.call(t, "POST", "/v1/images:import", testClientToken, "import-one", input)
 	wantStatus(t, status, 202, raw)
+	importOp := decodeResponse[Operation](t, raw)
+	select {
+	case cached := <-cacheStarted:
+		if !strings.Contains(cached, "example.com/prepared@sha256:") {
+			t.Fatalf("cached source instead of prepared digest: %s", cached)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("import did not request runtime caching")
+	}
+	status, pending := f.call(t, "GET", "/v1/operations/"+importOp.ID, testClientToken, "", nil)
+	wantStatus(t, status, 200, pending)
+	if decodeResponse[Operation](t, pending).Status != "running" {
+		t.Fatal("import completed before image was cached")
+	}
+	status, missing := f.call(t, "GET", "/v1/images/"+importOp.TargetID, testClientToken, "", nil)
+	wantStatus(t, status, 404, missing)
+	close(cacheRelease)
 	op := f.waitOperation(t, decodeResponse[Operation](t, raw).ID, "succeeded")
 	id := op.Result["importedImageId"]
 	if id == "" {
@@ -129,9 +159,22 @@ func TestImageImportCreateIsolationAndRestart(t *testing.T) {
 	privilegedProfile := f.config.Profiles[0]
 	privilegedProfile.DebugReadWriteHostPath = "/host/private"
 	privilegedProfile.Guest.Tools = []guestapi.Tool{{ID: "private-tool", Executable: "/opt/cellbox/tools/private-tool"}}
+	privilegedProfile.Guest.Env = map[string]string{"SHARED_STARTUP_DIRECTORY": api.SharedMountPath,
+		"SHARED_CONFIG_PATH": api.SharedMountPath + "/runtime/config.json", "SAFE_PROFILE_ENV": "preserved"}
 	isolated, err := f.service.importedProfile("client-a", id, privilegedProfile)
 	if err != nil || len(isolated.Guest.Tools) != 0 || isolated.DebugReadWriteHostPath != "" {
 		t.Fatalf("import retained trusted tool or host access: %+v %v", isolated, err)
+	}
+	if isolated.Guest.Env["SHARED_STARTUP_DIRECTORY"] != "" || isolated.Guest.Env["SHARED_CONFIG_PATH"] != "" || isolated.Guest.Env["SAFE_PROFILE_ENV"] != "preserved" {
+		t.Fatal("import inherited absent shared mount paths or lost safe environment")
+	}
+	if err := f.service.store.View(func(st State) error {
+		if st.ImportedImages[id].ImportedImage.Env["SAFE_PROFILE_ENV"] != "" {
+			t.Fatal("profile preparation mutated imported image metadata")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 	f.reopen(t)
 	status, raw = f.call(t, "GET", "/v1/images/"+id, testClientToken, "", nil)
@@ -171,6 +214,13 @@ func TestImageImportCreateIsolationAndRestart(t *testing.T) {
 	if err := json.Unmarshal(state, &stateObject); err != nil {
 		t.Fatal(err)
 	}
+	f.provider.cacheImage = func(context.Context, string, string, string) error { return errors.New("runtime registry unavailable") }
+	input.RunCommand = "docker run " + ref.Name()
+	status, raw = f.call(t, "POST", "/v1/images:import", testClientToken, "import-cache-failure", input)
+	wantStatus(t, status, 202, raw)
+	failed := f.waitOperation(t, decodeResponse[Operation](t, raw).ID, "failed")
+	status, raw = f.call(t, "GET", "/v1/images/"+failed.TargetID, testClientToken, "", nil)
+	wantStatus(t, status, 404, raw)
 }
 
 func TestImportedImageUsageBlocksPausedAndHidesForeignOwnership(t *testing.T) {
