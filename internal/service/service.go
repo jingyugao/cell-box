@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -221,7 +222,9 @@ func cloneError(err error) *APIError {
 	return &APIError{Code: "RUNTIME_ERROR", Message: "Runtime operation failed; inspect Cellbox and provider health"}
 }
 func profileCapabilities(p Profile) Capabilities {
-	return Capabilities{Exec: true, Files: true, HTTP: true, WebSocket: true, Freeze: p.Provider == "docker", Suspend: map[bool]string{true: "same-node-checkpoint", false: "none"}[p.Provider == "resumable-k8s-pod"], Archives: "workspace-best-effort", ProtectedTools: len(p.Guest.Tools) > 0, CredentialBatch: true, InternalServices: true, RootDebug: p.Guest.Debug.UID == 0 && p.Guest.Debug.GID == 0, SharedDirectory: p.SharedReadOnlyHostPath != ""}
+	capabilities := Capabilities{Exec: true, Files: true, HTTP: true, WebSocket: true, Freeze: p.Provider == "docker", Suspend: map[bool]string{true: "same-node-checkpoint", false: "none"}[p.Provider == "resumable-k8s-pod"], Archives: "workspace-best-effort", ProtectedTools: len(p.Guest.Tools) > 0, CredentialBatch: true, InternalServices: true, RootDebug: p.Guest.Debug.UID == 0 && p.Guest.Debug.GID == 0, SharedDirectory: p.SharedReadOnlyHostPath != ""}
+	capabilities.MountedToolRuntime = capabilities.SharedDirectory && capabilities.ProtectedTools && capabilities.RootDebug && slices.Contains(p.MountedToolRuntimeImages, p.Image)
+	return capabilities
 }
 func owned(st *State, client, id string) (boxRecord, error) {
 	b, ok := st.Boxes[id]
@@ -688,6 +691,26 @@ func (s *Service) resumeGuest(ctx context.Context, b boxRecord) error {
 	}
 }
 
+// Startup and read RPCs can spawn short protected-tool calls after the RPC
+// itself finishes. Wait briefly for those admitted calls to drain before
+// checkpointing; Guest quiesce remains the atomic admission boundary.
+func (s *Service) quiesceGuest(ctx context.Context, b boxRecord) error {
+	ctx, cancel := context.WithTimeout(ctx, min(5*time.Second, time.Duration(s.config.StartupTimeoutSeconds)*time.Second))
+	defer cancel()
+	for {
+		err := s.guestAction(ctx, b, "/v1/quiesce")
+		var rejected *APIError
+		if !errors.As(err, &rejected) || rejected.Code != "BUSY" {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
 func (s *Service) provision(ctx context.Context, id string) (Box, error) {
 	b, err := s.rawBox(id)
 	if err != nil {
@@ -927,7 +950,10 @@ func (s *Service) action(client, key, id, action string) (Operation, error) {
 			}
 		default:
 			if action == "suspend" {
-				if err := s.guestAction(ctx, b, "/v1/quiesce"); err != nil {
+				started := time.Now()
+				err := s.quiesceGuest(ctx, b)
+				runtimeTiming(id, "cellbox.quiesce", started, err)
+				if err != nil {
 					return nil, err
 				}
 			}
