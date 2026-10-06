@@ -2,9 +2,11 @@ package service
 
 import (
 	"bytes"
+	"cellbox.local/cellbox/internal/telemetry"
 	"context"
 	"encoding/json"
 	"errors"
+	"go.opentelemetry.io/otel/trace"
 	"strings"
 	"sync"
 	"time"
@@ -97,10 +99,15 @@ func replaceRecords[T any](dst, before, after map[string]T) {
 // Cross-resource writers hold writeMu exclusively; different boxes can commit
 // in parallel. This entry point is for existing-box lifecycle operations only.
 func (s *Store) UpdateBox(id string, fn func(*State) error) error {
+	return s.UpdateBoxContext(context.Background(), id, fn)
+}
+func (s *Store) UpdateBoxContext(requestContext context.Context, id string, fn func(*State) error) error {
 	if s.records == nil {
 		return s.Update(fn)
 	}
+	_, lockSpan := telemetry.Start(requestContext, "cellbox.persist.wait_writer")
 	unlock := s.lockBoxWriter(id)
+	lockSpan.End()
 	defer unlock()
 	s.mu.Lock()
 	if s.failure != nil {
@@ -138,9 +145,11 @@ func (s *Store) UpdateBox(id string, fn func(*State) error) error {
 		}
 		delete(next.Keys, key)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(requestContext), 30*time.Second)
 	defer cancel()
-	projected, err := s.projectRecords(ctx, &next)
+	projectCtx, projectSpan := telemetry.Start(ctx, "cellbox.persist.project_records")
+	projected, err := s.projectRecords(projectCtx, &next)
+	telemetry.End(projectSpan, err)
 	if err != nil {
 		return err
 	}
@@ -176,6 +185,8 @@ func (s *Store) UpdateBox(id string, fn func(*State) error) error {
 	replaceRecords(s.state.Leases, before.Leases, next.Leases)
 	s.records.etags[key], s.records.data[key] = etag, data
 	s.notifyLocked()
+	traceCtxSpan := trace.SpanFromContext(requestContext)
+	traceCtxSpan.AddEvent("cellbox.waiters.notified")
 	return nil
 }
 

@@ -150,7 +150,7 @@ func (s *Service) Handler() http.Handler {
 			s.purgeBoxHandler(w, r, id)
 			return
 		}
-		op, err := s.action(clientID(r), r.Header.Get("Idempotency-Key"), id, action)
+		op, err := s.actionContext(r.Context(), clientID(r), r.Header.Get("Idempotency-Key"), id, action)
 		if err != nil {
 			fail(w, err)
 			return

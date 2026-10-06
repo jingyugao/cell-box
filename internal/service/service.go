@@ -5,6 +5,7 @@ import (
 	"cellbox.local/cellbox/internal/guestapi"
 	"cellbox.local/cellbox/internal/inventory"
 	"cellbox.local/cellbox/internal/objectstorage"
+	"cellbox.local/cellbox/internal/telemetry"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -18,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel/codes"
 )
 
 type Service struct {
@@ -336,16 +339,22 @@ func (s *Service) launch(op Operation, work func(context.Context) (map[string]st
 }
 
 func (s *Service) launchWithCommit(op Operation, work func(context.Context) (map[string]string, error), commit func(*State) error) {
+	s.launchWithCommitContext(s.ctx, op, work, commit)
+}
+func (s *Service) launchWithCommitContext(request context.Context, op Operation, work func(context.Context) (map[string]string, error), commit func(*State) error) {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		ctx, cancel := context.WithTimeout(s.ctx, 15*time.Minute)
+		ctx, cancel := context.WithTimeout(telemetry.Detached(request, s.ctx), 15*time.Minute)
 		defer cancel()
+		ctx, operationSpan := telemetry.Start(ctx, "cellbox.operation."+op.Kind, telemetry.String("sandbox.id", op.TargetID), telemetry.String("operation.id", op.ID))
+		defer operationSpan.End()
 		result, err := work(ctx)
 		saveStarted := time.Now()
+		persistCtx, persistSpan := telemetry.Start(ctx, "cellbox.persist_completion")
 		update := s.store.Update
 		if op.Kind == "resume" {
-			update = func(fn func(*State) error) error { return s.store.UpdateBox(op.TargetID, fn) }
+			update = func(fn func(*State) error) error { return s.store.UpdateBoxContext(persistCtx, op.TargetID, fn) }
 		}
 		saveErr := update(func(st *State) error {
 			if err == nil && commit != nil {
@@ -370,6 +379,13 @@ func (s *Service) launchWithCommit(op Operation, work func(context.Context) (map
 			}
 			return nil
 		})
+		telemetry.End(persistSpan, saveErr)
+		if err != nil || saveErr != nil {
+			operationSpan.SetStatus(codes.Error, "")
+		}
+		if saveErr == nil {
+			operationSpan.AddEvent("cellbox.operation.published")
+		}
 		runtimeTiming(op.TargetID, "cellbox.persist_completion", saveStarted, saveErr)
 		if saveErr != nil {
 			fmt.Printf("Cellbox could not persist operation completion %s\n", op.ID)
@@ -850,6 +866,9 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 	return op, nil
 }
 func (s *Service) action(client, key, id, action string) (Operation, error) {
+	return s.actionContext(context.Background(), client, key, id, action)
+}
+func (s *Service) actionContext(request context.Context, client, key, id, action string) (Operation, error) {
 	allowed := map[string]bool{"freeze": true, "unfreeze": true, "suspend": true, "resume": true, "destroy": true, "activate": true, "reconcile": true}
 	if !allowed[action] {
 		return Operation{}, apiError("INVALID_REQUEST", "Unknown lifecycle action")
@@ -906,7 +925,7 @@ func (s *Service) action(client, key, id, action string) (Operation, error) {
 	if err != nil || !fresh {
 		return op, err
 	}
-	s.launchWithCommit(op, func(ctx context.Context) (map[string]string, error) {
+	s.launchWithCommitContext(request, op, func(ctx context.Context) (map[string]string, error) {
 		p := s.providers[b.Profile.Provider]
 		switch action {
 		case "destroy":
@@ -964,7 +983,10 @@ func (s *Service) action(client, key, id, action string) (Operation, error) {
 				return nil, err
 			}
 			want := map[string]string{"freeze": "frozen", "unfreeze": "running", "suspend": "suspended", "resume": "running"}[action]
-			if _, err := s.waitState(ctx, id, want, action != "resume"); err != nil {
+			waitCtx, waitSpan := telemetry.Start(ctx, "cellbox.wait_runtime")
+			_, waitErr := s.waitState(waitCtx, id, want, action != "resume")
+			telemetry.End(waitSpan, waitErr)
+			if err := waitErr; err != nil {
 				return nil, err
 			}
 			if action == "resume" {
@@ -973,7 +995,9 @@ func (s *Service) action(client, key, id, action string) (Operation, error) {
 					return nil, err
 				}
 				started := time.Now()
-				err = s.resumeGuest(ctx, updated)
+				guestCtx, guestSpan := telemetry.Start(ctx, "cellbox.unquiesce")
+				err = s.resumeGuest(guestCtx, updated)
+				telemetry.End(guestSpan, err)
 				runtimeTiming(id, "cellbox.unquiesce", started, err)
 				if err != nil {
 					return nil, err
