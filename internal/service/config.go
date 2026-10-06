@@ -90,6 +90,11 @@ func (c *Config) Validate() error {
 		if !immutableImage.MatchString(p.Image) || (p.Provider == "resumable-k8s-pod" && !strings.Contains(p.Image, "@sha256:")) {
 			return fmt.Errorf("profile image must be an immutable SHA256 reference; Kubernetes requires repository@sha256:digest")
 		}
+		for _, trusted := range p.TrustedToolImages {
+			if !immutableImage.MatchString(trusted) || !strings.Contains(trusted, "@sha256:") {
+				return fmt.Errorf("trustedToolImages must contain immutable repository@sha256:digest references")
+			}
+		}
 		if p.CPU == 0 {
 			p.CPU = 1
 		}

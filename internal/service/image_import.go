@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -306,7 +307,9 @@ func (s *Service) importedProfile(client, id string, profile Profile) (Profile, 
 		}
 		// User-owned image content cannot implement the profile's trusted debug
 		// launchers or receive access to its admitted host directories.
-		out.Guest.Tools = nil
+		if !slices.Contains(profile.TrustedToolImages, imported.Image) {
+			out.Guest.Tools = nil
+		}
 		out.SharedReadOnlyHostPath = ""
 		out.DebugReadOnlyHostPath = ""
 		out.DebugReadWriteHostPath = ""
