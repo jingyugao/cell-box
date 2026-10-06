@@ -56,9 +56,12 @@ func executionPod(w *api.ResumablePod, name string) *core.Pod {
 	no := false
 	grace := int64(3)
 	runtime := api.RuntimeClass
+	// Resolve external CLI hostnames before cluster search suffixes. A suffix
+	// answered by upstream fake-IP DNS can otherwise route Go TLS to the wrong host.
+	ndots := "1"
 	container := *w.Spec.Container.DeepCopy()
 	container.VolumeMounts = hostMounts(w)
-	return &core.Pod{ObjectMeta: meta.ObjectMeta{Name: name, Namespace: w.Namespace, Labels: map[string]string{api.OwnerLabel: string(w.UID)}}, Spec: core.PodSpec{Containers: []core.Container{container}, Volumes: hostVolumes(w), RuntimeClassName: &runtime, RestartPolicy: core.RestartPolicyNever, AutomountServiceAccountToken: &no, EnableServiceLinks: &no, Hostname: "recoverable", TerminationGracePeriodSeconds: &grace, NodeSelector: map[string]string{"kubernetes.io/hostname": w.Spec.NodeName}, SchedulingGates: []core.PodSchedulingGate{{Name: api.Gate}}}}
+	return &core.Pod{ObjectMeta: meta.ObjectMeta{Name: name, Namespace: w.Namespace, Labels: map[string]string{api.OwnerLabel: string(w.UID)}}, Spec: core.PodSpec{DNSConfig: &core.PodDNSConfig{Options: []core.PodDNSConfigOption{{Name: "ndots", Value: &ndots}}}, Containers: []core.Container{container}, Volumes: hostVolumes(w), RuntimeClassName: &runtime, RestartPolicy: core.RestartPolicyNever, AutomountServiceAccountToken: &no, EnableServiceLinks: &no, Hostname: "recoverable", TerminationGracePeriodSeconds: &grace, NodeSelector: map[string]string{"kubernetes.io/hostname": w.Spec.NodeName}, SchedulingGates: []core.PodSchedulingGate{{Name: api.Gate}}}}
 }
 
 func (p *WarmPool) pods(ctx context.Context, options ...client.ListOption) ([]core.Pod, error) {

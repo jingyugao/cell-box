@@ -176,6 +176,16 @@ func TestImageImportCreateIsolationAndRestart(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	privilegedProfile.TrustedToolImages = []string{imported.Image}
+	approved, err := f.service.importedProfile("client-a", id, privilegedProfile)
+	if err != nil || len(approved.Guest.Tools) != 1 || approved.DebugReadWriteHostPath != "" || approved.SharedReadOnlyHostPath != "" {
+		t.Fatalf("approved image lost tools or gained host access: %+v %v", approved, err)
+	}
+	privilegedProfile.TrustedToolImages = []string{imported.Image + "different"}
+	unapproved, err := f.service.importedProfile("client-a", id, privilegedProfile)
+	if err != nil || len(unapproved.Guest.Tools) != 0 {
+		t.Fatal("a different image inherited trusted tools")
+	}
 	f.reopen(t)
 	status, raw = f.call(t, "GET", "/v1/images/"+id, testClientToken, "", nil)
 	wantStatus(t, status, 200, raw)

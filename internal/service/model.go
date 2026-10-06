@@ -8,6 +8,8 @@ import (
 )
 
 type Profile struct {
+	// Exact prepared images explicitly approved by the operator to run Guest.Tools.
+	TrustedToolImages      []string        `json:"trustedToolImages,omitempty"`
 	ID                     string          `json:"id"`
 	Provider               string          `json:"provider"`
 	Image                  string          `json:"image"`
