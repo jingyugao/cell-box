@@ -9,18 +9,20 @@ import (
 
 type Profile struct {
 	// Exact prepared images explicitly approved by the operator to run Guest.Tools.
-	TrustedToolImages      []string        `json:"trustedToolImages,omitempty"`
-	ID                     string          `json:"id"`
-	Provider               string          `json:"provider"`
-	Image                  string          `json:"image"`
-	NodeName               string          `json:"nodeName,omitempty"`
-	Namespace              string          `json:"namespace,omitempty"`
-	SharedReadOnlyHostPath string          `json:"sharedReadOnlyHostPath,omitempty"`
-	DebugReadOnlyHostPath  string          `json:"debugReadOnlyHostPath,omitempty"`
-	DebugReadWriteHostPath string          `json:"debugReadWriteHostPath,omitempty"`
-	CPU                    float64         `json:"cpu,omitempty"`
-	MemoryMiB              int64           `json:"memoryMiB,omitempty"`
-	Guest                  guestapi.Config `json:"guest"`
+	TrustedToolImages []string `json:"trustedToolImages,omitempty"`
+	// Images whose protected runner can read a mounted tool-runtime descriptor.
+	MountedToolRuntimeImages []string        `json:"mountedToolRuntimeImages,omitempty"`
+	ID                       string          `json:"id"`
+	Provider                 string          `json:"provider"`
+	Image                    string          `json:"image"`
+	NodeName                 string          `json:"nodeName,omitempty"`
+	Namespace                string          `json:"namespace,omitempty"`
+	SharedReadOnlyHostPath   string          `json:"sharedReadOnlyHostPath,omitempty"`
+	DebugReadOnlyHostPath    string          `json:"debugReadOnlyHostPath,omitempty"`
+	DebugReadWriteHostPath   string          `json:"debugReadWriteHostPath,omitempty"`
+	CPU                      float64         `json:"cpu,omitempty"`
+	MemoryMiB                int64           `json:"memoryMiB,omitempty"`
+	Guest                    guestapi.Config `json:"guest"`
 }
 type Config struct {
 	// ClientID is a data/idempotency namespace, not an authenticated identity.
@@ -52,20 +54,21 @@ func (e *APIError) Error() string         { return e.Message }
 func apiError(code, message string) error { return &APIError{Code: code, Message: message} }
 
 type Capabilities struct {
-	Exec             bool   `json:"exec"`
-	Files            bool   `json:"files"`
-	HTTP             bool   `json:"http"`
-	WebSocket        bool   `json:"websocket"`
-	PTY              bool   `json:"pty"`
-	ReconnectExec    bool   `json:"reconnectExec"`
-	Freeze           bool   `json:"freeze"`
-	Suspend          string `json:"suspend"`
-	Archives         string `json:"archives"`
-	ProtectedTools   bool   `json:"protectedTools"`
-	CredentialBatch  bool   `json:"credentialBatch,omitempty"`
-	InternalServices bool   `json:"internalServices,omitempty"`
-	RootDebug        bool   `json:"rootDebug,omitempty"`
-	SharedDirectory  bool   `json:"sharedDirectory,omitempty"`
+	Exec               bool   `json:"exec"`
+	Files              bool   `json:"files"`
+	HTTP               bool   `json:"http"`
+	WebSocket          bool   `json:"websocket"`
+	PTY                bool   `json:"pty"`
+	ReconnectExec      bool   `json:"reconnectExec"`
+	Freeze             bool   `json:"freeze"`
+	Suspend            string `json:"suspend"`
+	Archives           string `json:"archives"`
+	ProtectedTools     bool   `json:"protectedTools"`
+	CredentialBatch    bool   `json:"credentialBatch,omitempty"`
+	InternalServices   bool   `json:"internalServices,omitempty"`
+	RootDebug          bool   `json:"rootDebug,omitempty"`
+	SharedDirectory    bool   `json:"sharedDirectory,omitempty"`
+	MountedToolRuntime bool   `json:"mountedToolRuntime,omitempty"`
 }
 type Box struct {
 	ID              string       `json:"id"`

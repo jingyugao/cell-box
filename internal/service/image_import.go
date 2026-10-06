@@ -305,18 +305,16 @@ func (s *Service) importedProfile(client, id string, profile Profile) (Profile, 
 		if out.Guest.Env == nil {
 			out.Guest.Env = map[string]string{}
 		}
-		// User-owned image content cannot implement the profile's trusted debug
-		// launchers or receive access to its admitted host directories.
+		// Admitted CoCell images reuse the operator's read-only shared directory.
+		// Other imported workloads keep their isolated startup configuration.
 		if !slices.Contains(profile.TrustedToolImages, imported.Image) {
 			out.Guest.Tools = nil
+			out.SharedReadOnlyHostPath = ""
 		}
-		out.SharedReadOnlyHostPath = ""
 		out.DebugReadOnlyHostPath = ""
 		out.DebugReadWriteHostPath = ""
 		for key, value := range profile.Guest.Env {
-			// Imported workloads have no shared host mount. Its environment
-			// paths must not redirect their startup into an unavailable mount.
-			if value == api.SharedMountPath || strings.HasPrefix(value, api.SharedMountPath+"/") {
+			if out.SharedReadOnlyHostPath == "" && (value == api.SharedMountPath || strings.HasPrefix(value, api.SharedMountPath+"/")) {
 				continue
 			}
 			out.Guest.Env[key] = value

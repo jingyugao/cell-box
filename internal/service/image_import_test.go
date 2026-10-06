@@ -158,6 +158,7 @@ func TestImageImportCreateIsolationAndRestart(t *testing.T) {
 	}
 	privilegedProfile := f.config.Profiles[0]
 	privilegedProfile.DebugReadWriteHostPath = "/host/private"
+	privilegedProfile.SharedReadOnlyHostPath = "/host/shared"
 	privilegedProfile.Guest.Tools = []guestapi.Tool{{ID: "private-tool", Executable: "/opt/cellbox/tools/private-tool"}}
 	privilegedProfile.Guest.Env = map[string]string{"SHARED_STARTUP_DIRECTORY": api.SharedMountPath,
 		"SHARED_CONFIG_PATH": api.SharedMountPath + "/runtime/config.json", "SAFE_PROFILE_ENV": "preserved"}
@@ -177,14 +178,29 @@ func TestImageImportCreateIsolationAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	privilegedProfile.TrustedToolImages = []string{imported.Image}
+	privilegedProfile.MountedToolRuntimeImages = []string{imported.Image}
 	approved, err := f.service.importedProfile("client-a", id, privilegedProfile)
-	if err != nil || len(approved.Guest.Tools) != 1 || approved.DebugReadWriteHostPath != "" || approved.SharedReadOnlyHostPath != "" {
-		t.Fatalf("approved image lost tools or gained host access: %+v %v", approved, err)
+	if err != nil || len(approved.Guest.Tools) != 1 || approved.DebugReadWriteHostPath != "" || approved.SharedReadOnlyHostPath != "/host/shared" {
+		t.Fatalf("approved image lost shared mount or gained writable host access: %+v %v", approved, err)
+	}
+	if approved.Guest.Env["SHARED_STARTUP_DIRECTORY"] != api.SharedMountPath || approved.Guest.Env["SHARED_CONFIG_PATH"] != api.SharedMountPath+"/runtime/config.json" || !profileCapabilities(approved).SharedDirectory {
+		t.Fatal("approved image lost mounted startup configuration")
+	}
+	approved.Guest.Debug = guestapi.Identity{}
+	if !profileCapabilities(approved).MountedToolRuntime {
+		t.Fatal("admitted mounted-runtime image did not advertise its capability")
+	}
+	approved.MountedToolRuntimeImages = nil
+	if profileCapabilities(approved).MountedToolRuntime {
+		t.Fatal("old image advertised mounted-runtime support")
 	}
 	privilegedProfile.TrustedToolImages = []string{imported.Image + "different"}
 	unapproved, err := f.service.importedProfile("client-a", id, privilegedProfile)
 	if err != nil || len(unapproved.Guest.Tools) != 0 {
 		t.Fatal("a different image inherited trusted tools")
+	}
+	if unapproved.SharedReadOnlyHostPath != "" || profileCapabilities(unapproved).MountedToolRuntime {
+		t.Fatal("unadmitted image inherited the shared mount")
 	}
 	f.reopen(t)
 	status, raw = f.call(t, "GET", "/v1/images/"+id, testClientToken, "", nil)

@@ -166,6 +166,9 @@ components:
         sharedDirectory:
           type: boolean
           description: A profile-owned shared directory is mounted read-only at /var/lib/cellbox/shared.
+        mountedToolRuntime:
+          type: boolean
+          description: The admitted image's protected runner supports mounted tool-runtime descriptors with root debug access.
         pty:
           type: boolean
         reconnectExec:
