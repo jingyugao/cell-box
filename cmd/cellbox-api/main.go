@@ -18,9 +18,11 @@ import (
 	"cellbox.local/cellbox/internal/providers/docker"
 	"cellbox.local/cellbox/internal/providers/resumable"
 	"cellbox.local/cellbox/internal/service"
+	"cellbox.local/cellbox/internal/telemetry"
 	"cellbox.local/cellbox/internal/version"
 	"crypto/sha256"
 	"encoding/hex"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/kubernetes"
@@ -124,6 +126,15 @@ func run(args []string) error {
 
 	signalContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	shutdownTracing, err := telemetry.Initialize(signalContext)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(ctx)
+	}()
 	if config.ObjectStorage == (objectstorage.Config{}) {
 		return serve(signalContext, config, providers)
 	}
@@ -198,7 +209,7 @@ func serve(ctx context.Context, config service.Config, providers map[string]boxp
 	if err != nil {
 		return fmt.Errorf("cannot start Cellbox service: %w", err)
 	}
-	server := &http.Server{Addr: config.Listen, Handler: app.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 1 << 20,
+	server := &http.Server{Addr: config.Listen, Handler: otelhttp.NewHandler(app.Handler(), "cellbox.http"), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 1 << 20,
 		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 	serveResult := make(chan error, 1)
