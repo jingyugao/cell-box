@@ -131,6 +131,9 @@ func missing(err error) bool {
 	return err != nil && (strings.Contains(err.Error(), "No such container") || strings.Contains(err.Error(), "No such object"))
 }
 func validateSpec(s boxprovider.Spec) error {
+	if s.PersistentHome {
+		return errors.New("persistentHome is unsupported by Docker")
+	}
 	if !boxIDPattern.MatchString(s.BoxID) {
 		return errors.New("invalid box ID")
 	}

@@ -226,7 +226,7 @@ func cloneError(err error) *APIError {
 	return &APIError{Code: "RUNTIME_ERROR", Message: "Runtime operation failed; inspect Cellbox and provider health"}
 }
 func profileCapabilities(p Profile) Capabilities {
-	capabilities := Capabilities{Exec: true, Files: true, HTTP: true, WebSocket: true, Freeze: p.Provider == "docker", Suspend: map[bool]string{true: "same-node-checkpoint", false: "none"}[p.Provider == "resumable-k8s-pod"], Archives: "workspace-best-effort", ProtectedTools: len(p.Guest.Tools) > 0, CredentialBatch: true, InternalServices: true, RootDebug: p.Guest.Debug.UID == 0 && p.Guest.Debug.GID == 0, SharedDirectory: p.SharedReadOnlyHostPath != ""}
+	capabilities := Capabilities{Exec: true, Files: true, HTTP: true, WebSocket: true, Freeze: p.Provider == "docker", Suspend: map[bool]string{true: "same-node-checkpoint", false: "none"}[p.Provider == "resumable-k8s-pod"], Archives: "workspace-best-effort", ProtectedTools: len(p.Guest.Tools) > 0, CredentialBatch: true, InternalServices: true, RootDebug: p.Guest.Debug.UID == 0 && p.Guest.Debug.GID == 0, SharedDirectory: p.SharedReadOnlyHostPath != "", PersistentHome: p.PersistentHome}
 	capabilities.MountedToolRuntime = capabilities.SharedDirectory && capabilities.ProtectedTools && capabilities.RootDebug && slices.Contains(p.MountedToolRuntimeImages, p.Image)
 	capabilities.MountedDebugHome = capabilities.MountedToolRuntime && p.DebugReadWriteHostPath == path.Join(p.SharedReadOnlyHostPath, "runtime/debug-homes") && slices.Contains(p.DebugHomeImages, p.Image)
 	return capabilities
@@ -416,7 +416,7 @@ func runtimeSpec(b boxRecord) boxprovider.Spec {
 		config.DebugHome = "/home/debug"
 	}
 	metadata, _ := json.Marshal(inventory.Record{ClientID: b.ClientID, Box: mustBoxJSON(b.Box), Staged: b.Staged})
-	return boxprovider.Spec{Inventory: metadata, BoxID: b.Box.ID, Image: b.Profile.Image, Config: config, CPU: b.Profile.CPU, MemoryMiB: b.Profile.MemoryMiB, Namespace: b.Profile.Namespace, NodeName: b.Profile.NodeName, SharedReadOnlyHostPath: b.Profile.SharedReadOnlyHostPath, DebugReadOnlyHostPath: b.Profile.DebugReadOnlyHostPath, DebugReadWriteHostPath: b.Profile.DebugReadWriteHostPath, Staged: b.Staged}
+	return boxprovider.Spec{Inventory: metadata, BoxID: b.Box.ID, Image: b.Profile.Image, Config: config, CPU: b.Profile.CPU, MemoryMiB: b.Profile.MemoryMiB, Namespace: b.Profile.Namespace, NodeName: b.Profile.NodeName, SharedReadOnlyHostPath: b.Profile.SharedReadOnlyHostPath, DebugReadOnlyHostPath: b.Profile.DebugReadOnlyHostPath, DebugReadWriteHostPath: b.Profile.DebugReadWriteHostPath, PersistentHome: b.Profile.PersistentHome, Staged: b.Staged}
 }
 func (s *Service) rawBox(id string) (boxRecord, error) {
 	return s.store.BoxRecord(id)

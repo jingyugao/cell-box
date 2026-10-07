@@ -16,6 +16,7 @@ import (
 	"time"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
+	"cellbox.local/cellbox/internal/homevolume"
 	"cellbox.local/cellbox/internal/runtime"
 	core "k8s.io/api/core/v1"
 	errors "k8s.io/apimachinery/pkg/api/errors"
@@ -114,6 +115,13 @@ func fingerprint(w *api.ResumablePod) string {
 			DebugReadWriteHostPath string
 		}{legacy.Node, legacy.Container, legacy.Ports, w.Spec.DebugReadWriteHostPath})
 	}
+	if w.Spec.PersistentHome {
+		// Preserve all existing fingerprints when the optional mode is disabled.
+		b, _ = json.Marshal(struct {
+			Legacy         json.RawMessage
+			PersistentHome bool
+		}{b, true})
+	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
@@ -139,6 +147,11 @@ func debugHostMounts(w *api.ResumablePod) []core.VolumeMount {
 }
 func hostVolumes(w *api.ResumablePod) []core.Volume {
 	volumes := debugHostVolumes(w)
+	if w.Spec.PersistentHome {
+		home, _ := homevolume.Path(homevolume.DefaultBase, string(w.UID)) // validate checks the owner first.
+		directory := core.HostPathDirectory
+		volumes = append(volumes, core.Volume{Name: "agent-home", VolumeSource: core.VolumeSource{HostPath: &core.HostPathVolumeSource{Path: home, Type: &directory}}})
+	}
 	if w.Spec.SharedReadOnlyHostPath != "" {
 		directory := core.HostPathDirectory
 		volumes = append(volumes, core.Volume{Name: "shared", VolumeSource: core.VolumeSource{HostPath: &core.HostPathVolumeSource{Path: w.Spec.SharedReadOnlyHostPath, Type: &directory}}})
@@ -147,6 +160,9 @@ func hostVolumes(w *api.ResumablePod) []core.Volume {
 }
 func hostMounts(w *api.ResumablePod) []core.VolumeMount {
 	mounts := debugHostMounts(w)
+	if w.Spec.PersistentHome {
+		mounts = append(mounts, core.VolumeMount{Name: "agent-home", MountPath: homevolume.MountPath})
+	}
 	if w.Spec.SharedReadOnlyHostPath != "" {
 		mounts = append(mounts, core.VolumeMount{Name: "shared", MountPath: api.SharedMountPath, ReadOnly: true})
 	}
@@ -167,6 +183,11 @@ func admittedDebugMount(w *api.ResumablePod, p *core.Pod) bool {
 }
 func validate(w *api.ResumablePod) error {
 	c := w.Spec.Container
+	if w.Spec.PersistentHome {
+		if _, err := homevolume.Path(homevolume.DefaultBase, string(w.UID)); err != nil {
+			return err
+		}
+	}
 	if w.Spec.DesiredState != "Running" && w.Spec.DesiredState != "Suspended" {
 		return fmt.Errorf("desiredState must be Running or Suspended")
 	}
@@ -281,7 +302,7 @@ func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (ctrl.Resul
 	w.Status.PodName = fmt.Sprintf("cb-%s-%d", string(w.UID)[:8], w.Status.Cycle)
 	w.Status.PodUID = ""
 	w.Status.Execution = nil
-	if w.Status.Snapshot != "" && r.WarmPool != nil {
+	if w.Status.Snapshot != "" && r.WarmPool != nil && !w.Spec.PersistentHome {
 		p, err := r.WarmPool.acquire(ctx, w)
 		if err != nil {
 			return again, err

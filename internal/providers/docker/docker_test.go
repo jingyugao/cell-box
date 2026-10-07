@@ -259,6 +259,11 @@ func TestRejectUnsafeInputs(t *testing.T) {
 	f := newFake()
 	p := NewWithRunner(f)
 	s := spec()
+	s.PersistentHome = true
+	if err := validateSpec(s); err == nil {
+		t.Fatal("Docker accepted persistentHome")
+	}
+	s.PersistentHome = false
 	s.CPU = 0
 	if _, err := p.Create(context.Background(), s); err == nil {
 		t.Fatal("accepted zero CPU")

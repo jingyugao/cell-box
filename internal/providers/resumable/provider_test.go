@@ -42,6 +42,27 @@ func TestSharedDirectorySpecPropagation(t *testing.T) {
 	}
 }
 
+func TestPersistentHomeSpecPropagationAndReentryCheck(t *testing.T) {
+	p, s, ctx := fixture(t)
+	s.Config.Workspace = "/home/agent/workspace"
+	s.PersistentHome = true
+	h, err := p.Create(ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &api.ResumablePod{}
+	if err := p.Client.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
+		t.Fatal(err)
+	}
+	if !w.Spec.PersistentHome {
+		t.Fatal("provider lost persistentHome")
+	}
+	s.PersistentHome = false
+	if _, err := p.Create(ctx, s); err == nil {
+		t.Fatal("re-entered Box with a different persistentHome setting")
+	}
+}
+
 type uidClient struct{ client.Client }
 
 func (c uidClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {

@@ -49,6 +49,35 @@ func TestProfilePreservesExplicitRootDebugAndDefaultsOmittedIdentity(t *testing.
 	}
 }
 
+func TestPersistentHomeIsFixedForNewBoxesAndPreservesLegacyLayout(t *testing.T) {
+	c := Config{Profiles: []Profile{{ID: "home", Provider: "resumable-k8s-pod", Image: "registry.example.invalid/image@sha256:" + strings.Repeat("a", 64), NodeName: "node-a", Namespace: "boxes"}}}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	profile := c.Profiles[0]
+	if !profileCapabilities(profile).PersistentHome {
+		t.Fatal("persistentHome capability was not advertised")
+	}
+	if !runtimeSpec(boxRecord{Box: Box{ID: "box-1"}, Profile: profile}).PersistentHome {
+		t.Fatal("persistentHome was not forwarded to the provider")
+	}
+	if profile.Guest.Workspace != "/home/agent/workspace" {
+		t.Fatal("new resumable profile did not default workspace into HOME")
+	}
+	c.Profiles[0].PersistentHome = false
+	c.Profiles[0].Guest.Workspace = "/workspace"
+	if err := c.Validate(); err != nil || !c.Profiles[0].PersistentHome {
+		t.Fatalf("persistent HOME could be disabled: %v", err)
+	}
+	var legacy Profile
+	if err := json.Unmarshal([]byte(`{"provider":"resumable-k8s-pod","guest":{"workspace":"/home/agent/workspace"}}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if runtimeSpec(boxRecord{Profile: legacy}).PersistentHome || profileCapabilities(legacy).PersistentHome {
+		t.Fatal("legacy stored profile was silently switched to a different filesystem")
+	}
+}
+
 type fakeCoreProvider struct {
 	mu           sync.Mutex
 	guestURL     string
