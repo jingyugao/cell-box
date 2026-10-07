@@ -14,6 +14,7 @@ import (
 	"time"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
+	"cellbox.local/cellbox/internal/homevolume"
 	"cellbox.local/cellbox/internal/objectstorage"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -127,12 +128,20 @@ func runningImageMatches(actual string, image *cri.Image) bool {
 	return false
 }
 func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.Pod) error {
+	homeID, err := b.persistentHome(r, false)
+	if err != nil {
+		return err
+	}
 	path, err := SnapshotPath(b.Base, string(r.UID), r.Status.Snapshot)
 	if err != nil {
 		return err
 	}
 	if _, err = os.Stat(path); err == nil {
-		if _, err = VerifyCached(path, string(r.UID), r.Status.SpecHash, b.Runsc); err != nil {
+		m, err := VerifyCached(path, string(r.UID), r.Status.SpecHash, b.Runsc)
+		if err != nil {
+			return err
+		}
+		if err = b.verifySnapshotHome(r, m); err != nil {
 			return err
 		}
 		return b.uploadSnapshot(ctx, r, path)
@@ -198,7 +207,12 @@ func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.P
 	if err = b.command(ctx, "checkpoint", "--image-path="+pending, live[0].Id); err != nil {
 		return err
 	}
-	if err = Seal(pending, Manifest{OwnerUID: string(r.UID), SpecHash: r.Status.SpecHash, ImageID: image.Id, RunscHash: binaryHash}); err != nil {
+	if homeID != "" {
+		if err = homevolume.Checkpoint(b.Base, string(r.UID), homeID, string(p.UID), r.Status.Snapshot); err != nil {
+			return err
+		}
+	}
+	if err = Seal(pending, Manifest{OwnerUID: string(r.UID), SpecHash: r.Status.SpecHash, ImageID: image.Id, RunscHash: binaryHash, HomeID: homeID}); err != nil {
 		return err
 	}
 	if err = os.Rename(pending, path); err != nil {
@@ -218,6 +232,9 @@ func (b *Backend) verifySnapshotImage(ctx context.Context, r *api.ResumablePod, 
 	if err != nil {
 		return nil, err
 	}
+	if err = b.verifySnapshotHome(r, m); err != nil {
+		return nil, err
+	}
 	id, err := b.imageID(ctx, r.Spec.Container.Image)
 	if err != nil {
 		return nil, err
@@ -226,6 +243,20 @@ func (b *Backend) verifySnapshotImage(ctx context.Context, r *api.ResumablePod, 
 		return nil, fmt.Errorf("image changed since checkpoint")
 	}
 	return m, nil
+}
+
+func (b *Backend) verifySnapshotHome(r *api.ResumablePod, m *Manifest) error {
+	homeID, err := b.persistentHome(r, false)
+	if err != nil {
+		return err
+	}
+	if m.HomeID != homeID {
+		return fmt.Errorf("checkpoint persistent HOME identity mismatch")
+	}
+	if homeID != "" {
+		return homevolume.ValidateCheckpoint(b.Base, string(r.UID), homeID, r.Status.Snapshot)
+	}
+	return nil
 }
 
 func (b *Backend) prepareSnapshot(ctx context.Context, r *api.ResumablePod) error {
@@ -257,10 +288,25 @@ func (b *Backend) prepareSnapshot(ctx context.Context, r *api.ResumablePod) erro
 }
 
 func (b *Backend) Prepare(ctx context.Context, r *api.ResumablePod, p *core.Pod) error {
+	homeID, err := b.persistentHome(r, r.Status.Cycle == 1 && r.Status.Snapshot == "")
+	if err != nil {
+		return err
+	}
 	if err := b.prepareSnapshot(ctx, r); err != nil {
 		return err
 	}
-	return AtomicJSON(filepath.Join(b.Base, "tickets", string(p.UID)+".json"), Ticket{OwnerUID: string(r.UID), PodUID: string(p.UID), Namespace: p.Namespace, PodName: p.Name, Snapshot: r.Status.Snapshot, SpecHash: r.Status.SpecHash})
+	return AtomicJSON(filepath.Join(b.Base, "tickets", string(p.UID)+".json"), Ticket{OwnerUID: string(r.UID), PodUID: string(p.UID), Namespace: p.Namespace, PodName: p.Name, Snapshot: r.Status.Snapshot, SpecHash: r.Status.SpecHash, HomeID: homeID})
+}
+
+func (b *Backend) persistentHome(r *api.ResumablePod, initialize bool) (string, error) {
+	if !r.Spec.PersistentHome {
+		return "", nil
+	}
+	home, err := homevolume.Prepare(b.Base, string(r.UID), r.Spec.NodeName, r.Status.SpecHash, initialize)
+	if err != nil {
+		return "", fmt.Errorf("persistent HOME: %w", err)
+	}
+	return home.ID, nil
 }
 func (b *Backend) Cleanup(ctx context.Context, p *core.Pod) error {
 	if p.UID == "" {
@@ -371,6 +417,13 @@ func (b *Backend) Forget(ctx context.Context, r *api.ResumablePod) error {
 	}
 	if err := os.RemoveAll(filepath.Join(b.Base, "garbage", string(r.UID))); err != nil {
 		return err
+	}
+	// Runtime/snapshot cleanup also calls Forget while the Box still exists.
+	// Its HOME belongs to the Box and is reclaimed only by the deletion finalizer.
+	if deleting && r.Spec.PersistentHome {
+		if err := homevolume.Remove(b.Base, string(r.UID), r.Spec.NodeName, r.Status.SpecHash); err != nil {
+			return err
+		}
 	}
 	if b.Objects != nil && !deleting {
 		b.forgetMu.Lock()

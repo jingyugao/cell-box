@@ -30,6 +30,7 @@ build:
 	rm -f -- "$$out/test/scripts/test-node-install.sh" "$$out/test/scripts/e2e-bootstrap.sh"
 	mkdir -p "$$out/test" "$$out/config" "$$out/api"
 	cp -r test/scripts "$$out/test/"
+	cp -r test/fixtures "$$out/test/"
 	cp config/sample.json "$$out/config/"
 	cp api/openapi.yaml "$$out/api/"
 	cp LICENSE VERSION README.md "$$out/"

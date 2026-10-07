@@ -109,6 +109,7 @@ func (p *Provider) Create(ctx context.Context, spec boxprovider.Spec) (boxprovid
 			SharedReadOnlyHostPath: spec.SharedReadOnlyHostPath,
 			DebugReadOnlyHostPath:  spec.DebugReadOnlyHostPath,
 			DebugReadWriteHostPath: spec.DebugReadWriteHostPath,
+			PersistentHome:         spec.PersistentHome,
 			ServicePorts:           []core.ServicePort{{Name: "guest", Port: guestapi.Port, TargetPort: intstr.FromInt32(guestapi.Port), Protocol: core.ProtocolTCP}}},
 	}
 	if len(spec.Inventory) > 0 {
@@ -147,7 +148,7 @@ func (p *Provider) Create(ctx context.Context, spec boxprovider.Spec) (boxprovid
 }
 
 func matchExisting(actual, wanted *api.ResumablePod) error {
-	if actual.UID == "" || actual.DeletionTimestamp != nil || actual.Labels[managedLabel] != "true" || actual.Labels[boxLabel] != wanted.Labels[boxLabel] || actual.Annotations[inventory.Annotation] != wanted.Annotations[inventory.Annotation] || actual.Labels[inventory.ClientLabel] != wanted.Labels[inventory.ClientLabel] || actual.Spec.NodeName != wanted.Spec.NodeName || actual.Spec.SharedReadOnlyHostPath != wanted.Spec.SharedReadOnlyHostPath || actual.Spec.DebugReadOnlyHostPath != wanted.Spec.DebugReadOnlyHostPath || actual.Spec.DebugReadWriteHostPath != wanted.Spec.DebugReadWriteHostPath || !apiequality.Semantic.DeepEqual(actual.Spec.Container, wanted.Spec.Container) || !apiequality.Semantic.DeepEqual(actual.Spec.ServicePorts, wanted.Spec.ServicePorts) {
+	if actual.UID == "" || actual.DeletionTimestamp != nil || actual.Labels[managedLabel] != "true" || actual.Labels[boxLabel] != wanted.Labels[boxLabel] || actual.Annotations[inventory.Annotation] != wanted.Annotations[inventory.Annotation] || actual.Labels[inventory.ClientLabel] != wanted.Labels[inventory.ClientLabel] || actual.Spec.NodeName != wanted.Spec.NodeName || actual.Spec.SharedReadOnlyHostPath != wanted.Spec.SharedReadOnlyHostPath || actual.Spec.DebugReadOnlyHostPath != wanted.Spec.DebugReadOnlyHostPath || actual.Spec.DebugReadWriteHostPath != wanted.Spec.DebugReadWriteHostPath || actual.Spec.PersistentHome != wanted.Spec.PersistentHome || !apiequality.Semantic.DeepEqual(actual.Spec.Container, wanted.Spec.Container) || !apiequality.Semantic.DeepEqual(actual.Spec.ServicePorts, wanted.Spec.ServicePorts) {
 		return fmt.Errorf("ResumablePod %s already exists with different ownership or immutable profile", actual.Name)
 	}
 	return nil

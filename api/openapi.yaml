@@ -172,6 +172,9 @@ components:
         mountedDebugHome:
           type: boolean
           description: An admitted HOME runner uses the profile's managed runtime/debug-homes directory mounted read-write at /home/debug.
+        persistentHome:
+          type: boolean
+          description: The provider preserves this Box's initially empty /home/agent directory across same-node suspend/resume. HOME data is separate from checkpoint objects and is removed when the Box is deleted.
         pty:
           type: boolean
         reconnectExec:

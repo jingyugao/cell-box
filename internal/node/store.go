@@ -12,9 +12,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+
+	"cellbox.local/cellbox/internal/homevolume"
 )
 
-const DefaultBase = "/var/lib/cellbox"
+const DefaultBase = homevolume.DefaultBase
 const DefaultRunsc = "/usr/local/bin/runsc"
 const DefaultRoot = "/run/containerd/runsc/k8s.io"
 
@@ -23,6 +25,7 @@ var safeID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]{0,100}$`)
 func ValidID(s string) bool { return safeID.MatchString(s) }
 
 type Manifest struct {
+	HomeID    string            `json:"persistentHomeID,omitempty"`
 	OwnerUID  string            `json:"ownerUID"`
 	SpecHash  string            `json:"specHash"`
 	ImageID   string            `json:"imageID"`
@@ -30,6 +33,7 @@ type Manifest struct {
 	Files     map[string]string `json:"files"`
 }
 type Ticket struct {
+	HomeID    string `json:"persistentHomeID,omitempty"`
 	OwnerUID  string `json:"ownerUID"`
 	PodUID    string `json:"podUID"`
 	Namespace string `json:"namespace"`

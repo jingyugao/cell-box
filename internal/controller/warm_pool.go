@@ -117,6 +117,10 @@ func (p *WarmPool) reconcile(ctx context.Context) error {
 	restoring := false
 	for i := range workloads.Items {
 		w := &workloads.Items[i]
+		// A prepared sandbox cannot acquire a different Box's HOME mount later.
+		if w.Spec.PersistentHome {
+			continue
+		}
 		eligible := w.Status.Phase == "Creating" || w.Status.Phase == "Running" || w.Status.Phase == "Checkpointing" || w.Status.Phase == "Suspending" || w.Status.Phase == "Suspended" || w.Status.Phase == "Restoring"
 		if w.Spec.NodeName == r.NodeName && w.DeletionTimestamp == nil && w.Status.SpecHash != "" && eligible && validate(w) == nil {
 			if w.Status.Phase == "Restoring" && time.Since(w.Status.Since.Time) < 2*time.Second {
@@ -228,6 +232,9 @@ func (p *WarmPool) reconcile(ctx context.Context) error {
 }
 
 func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (*core.Pod, error) {
+	if w.Spec.PersistentHome {
+		return nil, nil
+	}
 	if p.Size == 0 {
 		return nil, nil
 	}

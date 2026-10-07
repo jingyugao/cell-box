@@ -40,6 +40,9 @@ spec:
             spec:
               type: object
               required: [nodeName, container]
+              x-kubernetes-validations:
+                - rule: "(has(self.persistentHome) && self.persistentHome) == (has(oldSelf.persistentHome) && oldSelf.persistentHome)"
+                  message: persistentHome is immutable
               properties:
                 nodeName:
                   type: string
@@ -76,6 +79,8 @@ spec:
                   x-kubernetes-validations:
                     - rule: self == oldSelf
                       message: debugReadWriteHostPath is immutable
+                persistentHome:
+                  type: boolean
                 retryNonce:
                   type: string
                   maxLength: 128

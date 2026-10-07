@@ -13,18 +13,23 @@ type Profile struct {
 	// Images whose protected runner can read a mounted tool-runtime descriptor.
 	MountedToolRuntimeImages []string `json:"mountedToolRuntimeImages,omitempty"`
 	// Images whose runner authorizes access to single files in the mounted HOME.
-	DebugHomeImages        []string        `json:"debugHomeImages,omitempty"`
-	ID                     string          `json:"id"`
-	Provider               string          `json:"provider"`
-	Image                  string          `json:"image"`
-	NodeName               string          `json:"nodeName,omitempty"`
-	Namespace              string          `json:"namespace,omitempty"`
-	SharedReadOnlyHostPath string          `json:"sharedReadOnlyHostPath,omitempty"`
-	DebugReadOnlyHostPath  string          `json:"debugReadOnlyHostPath,omitempty"`
-	DebugReadWriteHostPath string          `json:"debugReadWriteHostPath,omitempty"`
-	CPU                    float64         `json:"cpu,omitempty"`
-	MemoryMiB              int64           `json:"memoryMiB,omitempty"`
-	Guest                  guestapi.Config `json:"guest"`
+	DebugHomeImages        []string `json:"debugHomeImages,omitempty"`
+	ID                     string   `json:"id"`
+	Provider               string   `json:"provider"`
+	Image                  string   `json:"image"`
+	NodeName               string   `json:"nodeName,omitempty"`
+	Namespace              string   `json:"namespace,omitempty"`
+	SharedReadOnlyHostPath string   `json:"sharedReadOnlyHostPath,omitempty"`
+	DebugReadOnlyHostPath  string   `json:"debugReadOnlyHostPath,omitempty"`
+	DebugReadWriteHostPath string   `json:"debugReadWriteHostPath,omitempty"`
+	// PersistentHome records the immutable storage layout, not an operator
+	// switch. Config validation always enables it for new resumable Boxes;
+	// old stored profiles retain false. The initially empty HOME hides image
+	// contents and is retained across suspend/resume until the Box is deleted.
+	PersistentHome bool            `json:"persistentHome,omitempty"`
+	CPU            float64         `json:"cpu,omitempty"`
+	MemoryMiB      int64           `json:"memoryMiB,omitempty"`
+	Guest          guestapi.Config `json:"guest"`
 }
 type Config struct {
 	// ClientID is a data/idempotency namespace, not an authenticated identity.
@@ -72,6 +77,7 @@ type Capabilities struct {
 	SharedDirectory    bool   `json:"sharedDirectory,omitempty"`
 	MountedToolRuntime bool   `json:"mountedToolRuntime,omitempty"`
 	MountedDebugHome   bool   `json:"mountedDebugHome,omitempty"`
+	PersistentHome     bool   `json:"persistentHome,omitempty"`
 }
 type Box struct {
 	ID              string       `json:"id"`

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
+	"cellbox.local/cellbox/internal/homevolume"
 	"cellbox.local/cellbox/internal/node"
 )
 
@@ -84,13 +85,27 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 		if t.PodUID != uid || spec.Annotations["io.kubernetes.cri.sandbox-uid"] != uid || spec.Annotations["io.kubernetes.cri.sandbox-name"] != t.PodName || spec.Annotations["io.kubernetes.cri.sandbox-namespace"] != t.Namespace {
 			return nil, fmt.Errorf("authorization Pod identity mismatch")
 		}
+		if t.HomeID != "" {
+			if _, err := homevolume.Verify(a.Base, t.OwnerUID, "", t.SpecHash, t.HomeID); err != nil {
+				return nil, fmt.Errorf("persistent HOME unavailable: %w", err)
+			}
+			if t.Snapshot != "" {
+				if err := homevolume.ValidateCheckpoint(a.Base, t.OwnerUID, t.HomeID, t.Snapshot); err != nil {
+					return nil, err
+				}
+			}
+		}
 		if t.Snapshot != "" {
 			path, err := node.SnapshotPath(a.Base, t.OwnerUID, t.Snapshot)
 			if err != nil {
 				return nil, err
 			}
-			if _, err = node.VerifyPrepared(path, t.OwnerUID, t.SpecHash, a.Runsc); err != nil {
+			m, err := node.VerifyPrepared(path, t.OwnerUID, t.SpecHash, a.Runsc)
+			if err != nil {
 				return nil, fmt.Errorf("refusing restore: %w", err)
+			}
+			if m.HomeID != t.HomeID {
+				return nil, fmt.Errorf("checkpoint persistent HOME identity mismatch")
 			}
 		}
 		// A Pod UID gets one sandbox execution, including across kubelet retries.
@@ -169,13 +184,32 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 			if err != nil {
 				return nil, err
 			}
-			if _, err = node.VerifyPrepared(path, t.OwnerUID, t.SpecHash, a.Runsc); err != nil {
+			m, err := node.VerifyPrepared(path, t.OwnerUID, t.SpecHash, a.Runsc)
+			if err != nil {
+				return nil, err
+			}
+			if m.HomeID != t.HomeID {
+				return nil, fmt.Errorf("checkpoint persistent HOME identity mismatch")
+			}
+			if err = a.claimHome(t); err != nil {
 				return nil, err
 			}
 			return append(append([]string{}, args[:idx]...), "restore", "--detach", "--image-path="+path, id), nil
 		}
+		if err = a.claimHome(t); err != nil {
+			return nil, err
+		}
 	}
 	return args, nil
+}
+
+func (a Adapter) claimHome(t node.Ticket) error {
+	if t.HomeID == "" {
+		return nil
+	}
+	// Consume the disk/checkpoint pairing before restored code can mutate HOME.
+	// A crash after this fence requires inspection, never replay with newer files.
+	return homevolume.ClaimExecution(a.Base, t.OwnerUID, t.HomeID, t.PodUID, t.Snapshot)
 }
 func Main() {
 	a := Adapter{Base: node.DefaultBase, Runsc: node.DefaultRunsc}

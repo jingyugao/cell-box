@@ -87,6 +87,9 @@ func (c *Config) Validate() error {
 		if p.Provider != "docker" && p.Provider != "resumable-k8s-pod" {
 			return fmt.Errorf("profile %s has unknown provider", p.ID)
 		}
+		// New resumable Boxes always persist HOME. Stored immutable profiles are
+		// decoded separately, so pre-upgrade Boxes retain their original layout.
+		p.PersistentHome = p.Provider == "resumable-k8s-pod"
 		if !immutableImage.MatchString(p.Image) || (p.Provider == "resumable-k8s-pod" && !strings.Contains(p.Image, "@sha256:")) {
 			return fmt.Errorf("profile image must be an immutable SHA256 reference; Kubernetes requires repository@sha256:digest")
 		}
@@ -148,6 +151,9 @@ func (c *Config) Validate() error {
 		}
 		if p.Guest.Workspace == "" {
 			p.Guest.Workspace = "/workspace"
+			if p.PersistentHome {
+				p.Guest.Workspace = "/home/agent/workspace"
+			}
 		}
 		defaults := guestapi.DefaultConfig()
 		if p.Guest.Agent == (guestapi.Identity{}) && p.Guest.Debug == (guestapi.Identity{}) {
