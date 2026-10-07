@@ -312,7 +312,10 @@ func (s *Service) importedProfile(client, id string, profile Profile) (Profile, 
 			out.SharedReadOnlyHostPath = ""
 		}
 		out.DebugReadOnlyHostPath = ""
-		out.DebugReadWriteHostPath = ""
+		// Only an explicitly admitted HOME runner inherits the managed directory.
+		if !profileCapabilities(out).MountedDebugHome {
+			out.DebugReadWriteHostPath = ""
+		}
 		for key, value := range profile.Guest.Env {
 			if out.SharedReadOnlyHostPath == "" && (value == api.SharedMountPath || strings.HasPrefix(value, api.SharedMountPath+"/")) {
 				continue

@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -227,6 +228,7 @@ func cloneError(err error) *APIError {
 func profileCapabilities(p Profile) Capabilities {
 	capabilities := Capabilities{Exec: true, Files: true, HTTP: true, WebSocket: true, Freeze: p.Provider == "docker", Suspend: map[bool]string{true: "same-node-checkpoint", false: "none"}[p.Provider == "resumable-k8s-pod"], Archives: "workspace-best-effort", ProtectedTools: len(p.Guest.Tools) > 0, CredentialBatch: true, InternalServices: true, RootDebug: p.Guest.Debug.UID == 0 && p.Guest.Debug.GID == 0, SharedDirectory: p.SharedReadOnlyHostPath != ""}
 	capabilities.MountedToolRuntime = capabilities.SharedDirectory && capabilities.ProtectedTools && capabilities.RootDebug && slices.Contains(p.MountedToolRuntimeImages, p.Image)
+	capabilities.MountedDebugHome = capabilities.MountedToolRuntime && p.DebugReadWriteHostPath == path.Join(p.SharedReadOnlyHostPath, "runtime/debug-homes") && slices.Contains(p.DebugHomeImages, p.Image)
 	return capabilities
 }
 func owned(st *State, client, id string) (boxRecord, error) {

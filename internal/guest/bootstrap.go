@@ -75,7 +75,10 @@ func validateDebugHome(path string, debug guestapi.Identity) error {
 		return fmt.Errorf("debug host home: %w", err)
 	}
 	owner, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.IsDir() || uint32(owner.Uid) != debug.UID || uint32(owner.Gid) != debug.GID || info.Mode().Perm()&0300 != 0300 {
+	// A root debug process can use a private HOME owned by the publishing service.
+	// Preserve its ownership so that service can atomically replace native files.
+	root := debug.UID == 0 && debug.GID == 0
+	if !ok || !info.IsDir() || (!root && (uint32(owner.Uid) != debug.UID || uint32(owner.Gid) != debug.GID)) || info.Mode().Perm()&0300 != 0300 {
 		return errors.New("debug host home must be a writable directory owned by the debug identity")
 	}
 	if info.Mode().Perm()&0077 != 0 {

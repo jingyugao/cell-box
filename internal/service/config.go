@@ -100,6 +100,11 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("mountedToolRuntimeImages must contain immutable repository@sha256:digest references")
 			}
 		}
+		for _, home := range p.DebugHomeImages {
+			if !immutableImage.MatchString(home) || !strings.Contains(home, "@sha256:") {
+				return fmt.Errorf("debugHomeImages must contain immutable repository@sha256:digest references")
+			}
+		}
 		if p.CPU == 0 {
 			p.CPU = 1
 		}

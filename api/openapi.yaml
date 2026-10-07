@@ -169,6 +169,9 @@ components:
         mountedToolRuntime:
           type: boolean
           description: The admitted image's protected runner supports mounted tool-runtime descriptors with root debug access.
+        mountedDebugHome:
+          type: boolean
+          description: An admitted HOME runner uses the profile's managed runtime/debug-homes directory mounted read-write at /home/debug.
         pty:
           type: boolean
         reconnectExec:
