@@ -55,7 +55,14 @@ func New(socket string) (*Backend, error) {
 	return &Backend{Base: DefaultBase, Runsc: DefaultRunsc, Root: DefaultRoot, Socket: socket, Runtime: cri.NewRuntimeServiceClient(conn), Images: cri.NewImageServiceClient(conn)}, nil
 }
 func (b *Backend) command(ctx context.Context, args ...string) error {
-	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	timeout := 45 * time.Second
+	if len(args) > 0 && args[0] == "checkpoint" {
+		// Saving several GiB of pages can outlast the ordinary runtime command
+		// budget. Killing the CLI while the sandbox is still saving leaves an
+		// ambiguous .pending checkpoint and prevents subsequent recovery.
+		timeout = 5 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	command := b.Runsc
 	commandArgs := append([]string{"--root=" + b.Root}, args...)
