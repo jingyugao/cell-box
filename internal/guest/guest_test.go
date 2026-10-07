@@ -166,6 +166,12 @@ func TestDebugHostHomeMustBePrivate(t *testing.T) {
 	if err := validateDebugHome(home, debug); err != nil {
 		t.Fatalf("private debug home rejected: %v", err)
 	}
+	if err := validateDebugHome(home, guestapi.Identity{}); err != nil {
+		t.Fatalf("root debug cannot use publishing-service owned home: %v", err)
+	}
+	if err := validateDebugHome(home, guestapi.Identity{UID: debug.UID + 1, GID: debug.GID + 1}); err == nil {
+		t.Fatal("non-root debug accepted another identity's home")
+	}
 }
 
 func TestCredentialWriteIsPrivateAndAtomic(t *testing.T) {

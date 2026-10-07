@@ -190,6 +190,20 @@ func TestImageImportCreateIsolationAndRestart(t *testing.T) {
 	if !profileCapabilities(approved).MountedToolRuntime {
 		t.Fatal("admitted mounted-runtime image did not advertise its capability")
 	}
+	if profileCapabilities(approved).MountedDebugHome {
+		t.Fatal("old image advertised a HOME mount")
+	}
+	privilegedProfile.Guest.Debug = guestapi.Identity{}
+	privilegedProfile.DebugHomeImages = []string{imported.Image}
+	privilegedProfile.DebugReadWriteHostPath = "/host/shared/runtime/debug-homes"
+	homeProfile, err := f.service.importedProfile("client-a", id, privilegedProfile)
+	if err != nil || !profileCapabilities(homeProfile).MountedDebugHome || homeProfile.DebugReadWriteHostPath != privilegedProfile.DebugReadWriteHostPath {
+		t.Fatalf("admitted HOME image lost native mount: %+v %v", homeProfile, err)
+	}
+	homeProfile.DebugReadWriteHostPath = "/host/private"
+	if profileCapabilities(homeProfile).MountedDebugHome {
+		t.Fatal("unmanaged host directory advertised mounted debug HOME")
+	}
 	approved.MountedToolRuntimeImages = nil
 	if profileCapabilities(approved).MountedToolRuntime {
 		t.Fatal("old image advertised mounted-runtime support")
