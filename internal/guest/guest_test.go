@@ -266,6 +266,108 @@ func TestAnonymousFilesArchiveRestore(t *testing.T) {
 	}
 }
 
+func TestArchiveRoundTripsEntryLargerThanFileTransferLimit(t *testing.T) {
+	const size = int64(64<<20) + 1
+	config := testConfig(t)
+	large := filepath.Join(config.Workspace, "large.bin")
+	f, err := os.Create(large)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(size); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte("tail"), size-4); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	source, err := NewServer(config, "/bin/true", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	captured := request(source.Handler(), "GET", "/v1/archive", nil)
+	if captured.Code != http.StatusOK {
+		t.Fatalf("capture: %d %s", captured.Code, captured.Body.String())
+	}
+
+	restoreConfig := testConfig(t)
+	restored, err := NewServer(restoreConfig, "/bin/true", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := request(restored.Handler(), "POST", "/v1/restore", bytes.NewReader(captured.Body.Bytes()))
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("restore: %d %s", response.Code, response.Body.String())
+	}
+	info, err := os.Stat(filepath.Join(restoreConfig.Workspace, "large.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != size {
+		t.Fatalf("restored large file size: got %d want %d", info.Size(), size)
+	}
+	restoredFile, err := os.Open(filepath.Join(restoreConfig.Workspace, "large.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restoredFile.Close()
+	tail := make([]byte, 4)
+	if _, err := restoredFile.ReadAt(tail, size-4); err != nil || string(tail) != "tail" {
+		t.Fatalf("large file was truncated or corrupted: %q %v", tail, err)
+	}
+}
+
+func TestArchiveRejectsEntryOverOneGiB(t *testing.T) {
+	c := testConfig(t)
+	f, err := os.Create(filepath.Join(c.Workspace, "oversized.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate((1 << 30) + 1); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	f.Close()
+	s, err := NewServer(c, "/bin/true", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	func() {
+		defer func() {
+			if got := recover(); got != http.ErrAbortHandler {
+				t.Fatalf("oversized archive export must abort: %v", got)
+			}
+		}()
+		request(s.Handler(), "GET", "/v1/archive", nil)
+	}()
+	var body bytes.Buffer
+	gz := gzip.NewWriter(&body)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: "oversized.bin", Mode: 0640, Typeflag: tar.TypeReg, Size: (1 << 30) + 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	destination := testConfig(t)
+	restore, err := NewServer(destination, "/bin/true", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := request(restore.Handler(), "POST", "/v1/restore", bytes.NewReader(body.Bytes()))
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "unsupported archive entry") {
+		t.Fatalf("oversized restore header must be rejected: %d %s", response.Code, response.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(destination.Workspace, "oversized.bin")); !os.IsNotExist(err) {
+		t.Fatalf("oversized restore must not create the file: %v", err)
+	}
+}
+
 func TestRestoreRejectsTraversal(t *testing.T) {
 	c := testConfig(t)
 	s, _ := NewServer(c, "/bin/true", true)
