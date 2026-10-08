@@ -20,13 +20,14 @@ import (
 	"strings"
 	"time"
 
+	"cellbox.local/cellbox/internal/archivelimits"
 	"golang.org/x/sys/unix"
 )
 
 const (
-	archiveFileLimit    = int64(64 << 20)
-	archiveContentLimit = int64(1 << 30)
-	archiveWireLimit    = int64(2 << 30)
+	archiveFileLimit    = archivelimits.MaxEntryBytes
+	archiveContentLimit = archivelimits.MaxContentBytes
+	archiveWireLimit    = archivelimits.MaxWireBytes
 	archiveEntryLimit   = 100000
 	archiveDepthLimit   = 64
 )
