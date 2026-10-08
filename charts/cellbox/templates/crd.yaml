@@ -84,6 +84,17 @@ spec:
                 rebuildNonce:
                   type: string
                   maxLength: 128
+                upgrade:
+                  type: object
+                  required: [nonce, previousContainer]
+                  properties:
+                    nonce:
+                      type: string
+                      minLength: 1
+                      maxLength: 128
+                    previousContainer:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
                 retryNonce:
                   type: string
                   maxLength: 128

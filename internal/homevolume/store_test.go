@@ -251,3 +251,53 @@ func TestExplicitRebuildPreservesHomeAndFencesOldSnapshots(t *testing.T) {
 		t.Fatal("missing HOME recreated")
 	}
 }
+
+func TestUpgradeRetainsInodeAndLatestDataAndFencesOldExecution(t *testing.T) {
+	base := t.TempDir()
+	before, err := Prepare(base, "owner", "node", "old", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := Path(base, "owner")
+	file := filepath.Join(data, "latest")
+	if err := os.WriteFile(file, []byte("newer than backup"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClaimExecution(base, "owner", before.ID, "old-pod", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := Upgrade(base, "owner", "node", "old", "new", "wrong-pod", "upgrade"); err == nil {
+		t.Fatal("accepted wrong execution")
+	}
+	if err := Upgrade(base, "owner", "node", "old", "new", "old-pod", "upgrade"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := Verify(base, "owner", "node", "new", before.ID)
+	expected := before
+	expected.SpecHash = "new"
+	if err != nil || after != expected {
+		t.Fatalf("disk identity changed: %+v %v", after, err)
+	}
+	if _, err := Verify(base, "owner", "node", "old", before.ID); err == nil {
+		t.Fatal("old image identity remained valid")
+	}
+	if err := ClaimExecution(base, "owner", before.ID, "new-pod", "old-snapshot"); err == nil {
+		t.Fatal("old checkpoint replayed")
+	}
+	if err := ClaimExecution(base, "owner", before.ID, "new-pod", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := Upgrade(base, "owner", "node", "old", "new", "old-pod", "upgrade"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClaimExecution(base, "owner", before.ID, "third-pod", ""); err == nil {
+		t.Fatal("upgrade replay released current disk owner")
+	}
+	got, err := os.ReadFile(file)
+	if err != nil || string(got) != "newer than backup" {
+		t.Fatal("latest data lost", err)
+	}
+	if err := Upgrade(base, "owner", "node", "new", "other", "old-pod", "upgrade"); err == nil {
+		t.Fatal("nonce reuse changed target")
+	}
+}

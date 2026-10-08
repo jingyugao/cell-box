@@ -118,6 +118,7 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 				for bid, b := range st.Boxes {
 					if b.Box.OperationID == id {
 						b.Box.OperationID = ""
+						b.UpgradeImageID = ""
 						b.Box.Version++
 						st.Boxes[bid] = b
 					}
@@ -376,6 +377,7 @@ func (s *Service) launchWithCommitContext(request context.Context, op Operation,
 			st.Operations[op.ID] = record
 			if b, ok := st.Boxes[op.TargetID]; ok && b.Box.OperationID == op.ID {
 				b.Box.OperationID = ""
+				b.UpgradeImageID = ""
 				b.Box.Version++
 				st.Boxes[op.TargetID] = b
 			}
@@ -432,6 +434,13 @@ func (s *Service) saveHandle(id string, handle boxprovider.Handle) error {
 	})
 }
 func (s *Service) observe(ctx context.Context, b boxRecord) (Box, error) {
+	if b.Upgrade != nil {
+		var err error
+		b, err = s.commitDiskUpgrade(ctx, b)
+		if err != nil {
+			return Box{}, err
+		}
+	}
 	for attempt := 0; attempt < 3; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return Box{}, err
@@ -474,7 +483,7 @@ func (s *Service) observe(ctx context.Context, b boxRecord) (Box, error) {
 			if current.Box.Phase == "deleting" && phase != "deleted" {
 				phase = "deleting"
 			}
-			target := map[string]string{"freezing": "frozen", "unfreezing": "running", "suspending": "suspended", "resuming": "running", "rebuilding": "running"}[current.Box.Phase]
+			target := map[string]string{"freezing": "frozen", "unfreezing": "running", "suspending": "suspended", "resuming": "running", "rebuilding": "running", "upgrading": "staged"}[current.Box.Phase]
 			if current.Box.OperationID != "" && target != "" && phase != target && phase != "failed" && phase != "deleted" {
 				phase = current.Box.Phase
 			}

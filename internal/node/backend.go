@@ -474,3 +474,18 @@ func (b *Backend) Rebuild(ctx context.Context, r *api.ResumablePod) error {
 	}
 	return homevolume.Rearm(b.Base, string(r.UID), r.Spec.NodeName, r.Status.SpecHash, r.Status.PodUID, r.Spec.RebuildNonce)
 }
+
+func (b *Backend) Upgrade(ctx context.Context, r *api.ResumablePod, newSpec string) error {
+	if !r.Spec.PersistentHome || r.DeletionTimestamp != nil || r.Spec.Upgrade == nil {
+		return fmt.Errorf("upgrade requires an existing persistent HOME")
+	}
+	if _, err := homevolume.Verify(b.Base, string(r.UID), r.Spec.NodeName, r.Status.SpecHash, ""); err != nil {
+		if _, err := homevolume.Verify(b.Base, string(r.UID), r.Spec.NodeName, newSpec, ""); err != nil {
+			return err
+		}
+	}
+	if err := b.Forget(ctx, r); err != nil {
+		return err
+	}
+	return homevolume.Upgrade(b.Base, string(r.UID), r.Spec.NodeName, r.Status.SpecHash, newSpec, r.Status.PodUID, r.Spec.Upgrade.Nonce)
+}

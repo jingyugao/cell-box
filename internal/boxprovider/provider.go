@@ -59,6 +59,12 @@ type Provider interface {
 	Guest(context.Context, Handle) (Connection, error)
 }
 
+// HomeUpgradeProvider replaces an execution while retaining its owned HOME.
+// The new Guest starts staged; activation remains an explicit API operation.
+type HomeUpgradeProvider interface {
+	Upgrade(context.Context, Handle, Spec, string) (Handle, error)
+}
+
 // ImageCacheProvider warms the runtime image store without creating a workload.
 type ImageCacheProvider interface {
 	CacheImage(context.Context, string, string, string) error // image, node, namespace

@@ -49,6 +49,14 @@ type homeRebuilder interface {
 	Rebuild(context.Context, *api.ResumablePod) error
 }
 
+type homeUpgrader interface {
+	Upgrade(context.Context, *api.ResumablePod, string) error
+}
+
+func pendingUpgrade(w *api.ResumablePod) bool {
+	return w.Spec.Upgrade != nil && w.Spec.Upgrade.Nonce != "" && w.Spec.Upgrade.Nonce != w.Status.UpgradeNonce
+}
+
 type failureDiagnostics interface {
 	CaptureFailure(context.Context, *api.ResumablePod, *core.Pod) error
 }
@@ -234,7 +242,14 @@ func validate(w *api.ResumablePod) error {
 		return fmt.Errorf("imagePullPolicy must be Never or IfNotPresent with an immutable repository@sha256:<digest> image")
 	}
 	if w.Status.SpecHash != "" && w.Status.SpecHash != fingerprint(w) {
-		return fmt.Errorf("node, container, debug host path and service ports are immutable; revert the change")
+		previous := w.DeepCopy()
+		if !pendingUpgrade(w) || !w.Spec.PersistentHome || w.Spec.DesiredState != "Running" {
+			return fmt.Errorf("node, container, debug host path and service ports are immutable; revert the change")
+		}
+		previous.Spec.Container = w.Spec.Upgrade.PreviousContainer
+		if fingerprint(previous) != w.Status.SpecHash {
+			return fmt.Errorf("upgrade must preserve the original disk, node, mounts and service ports")
+		}
 	}
 	return nil
 }
@@ -532,6 +547,26 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 		w.Status.RetryNonce = w.Spec.RetryNonce
 		return r.phase(ctx, w, "Failing", validationErr.Error())
+	}
+	if pendingUpgrade(w) && w.Status.SpecHash != "" {
+		if !w.Spec.PersistentHome || w.Spec.DesiredState != "Running" {
+			return again, fmt.Errorf("upgrade requires persistent HOME and Running state")
+		}
+		done, err := r.removePod(ctx, w, p)
+		if err != nil || !done {
+			return again, err
+		}
+		backend, ok := r.Runtime.(homeUpgrader)
+		if !ok {
+			return again, fmt.Errorf("runtime does not support HOME upgrade")
+		}
+		if err := backend.Upgrade(ctx, w, fingerprint(w)); err != nil {
+			return again, err
+		}
+		w.Status.SpecHash = fingerprint(w)
+		w.Status.UpgradeNonce = w.Spec.Upgrade.Nonce
+		w.Status.Snapshot = ""
+		return r.begin(ctx, w)
 	}
 	if w.Status.Phase == "Failed" {
 		if w.Spec.RebuildNonce != "" && w.Spec.RebuildNonce != w.Status.RebuildNonce {

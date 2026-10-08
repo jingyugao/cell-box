@@ -25,6 +25,11 @@ const (
 	SharedMountPath    = "/var/lib/cellbox/shared"
 )
 
+type UpgradeRequest struct {
+	Nonce             string         `json:"nonce"`
+	PreviousContainer core.Container `json:"previousContainer"`
+}
+
 type Spec struct {
 	NodeName     string `json:"nodeName"`
 	DesiredState string `json:"desiredState"`
@@ -36,6 +41,7 @@ type Spec struct {
 	PersistentHome         bool               `json:"persistentHome,omitempty"`
 	ServicePorts           []core.ServicePort `json:"servicePorts,omitempty"`
 	RebuildNonce           string             `json:"rebuildNonce,omitempty"`
+	Upgrade                *UpgradeRequest    `json:"upgrade,omitempty"`
 	RetryNonce             string             `json:"retryNonce,omitempty"`
 	StartupTimeoutSeconds  int64              `json:"startupTimeoutSeconds,omitempty"`
 }
@@ -50,6 +56,7 @@ type Status struct {
 	Execution          *Execution       `json:"execution,omitempty"`
 	Snapshot           string           `json:"snapshot,omitempty"`
 	RebuildNonce       string           `json:"rebuildNonce,omitempty"`
+	UpgradeNonce       string           `json:"upgradeNonce,omitempty"`
 	RetryNonce         string           `json:"retryNonce,omitempty"`
 	Since              meta.Time        `json:"since,omitempty"`
 	Conditions         []meta.Condition `json:"conditions,omitempty"`
@@ -74,6 +81,9 @@ func (r *ResumablePod) DeepCopy() *ResumablePod {
 	out := *r
 	out.ObjectMeta = *r.ObjectMeta.DeepCopy()
 	out.Spec.Container = *r.Spec.Container.DeepCopy()
+	if r.Spec.Upgrade != nil {
+		out.Spec.Upgrade = &UpgradeRequest{Nonce: r.Spec.Upgrade.Nonce, PreviousContainer: *r.Spec.Upgrade.PreviousContainer.DeepCopy()}
+	}
 	if r.Spec.ServicePorts != nil {
 		out.Spec.ServicePorts = make([]core.ServicePort, len(r.Spec.ServicePorts))
 		for i := range r.Spec.ServicePorts {

@@ -587,3 +587,59 @@ func TestExplicitHomeRebuildColdStartsSameOwnerAndStopsOnMissingHome(t *testing.
 		})
 	}
 }
+
+type upgradeRuntime struct {
+	*fakeRuntime
+	upgrades int
+	client   client.Client
+	t        *testing.T
+}
+
+func (f *upgradeRuntime) Upgrade(ctx context.Context, w *api.ResumablePod, target string) error {
+	var pods core.PodList
+	if err := f.client.List(ctx, &pods, client.InNamespace(w.Namespace)); err != nil {
+		return err
+	}
+	if len(pods.Items) != 0 {
+		f.t.Fatal("disk rebound before old Pod deletion completed")
+	}
+	if target == w.Status.SpecHash {
+		f.t.Fatal("upgrade retained old image fingerprint")
+	}
+	f.upgrades++
+	return nil
+}
+func TestImageUpgradeRemovesOldPodBeforeRebindingAndNeverReplaysCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	r, f, w := fixture(t)
+	w.Spec.PersistentHome = true
+	if err := r.Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	w.Status.SpecHash = fingerprint(w)
+	w.Status.Snapshot = "old-memory"
+	if err := r.Status().Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	backend := &upgradeRuntime{fakeRuntime: f, client: r.Client, t: t}
+	r.Runtime = backend
+	w.Spec.Upgrade = &api.UpgradeRequest{Nonce: "upgrade", PreviousContainer: *w.Spec.Container.DeepCopy()}
+	w.Spec.Container.Image = "next:local"
+	if err := r.Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	tampered := w.DeepCopy()
+	tampered.Spec.NodeName = "different-node"
+	if validate(tampered) == nil {
+		t.Fatal("upgrade admitted disk relocation")
+	}
+	for i := 0; i < 6 && w.Status.UpgradeNonce == ""; i++ {
+		step(t, r, w)
+	}
+	if backend.upgrades != 1 || w.Status.UpgradeNonce != "upgrade" || w.Status.Snapshot != "" || w.Status.Cycle != 2 || w.Status.PodUID != "" || w.Status.Phase != "Creating" {
+		t.Fatal(w.Status, backend.upgrades)
+	}
+	if w.UID != "12345678-aaaa" {
+		t.Fatal("changed disk owner")
+	}
+}
