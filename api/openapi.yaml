@@ -117,6 +117,7 @@ components:
           - suspended
           - resuming
           - rebuilding
+          - upgrading
           - restoring
           - staged
           - deleting
@@ -1348,6 +1349,39 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       summary: Rebuild a failed Box from its persistent HOME
+  /v1/boxes/{id}:upgrade:
+    post:
+      description: Stop the previous execution before starting an imported image on the same owned disk. Invalidates old checkpoints, preserves Box and disk identity, and returns a staged Guest requiring credential provisioning and explicit activation. Running, suspended, and failed persistent Boxes are supported. Active operations, leases and executions block upgrading. No archive is used.
+      operationId: upgradeBox
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [importedImageId]
+              properties:
+                importedImageId:
+                  type: string
+                  minLength: 1
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+          description: Success
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Upgrade a Box image while retaining its persistent HOME
   /v1/boxes/{id}:resume:
     post:
       description: An active operation, service request, or unexpired usage lease

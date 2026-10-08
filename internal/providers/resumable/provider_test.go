@@ -403,3 +403,46 @@ func TestRebuildRequiresFailedPersistentHomeAndReportsPendingRequest(t *testing.
 		t.Fatal("pending rebuild exposed old failed execution", observed, err)
 	}
 }
+
+func TestDiskUpgradeKeepsOwnerAndHidesOldExecution(t *testing.T) {
+	p, spec, ctx := fixture(t)
+	spec.PersistentHome = true
+	h, err := p.Create(ctx, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &api.ResumablePod{}
+	if err := p.Client.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
+		t.Fatal(err)
+	}
+	w.Status.Phase, w.Status.PodUID = "Running", "old-pod"
+	if err := p.Client.Status().Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	oldImage := spec.Image
+	spec.Image = "registry.example.invalid/prepared@sha256:" + strings.Repeat("b", 64)
+	upgraded, err := p.Upgrade(ctx, h, spec, "upgrade-1")
+	if err != nil || upgraded.ID != h.ID || upgraded.ImageID != spec.Image {
+		t.Fatal(upgraded, err)
+	}
+	if err := p.Client.Get(ctx, client.ObjectKeyFromObject(w), w); err != nil {
+		t.Fatal(err)
+	}
+	if w.Spec.Upgrade.PreviousContainer.Image != oldImage || w.Spec.Container.Image != spec.Image {
+		t.Fatal("lost image transition")
+	}
+	observed, err := p.Inspect(ctx, upgraded)
+	if err != nil || observed.Phase != "creating" || observed.ExecutionID != "" {
+		t.Fatal("exposed old execution", observed, err)
+	}
+	if _, err := p.Upgrade(ctx, h, spec, "upgrade-1"); err != nil {
+		t.Fatal("lost response not replayable", err)
+	}
+	if _, err := p.Upgrade(ctx, h, spec, "upgrade-2"); err == nil {
+		t.Fatal("overlapping upgrade accepted")
+	}
+	spec.NodeName = "another-node"
+	if _, err := p.Upgrade(ctx, h, spec, "upgrade-1"); err == nil {
+		t.Fatal("disk move accepted")
+	}
+}

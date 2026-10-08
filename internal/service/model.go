@@ -95,7 +95,13 @@ type Box struct {
 	Error           *APIError    `json:"error,omitempty"`
 	CreatedAt       time.Time    `json:"createdAt"`
 }
+type upgradeIntent struct {
+	Nonce                   string `json:"nonce"`
+	PreviousImportedImageID string `json:"previousImportedImageId,omitempty"`
+}
 type boxRecord struct {
+	UpgradeImageID    string             `json:"upgradeImageId,omitempty"`
+	Upgrade           *upgradeIntent     `json:"upgrade,omitempty"`
 	Box               Box                `json:"box"`
 	ClientID          string             `json:"clientId"`
 	Profile           Profile            `json:"profile"`

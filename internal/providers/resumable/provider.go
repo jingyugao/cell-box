@@ -12,6 +12,7 @@ import (
 	"math"
 	"net"
 	"path"
+	"reflect"
 	"regexp"
 	"strings"
 
@@ -190,6 +191,10 @@ func (p *Provider) Inspect(ctx context.Context, h boxprovider.Handle) (boxprovid
 		obs.Phase = "deleting"
 		return obs, nil
 	}
+	if w.Spec.Upgrade != nil && w.Spec.Upgrade.Nonce != w.Status.UpgradeNonce {
+		obs.Phase, obs.ExecutionID = "creating", ""
+		return obs, nil
+	}
 	if w.Status.Phase == "Failed" && w.Spec.PersistentHome && w.Spec.DesiredState == "Running" && w.Spec.RebuildNonce != "" && w.Spec.RebuildNonce != w.Status.RebuildNonce {
 		obs.Phase, obs.ExecutionID = "creating", ""
 		return obs, nil
@@ -337,6 +342,53 @@ func (p *Provider) Action(ctx context.Context, h boxprovider.Handle, action stri
 		return err
 	}
 	return nil
+}
+
+func (p *Provider) Upgrade(ctx context.Context, h boxprovider.Handle, spec boxprovider.Spec, nonce string) (boxprovider.Handle, error) {
+	w, err := p.get(ctx, h)
+	if err != nil {
+		return h, err
+	}
+	if nonce == "" || len(nonce) > 128 || !validImage.MatchString(spec.Image) || !spec.Staged {
+		return h, errors.New("upgrade requires a nonce, immutable image and staged Guest")
+	}
+	if w.DeletionTimestamp != nil || !w.Spec.PersistentHome || !spec.PersistentHome ||
+		w.Spec.NodeName != spec.NodeName || w.Namespace != spec.Namespace ||
+		w.Spec.SharedReadOnlyHostPath != spec.SharedReadOnlyHostPath ||
+		w.Spec.DebugReadOnlyHostPath != spec.DebugReadOnlyHostPath || w.Spec.DebugReadWriteHostPath != spec.DebugReadWriteHostPath {
+		return h, errors.New("upgrade must retain the existing disk, node and mounts")
+	}
+	config, err := json.Marshal(spec.Config)
+	if err != nil {
+		return h, err
+	}
+	args := []string{"serve", "--config-base64", base64.StdEncoding.EncodeToString(config), "--staged"}
+	if w.Spec.Upgrade != nil && w.Spec.Upgrade.Nonce == nonce {
+		if w.Spec.Container.Image != spec.Image || !reflect.DeepEqual(w.Spec.Container.Args, args) {
+			return h, errors.New("upgrade nonce reused with different input")
+		}
+		h.ImageID = spec.Image
+		return h, nil
+	}
+	if w.Spec.Upgrade != nil && w.Spec.Upgrade.Nonce != w.Status.UpgradeNonce {
+		return h, errors.New("another disk upgrade is still pending")
+	}
+	if w.Status.Phase != "Running" && w.Status.Phase != "Suspended" && w.Status.Phase != "Failed" {
+		return h, errors.New("upgrade requires a running, suspended or failed execution")
+	}
+	old := w.DeepCopy()
+	w.Spec.Upgrade = &api.UpgradeRequest{Nonce: nonce, PreviousContainer: *w.Spec.Container.DeepCopy()}
+	w.Spec.Container.Image, w.Spec.Container.Args = spec.Image, args
+	w.Spec.DesiredState = "Running"
+	if w.Annotations == nil {
+		w.Annotations = map[string]string{}
+	}
+	w.Annotations[inventory.Annotation] = string(spec.Inventory)
+	if err := p.Client.Patch(ctx, w, client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{})); err != nil {
+		return h, err
+	}
+	h.ImageID = spec.Image
+	return h, nil
 }
 
 func (p *Provider) Destroy(ctx context.Context, h boxprovider.Handle) error {

@@ -385,7 +385,7 @@ func (s *Service) imageUsage(st State, id string) imageUsage {
 		}
 	}
 	for _, rec := range st.Boxes {
-		if rec.Box.Phase != "deleted" && (rec.Box.ImportedImageID == id || matchesPrepared(rec.Box.Image) || matchesPrepared(rec.Box.ImageID) || matchesPrepared(rec.Profile.Image)) {
+		if rec.Box.Phase != "deleted" && (rec.Box.ImportedImageID == id || rec.UpgradeImageID == id || (rec.Upgrade != nil && rec.Upgrade.PreviousImportedImageID == id) || matchesPrepared(rec.Box.Image) || matchesPrepared(rec.Box.ImageID) || matchesPrepared(rec.Profile.Image)) {
 			out.Blockers = append(out.Blockers, "boxes-reference-image")
 			break
 		}
