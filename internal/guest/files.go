@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"cellbox.local/cellbox/internal/archivelimits"
 	"cellbox.local/cellbox/internal/guestapi"
 	"golang.org/x/sys/unix"
 )
@@ -19,7 +20,7 @@ import (
 const (
 	resolveFlags   = unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_XDEV
 	maxFileSize    = 64 << 20
-	maxArchiveSize = 1 << 30
+	maxArchiveSize = archivelimits.MaxContentBytes
 )
 
 func cleanRelative(p string, allowRoot bool) (string, error) {
@@ -222,7 +223,7 @@ func (s *Server) archiveDir(tw *tar.Writer, rel string, depth int, remaining *in
 			f.Close()
 			return fmt.Errorf("archive file changed: %s", child)
 		}
-		if info.Size() > maxFileSize || info.Size() > *remaining {
+		if info.Size() > archivelimits.MaxEntryBytes || info.Size() > *remaining {
 			f.Close()
 			return errors.New("workspace exceeds archive limits")
 		}
@@ -267,7 +268,7 @@ func (s *Server) restoreHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "workspace must be empty", 409)
 		return
 	}
-	gz, err := gzip.NewReader(http.MaxBytesReader(w, r.Body, maxArchiveSize))
+	gz, err := gzip.NewReader(http.MaxBytesReader(w, r.Body, archivelimits.MaxWireBytes))
 	if err != nil {
 		http.Error(w, "invalid gzip", 400)
 		return
@@ -302,7 +303,7 @@ func (s *Server) restoreHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
-		if h.Typeflag != tar.TypeReg || h.Size < 0 || h.Size > maxFileSize || bytes+h.Size > maxArchiveSize {
+		if h.Typeflag != tar.TypeReg || h.Size < 0 || h.Size > archivelimits.MaxEntryBytes || bytes+h.Size > maxArchiveSize {
 			http.Error(w, "unsupported archive entry", 400)
 			return
 		}
