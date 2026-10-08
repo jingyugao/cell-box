@@ -255,6 +255,9 @@ func (s *Service) profile(client, id string) (Profile, error) {
 	return Profile{}, apiError("NOT_FOUND", "Profile not found")
 }
 func busy(st *State, b boxRecord, leases bool) error {
+	if b.Upgrade != nil {
+		return apiError("BUSY", "Disk upgrade intent is awaiting runtime confirmation")
+	}
 	if b.Box.OperationID != "" {
 		if op, ok := st.Operations[b.Box.OperationID]; ok && (op.Operation.Status == "queued" || op.Operation.Status == "running") {
 			return apiError("BUSY", "Box has an active operation")

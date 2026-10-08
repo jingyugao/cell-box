@@ -122,6 +122,15 @@ func (s *Service) upgradeBox(w http.ResponseWriter, r *http.Request, id string) 
 }
 
 func (s *Service) commitDiskUpgrade(ctx context.Context, b boxRecord) (boxRecord, error) {
+	// Serialize intent replay with new lifecycle admission. A delayed observer
+	// must never replay a superseded image transition from its stale snapshot.
+	unlock := s.admissions.lock(b.Box.ID)
+	defer unlock()
+	current, err := s.rawBox(b.Box.ID)
+	if err != nil {
+		return b, err
+	}
+	b = current
 	if b.Upgrade == nil {
 		return b, nil
 	}

@@ -62,6 +62,13 @@ func TestDiskUpgradeIntentSurvivesLostResponseAndServiceRestart(t *testing.T) {
 	if err != nil || after.Upgrade != nil || after.Handle.ImageID != "new-image" || after.ExecutionID != "replacement" || p.calls != 2 {
 		t.Fatal(after, p.calls, err)
 	}
+	// A delayed observer holding the old intent must not send it again.
+	if _, err := f.service.commitDiskUpgrade(context.Background(), b); err != nil {
+		t.Fatal(err)
+	}
+	if p.calls != 2 {
+		t.Fatal("stale observer replayed a completed intent")
+	}
 	creates, destroys := f.provider.counts()
 	if creates != 1 || destroys != 0 {
 		t.Fatal("upgrade replaced owned disk", creates, destroys)
