@@ -686,7 +686,7 @@ func Rearm(base, owner, node, spec, oldPod, nonce string) error {
 // Upgrade rebinds the same disk inode after the old execution has been removed.
 // Accepting the target fingerprint makes a retry safe across the two atomic
 // metadata writes; disk contents and ownership are never replaced.
-func Upgrade(base, owner, node, oldSpec, newSpec, oldPod, nonce string) error {
+func Upgrade(base, owner, node, oldSpec, newSpec, oldPod, oldSnapshot, nonce string) error {
 	if nonce == "" || oldSpec == "" || newSpec == "" {
 		return errors.New("upgrade identity is required")
 	}
@@ -713,7 +713,8 @@ func Upgrade(base, owner, node, oldSpec, newSpec, oldPod, nonce string) error {
 		}
 		return nil
 	}
-	if state.Phase != "new" && (oldPod == "" || state.Pod != oldPod) {
+	if (state.Phase == "active" && (oldPod == "" || state.Pod != oldPod)) ||
+		(state.Phase == "suspended" && (oldSnapshot == "" || state.Snapshot != oldSnapshot)) {
 		return errors.New("HOME belongs to a different execution")
 	}
 	identity.SpecHash = newSpec

@@ -487,5 +487,5 @@ func (b *Backend) Upgrade(ctx context.Context, r *api.ResumablePod, newSpec stri
 	if err := b.Forget(ctx, r); err != nil {
 		return err
 	}
-	return homevolume.Upgrade(b.Base, string(r.UID), r.Spec.NodeName, r.Status.SpecHash, newSpec, r.Status.PodUID, r.Spec.Upgrade.Nonce)
+	return homevolume.Upgrade(b.Base, string(r.UID), r.Spec.NodeName, r.Status.SpecHash, newSpec, r.Status.PodUID, r.Status.Snapshot, r.Spec.Upgrade.Nonce)
 }

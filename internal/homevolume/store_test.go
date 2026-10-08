@@ -266,10 +266,10 @@ func TestUpgradeRetainsInodeAndLatestDataAndFencesOldExecution(t *testing.T) {
 	if err := ClaimExecution(base, "owner", before.ID, "old-pod", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := Upgrade(base, "owner", "node", "old", "new", "wrong-pod", "upgrade"); err == nil {
+	if err := Upgrade(base, "owner", "node", "old", "new", "wrong-pod", "", "upgrade"); err == nil {
 		t.Fatal("accepted wrong execution")
 	}
-	if err := Upgrade(base, "owner", "node", "old", "new", "old-pod", "upgrade"); err != nil {
+	if err := Upgrade(base, "owner", "node", "old", "new", "old-pod", "", "upgrade"); err != nil {
 		t.Fatal(err)
 	}
 	after, err := Verify(base, "owner", "node", "new", before.ID)
@@ -287,7 +287,7 @@ func TestUpgradeRetainsInodeAndLatestDataAndFencesOldExecution(t *testing.T) {
 	if err := ClaimExecution(base, "owner", before.ID, "new-pod", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := Upgrade(base, "owner", "node", "old", "new", "old-pod", "upgrade"); err != nil {
+	if err := Upgrade(base, "owner", "node", "old", "new", "old-pod", "", "upgrade"); err != nil {
 		t.Fatal(err)
 	}
 	if err := ClaimExecution(base, "owner", before.ID, "third-pod", ""); err == nil {
@@ -297,7 +297,42 @@ func TestUpgradeRetainsInodeAndLatestDataAndFencesOldExecution(t *testing.T) {
 	if err != nil || string(got) != "newer than backup" {
 		t.Fatal("latest data lost", err)
 	}
-	if err := Upgrade(base, "owner", "node", "new", "other", "old-pod", "upgrade"); err == nil {
+	if err := Upgrade(base, "owner", "node", "new", "other", "old-pod", "", "upgrade"); err == nil {
 		t.Fatal("nonce reuse changed target")
+	}
+}
+
+func TestUpgradeSuspendedHomeRequiresMatchingCheckpoint(t *testing.T) {
+	base := t.TempDir()
+	home, err := Prepare(base, "owner", "node", "old", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSync := syncFS
+	syncFS = func(int) error { return nil }
+	t.Cleanup(func() { syncFS = oldSync })
+	if err := ClaimExecution(base, "owner", home.ID, "pod", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := Checkpoint(base, "owner", home.ID, "pod", "checkpoint"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Upgrade(base, "owner", "node", "old", "new", "", "wrong-checkpoint", "upgrade"); err == nil {
+		t.Fatal("wrong checkpoint admitted")
+	}
+	if err := Upgrade(base, "owner", "node", "old", "new", "", "checkpoint", "upgrade"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateCheckpoint(base, "owner", home.ID, "checkpoint"); err == nil {
+		t.Fatal("old checkpoint can still be restored")
+	}
+	if err := ClaimExecution(base, "owner", home.ID, "new-pod", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := Upgrade(base, "owner", "node", "old", "new", "", "checkpoint", "upgrade"); err != nil {
+		t.Fatal("lost response replay failed", err)
+	}
+	if err := ClaimExecution(base, "owner", home.ID, "third-pod", ""); err == nil {
+		t.Fatal("replay released live disk")
 	}
 }
