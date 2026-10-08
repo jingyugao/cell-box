@@ -45,6 +45,10 @@ type executionRuntime interface {
 	WaitWarmStarted(context.Context, *api.ResumablePod, *core.Pod) (*api.Execution, error)
 }
 
+type failureDiagnostics interface {
+	CaptureFailure(context.Context, *api.ResumablePod, *core.Pod) error
+}
+
 func (r *Reconciler) syncInventoryPhase(ctx context.Context, w *api.ResumablePod, phase string) error {
 	syncer, ok := r.Runtime.(inventoryRuntime)
 	if !ok {
@@ -507,6 +511,11 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, r.Update(ctx, w)
 	}
 	if w.Status.Phase == "Failing" {
+		if diagnostics, ok := r.Runtime.(failureDiagnostics); ok {
+			if err := diagnostics.CaptureFailure(ctx, w, p); err != nil {
+				return again, err
+			}
+		}
 		done, err := r.removePod(ctx, w, p)
 		if err != nil || !done {
 			return again, err
@@ -535,6 +544,13 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return r.begin(ctx, w)
 	}
 	fail := func(err error) (ctrl.Result, error) {
+		if diagnostics, ok := r.Runtime.(failureDiagnostics); ok {
+			evidence := w.DeepCopy()
+			evidence.Status.Message = err.Error()
+			if captureErr := diagnostics.CaptureFailure(ctx, evidence, p); captureErr != nil {
+				return again, captureErr
+			}
+		}
 		w.Status.RetryNonce = w.Spec.RetryNonce
 		return r.phase(ctx, w, "Failing", err.Error())
 	}
