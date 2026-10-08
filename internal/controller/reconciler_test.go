@@ -7,6 +7,7 @@ import (
 	lifecycle "cellbox.local/cellbox/internal/runtime"
 	"context"
 	"errors"
+	"fmt"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -522,5 +523,67 @@ func TestInventoryFailureKeepsPausePending(t *testing.T) {
 	step(t, r, w)
 	if w.Status.Phase != "Suspended" {
 		t.Fatalf("pause did not complete after index recovery: %s", w.Status.Phase)
+	}
+}
+
+type rebuildRuntime struct {
+	*fakeRuntime
+	rebuilds     int
+	rebuildError error
+}
+
+func (f *rebuildRuntime) Rebuild(context.Context, *api.ResumablePod) error {
+	f.rebuilds++
+	return f.rebuildError
+}
+
+func TestExplicitHomeRebuildColdStartsSameOwnerAndStopsOnMissingHome(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(fmt.Sprint(missing), func(t *testing.T) {
+			ctx := context.Background()
+			r, f, w := fixture(t)
+			backend := &rebuildRuntime{fakeRuntime: f}
+			if missing {
+				backend.rebuildError = errors.New("persistent HOME missing")
+			}
+			r.Runtime = backend
+			w.Spec.PersistentHome = true
+			w.Status.SpecHash = fingerprint(w)
+			if err := r.Update(ctx, w); err != nil {
+				t.Fatal(err)
+			}
+			w.Status.SpecHash = fingerprint(w)
+			w.Status.Phase = "Failed"
+			w.Status.Snapshot = "obsolete-checkpoint"
+			if err := r.Status().Update(ctx, w); err != nil {
+				t.Fatal(err)
+			}
+			// No automatic restart or archive fallback when the execution fails.
+			step(t, r, w)
+			if backend.rebuilds != 0 || w.Status.Phase != "Failed" {
+				t.Fatal(w.Status)
+			}
+			w.Spec.RebuildNonce = "explicit-request"
+			if err := r.Update(ctx, w); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 5 && w.Status.RebuildNonce == ""; i++ {
+				step(t, r, w)
+			}
+			if backend.rebuilds != 1 || w.UID != "12345678-aaaa" || w.Status.RebuildNonce != "explicit-request" {
+				t.Fatal(w.Status, backend.rebuilds)
+			}
+			if missing {
+				if w.Status.Phase != "Failed" || !strings.Contains(w.Status.Message, "persistent HOME missing") {
+					t.Fatal(w.Status)
+				}
+				step(t, r, w)
+				if backend.rebuilds != 1 {
+					t.Fatal("automatically retried failed rebuild")
+				}
+			} else if w.Status.Phase != "Creating" || w.Status.Snapshot != "" || w.Status.Cycle != 2 || w.Status.PodUID != "" {
+				t.Fatal("rebuild must cold-start without checkpoint", w.Status)
+			}
+		})
 	}
 }

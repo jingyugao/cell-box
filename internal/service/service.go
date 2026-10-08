@@ -474,7 +474,7 @@ func (s *Service) observe(ctx context.Context, b boxRecord) (Box, error) {
 			if current.Box.Phase == "deleting" && phase != "deleted" {
 				phase = "deleting"
 			}
-			target := map[string]string{"freezing": "frozen", "unfreezing": "running", "suspending": "suspended", "resuming": "running"}[current.Box.Phase]
+			target := map[string]string{"freezing": "frozen", "unfreezing": "running", "suspending": "suspended", "resuming": "running", "rebuilding": "running"}[current.Box.Phase]
 			if current.Box.OperationID != "" && target != "" && phase != target && phase != "failed" && phase != "deleted" {
 				phase = current.Box.Phase
 			}
@@ -871,7 +871,7 @@ func (s *Service) action(client, key, id, action string) (Operation, error) {
 	return s.actionContext(context.Background(), client, key, id, action)
 }
 func (s *Service) actionContext(request context.Context, client, key, id, action string) (Operation, error) {
-	allowed := map[string]bool{"freeze": true, "unfreeze": true, "suspend": true, "resume": true, "destroy": true, "activate": true, "reconcile": true}
+	allowed := map[string]bool{"freeze": true, "unfreeze": true, "suspend": true, "resume": true, "destroy": true, "activate": true, "reconcile": true, "rebuild": true}
 	if !allowed[action] {
 		return Operation{}, apiError("INVALID_REQUEST", "Unknown lifecycle action")
 	}
@@ -903,6 +903,12 @@ func (s *Service) actionContext(request context.Context, client, key, id, action
 		if action == "activate" && (!b.Staged || !b.RestoreComplete || b.Box.Phase != "staged") {
 			return apiError("CONFLICT", "Box is not a staged candidate")
 		}
+		if action == "rebuild" && (b.Profile.Provider != "resumable-k8s-pod" || !b.Profile.PersistentHome) {
+			return boxprovider.ErrUnsupported
+		}
+		if action == "rebuild" && b.Box.Phase != "failed" {
+			return apiError("CONFLICT", "Only a failed box can rebuild its persistent HOME")
+		}
 		if action == "suspend" && b.Box.Phase != "running" {
 			return apiError("CONFLICT", "Only a running box can suspend")
 		}
@@ -917,7 +923,7 @@ func (s *Service) actionContext(request context.Context, client, key, id, action
 		}
 		b.Box.OperationID = op.ID
 		b.Box.Error = nil
-		if phase := map[string]string{"destroy": "deleting", "freeze": "freezing", "unfreeze": "unfreezing", "suspend": "suspending", "resume": "resuming"}[action]; phase != "" {
+		if phase := map[string]string{"destroy": "deleting", "freeze": "freezing", "unfreeze": "unfreezing", "suspend": "suspending", "resume": "resuming", "rebuild": "rebuilding"}[action]; phase != "" {
 			b.Box.Phase = phase
 		}
 		b.Box.Version++
@@ -984,7 +990,7 @@ func (s *Service) actionContext(request context.Context, client, key, id, action
 				}
 				return nil, err
 			}
-			want := map[string]string{"freeze": "frozen", "unfreeze": "running", "suspend": "suspended", "resume": "running"}[action]
+			want := map[string]string{"freeze": "frozen", "unfreeze": "running", "suspend": "suspended", "resume": "running", "rebuild": "running"}[action]
 			waitCtx, waitSpan := telemetry.Start(ctx, "cellbox.wait_runtime")
 			_, waitErr := s.waitState(waitCtx, id, want, action != "resume")
 			telemetry.End(waitSpan, waitErr)

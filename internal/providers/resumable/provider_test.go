@@ -369,3 +369,37 @@ func TestInspectRejectsExecutionSwitchDuringPodRead(t *testing.T) {
 	}
 }
 func boolPtr(v bool) *bool { return &v }
+
+func TestRebuildRequiresFailedPersistentHomeAndReportsPendingRequest(t *testing.T) {
+	p, spec, ctx := fixture(t)
+	spec.PersistentHome = true
+	h, err := p.Create(ctx, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &api.ResumablePod{}
+	if err := p.Client.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Action(ctx, h, "rebuild"); err == nil {
+		t.Fatal("healthy box rebuilt")
+	}
+	w.Status.Phase = "Failed"
+	w.Status.PodUID = "old"
+	if err := p.Client.Status().Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Action(ctx, h, "rebuild"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Client.Get(ctx, client.ObjectKeyFromObject(w), w); err != nil {
+		t.Fatal(err)
+	}
+	if w.Spec.RebuildNonce == "" || w.UID != types.UID(h.ID) {
+		t.Fatal("lost restart request or box identity")
+	}
+	observed, err := p.Inspect(ctx, h)
+	if err != nil || observed.Phase != "creating" || observed.ExecutionID != "" {
+		t.Fatal("pending rebuild exposed old failed execution", observed, err)
+	}
+}

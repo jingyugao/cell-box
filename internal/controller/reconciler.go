@@ -45,6 +45,10 @@ type executionRuntime interface {
 	WaitWarmStarted(context.Context, *api.ResumablePod, *core.Pod) (*api.Execution, error)
 }
 
+type homeRebuilder interface {
+	Rebuild(context.Context, *api.ResumablePod) error
+}
+
 type failureDiagnostics interface {
 	CaptureFailure(context.Context, *api.ResumablePod, *core.Pod) error
 }
@@ -530,6 +534,26 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return r.phase(ctx, w, "Failing", validationErr.Error())
 	}
 	if w.Status.Phase == "Failed" {
+		if w.Spec.RebuildNonce != "" && w.Spec.RebuildNonce != w.Status.RebuildNonce {
+			if !w.Spec.PersistentHome || w.Spec.DesiredState != "Running" {
+				return again, fmt.Errorf("rebuild requires persistent HOME and Running state")
+			}
+			done, err := r.removePod(ctx, w, p)
+			if err != nil || !done {
+				return again, err
+			}
+			backend, ok := r.Runtime.(homeRebuilder)
+			if !ok {
+				return again, fmt.Errorf("runtime does not support HOME rebuild")
+			}
+			if err := backend.Rebuild(ctx, w); err != nil {
+				w.Status.RebuildNonce = w.Spec.RebuildNonce
+				return r.phase(ctx, w, "Failed", "Persistent HOME rebuild failed: "+err.Error())
+			}
+			w.Status.RebuildNonce = w.Spec.RebuildNonce
+			w.Status.Snapshot = ""
+			return r.begin(ctx, w)
+		}
 		if w.Spec.RetryNonce == w.Status.RetryNonce {
 			return again, nil
 		}

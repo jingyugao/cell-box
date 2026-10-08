@@ -35,6 +35,7 @@ type Spec struct {
 	DebugReadWriteHostPath string             `json:"debugReadWriteHostPath,omitempty"`
 	PersistentHome         bool               `json:"persistentHome,omitempty"`
 	ServicePorts           []core.ServicePort `json:"servicePorts,omitempty"`
+	RebuildNonce           string             `json:"rebuildNonce,omitempty"`
 	RetryNonce             string             `json:"retryNonce,omitempty"`
 	StartupTimeoutSeconds  int64              `json:"startupTimeoutSeconds,omitempty"`
 }
@@ -48,6 +49,7 @@ type Status struct {
 	PodUID             string           `json:"podUID,omitempty"`
 	Execution          *Execution       `json:"execution,omitempty"`
 	Snapshot           string           `json:"snapshot,omitempty"`
+	RebuildNonce       string           `json:"rebuildNonce,omitempty"`
 	RetryNonce         string           `json:"retryNonce,omitempty"`
 	Since              meta.Time        `json:"since,omitempty"`
 	Conditions         []meta.Condition `json:"conditions,omitempty"`

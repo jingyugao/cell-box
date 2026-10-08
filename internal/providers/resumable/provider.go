@@ -3,7 +3,9 @@ package resumable
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -188,6 +190,10 @@ func (p *Provider) Inspect(ctx context.Context, h boxprovider.Handle) (boxprovid
 		obs.Phase = "deleting"
 		return obs, nil
 	}
+	if w.Status.Phase == "Failed" && w.Spec.PersistentHome && w.Spec.DesiredState == "Running" && w.Spec.RebuildNonce != "" && w.Spec.RebuildNonce != w.Status.RebuildNonce {
+		obs.Phase, obs.ExecutionID = "creating", ""
+		return obs, nil
+	}
 	switch w.Status.Phase {
 	case "", "Creating":
 		obs.Phase = "creating"
@@ -291,7 +297,7 @@ func (p *Provider) Action(ctx context.Context, h boxprovider.Handle, action stri
 	switch action {
 	case "suspend":
 		desired = "Suspended"
-	case "resume":
+	case "resume", "rebuild":
 		desired = "Running"
 	case "freeze", "unfreeze":
 		return boxprovider.ErrUnsupported
@@ -304,6 +310,19 @@ func (p *Provider) Action(ctx context.Context, h boxprovider.Handle, action stri
 	}
 	if w.DeletionTimestamp != nil {
 		return errors.New("ResumablePod is deleting")
+	}
+	if action == "rebuild" {
+		if w.Status.Phase != "Failed" || !w.Spec.PersistentHome {
+			return errors.New("rebuild requires a failed Box with persistent HOME")
+		}
+		old := w.DeepCopy()
+		nonce := make([]byte, 16)
+		if _, err := rand.Read(nonce); err != nil {
+			return err
+		}
+		w.Spec.RebuildNonce = hex.EncodeToString(nonce)
+		w.Spec.DesiredState = "Running"
+		return p.Client.Patch(ctx, w, client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{}))
 	}
 	if w.Status.Phase == "Failed" || w.Status.Phase == "Failing" {
 		return errors.New("ResumablePod failed; explicit operator retry is required")

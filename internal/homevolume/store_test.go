@@ -208,3 +208,46 @@ func TestRemoveOnlyRemovesValidatedOwnerAndDoesNotFollowGuestSymlink(t *testing.
 		t.Fatalf("repeated Remove should be idempotent: %v", err)
 	}
 }
+
+func TestExplicitRebuildPreservesHomeAndFencesOldSnapshots(t *testing.T) {
+	base := t.TempDir()
+	home, err := Prepare(base, "owner", "node", "spec", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := Path(base, "owner")
+	file := filepath.Join(data, "latest.txt")
+	if err := os.WriteFile(file, []byte("newer than archive"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClaimExecution(base, "owner", home.ID, "old-pod", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := Rearm(base, "owner", "node", "spec", "wrong-pod", "restart"); err == nil {
+		t.Fatal("unrelated execution rearmed")
+	}
+	if err := Rearm(base, "owner", "node", "spec", "old-pod", "restart"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClaimExecution(base, "owner", home.ID, "new-pod", ""); err != nil {
+		t.Fatal(err)
+	}
+	// A retried controller request cannot release the new execution's ownership.
+	if err := Rearm(base, "owner", "node", "spec", "old-pod", "restart"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClaimExecution(base, "owner", home.ID, "third-pod", ""); err == nil {
+		t.Fatal("replay released active HOME")
+	}
+	current, err := Verify(base, "owner", "node", "spec", home.ID)
+	if err != nil || current != home {
+		t.Fatalf("identity changed: %+v %v", current, err)
+	}
+	contents, err := os.ReadFile(file)
+	if err != nil || string(contents) != "newer than archive" {
+		t.Fatal("latest contents lost", err)
+	}
+	if err := Rearm(base, "missing", "node", "spec", "old-pod", "restart"); err == nil {
+		t.Fatal("missing HOME recreated")
+	}
+}

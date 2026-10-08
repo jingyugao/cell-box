@@ -460,3 +460,17 @@ func (b *Backend) clearForgetOwnerLocked(owner string) {
 		}
 	}
 }
+
+// Rebuild discards failed runtime/checkpoint artifacts while preserving the owned HOME.
+func (b *Backend) Rebuild(ctx context.Context, r *api.ResumablePod) error {
+	if !r.Spec.PersistentHome || r.DeletionTimestamp != nil {
+		return fmt.Errorf("rebuild requires an existing persistent HOME")
+	}
+	if _, err := b.persistentHome(r, false); err != nil {
+		return err
+	}
+	if err := b.Forget(ctx, r); err != nil {
+		return err
+	}
+	return homevolume.Rearm(b.Base, string(r.UID), r.Spec.NodeName, r.Status.SpecHash, r.Status.PodUID, r.Spec.RebuildNonce)
+}
