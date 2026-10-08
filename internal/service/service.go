@@ -971,8 +971,14 @@ func (s *Service) actionContext(request context.Context, client, key, id, action
 					return nil, err
 				}
 			} else {
-				if _, err := s.observe(ctx, b); err != nil {
+				observed, err := s.observe(ctx, b)
+				if err != nil {
 					return nil, err
+				}
+				if !b.Staged && observed.Phase == "running" {
+					if err := s.guestAction(ctx, b, "/v1/activate"); err != nil {
+						return nil, err
+					}
 				}
 			}
 		default:
@@ -996,6 +1002,18 @@ func (s *Service) actionContext(request context.Context, client, key, id, action
 			telemetry.End(waitSpan, waitErr)
 			if err := waitErr; err != nil {
 				return nil, err
+			}
+			if action == "rebuild" {
+				updated, err := s.rawBox(id)
+				if err != nil {
+					return nil, err
+				}
+				// A previously activated archive candidate still boots with --staged.
+				// Cold start must activate its workload again; guest health alone only
+				// proves the control process is listening.
+				if err := s.guestAction(ctx, updated, "/v1/activate"); err != nil {
+					return nil, err
+				}
 			}
 			if action == "resume" {
 				updated, err := s.rawBox(id)

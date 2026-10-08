@@ -779,4 +779,16 @@ func TestHomeRebuildGuardsAndIdempotencyRetainBox(t *testing.T) {
 	if creates != 1 || deletes != 0 {
 		t.Fatal("Box identity replaced", creates, deletes)
 	}
+	if f.activateCalls.Load() != 1 {
+		t.Fatal("cold rebuild did not activate workload")
+	}
+	reconcile, err := f.service.action("client-a", "reconcile-rebuilt", box.ID, "reconcile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.waitOperation(t, reconcile.ID, "succeeded")
+	if f.activateCalls.Load() != 2 {
+		t.Fatal("ready retry did not ensure workload activation")
+	}
+
 }

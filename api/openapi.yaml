@@ -1239,7 +1239,7 @@ paths:
     post:
       description: An active operation, service request, or unexpired usage lease
         blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
-        never reruns an interrupted exec or resumes a failed archive restore.
+        never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
       operationId: activateBox
       parameters:
       - in: path
@@ -1262,7 +1262,7 @@ paths:
     post:
       description: An active operation, service request, or unexpired usage lease
         blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
-        never reruns an interrupted exec or resumes a failed archive restore.
+        never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
       operationId: destroyBox
       parameters:
       - in: path
@@ -1285,7 +1285,7 @@ paths:
     post:
       description: An active operation, service request, or unexpired usage lease
         blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
-        never reruns an interrupted exec or resumes a failed archive restore.
+        never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
       operationId: freezeBox
       parameters:
       - in: path
@@ -1308,7 +1308,7 @@ paths:
     post:
       description: An active operation, service request, or unexpired usage lease
         blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
-        never reruns an interrupted exec or resumes a failed archive restore.
+        never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
       operationId: reconcileBox
       parameters:
       - in: path
@@ -1352,7 +1352,7 @@ paths:
     post:
       description: An active operation, service request, or unexpired usage lease
         blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
-        never reruns an interrupted exec or resumes a failed archive restore.
+        never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
         Resume completion confirms the runtime is running and the Guest has been
         unquiesced. Guest health checks run asynchronously and report diagnostics
         without delaying completion or changing the box lifecycle phase.
@@ -1378,7 +1378,7 @@ paths:
     post:
       description: An active operation, service request, or unexpired usage lease
         blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
-        never reruns an interrupted exec or resumes a failed archive restore.
+        never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
       operationId: suspendBox
       parameters:
       - in: path
@@ -1401,7 +1401,7 @@ paths:
     post:
       description: An active operation, service request, or unexpired usage lease
         blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
-        never reruns an interrupted exec or resumes a failed archive restore.
+        never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
       operationId: unfreezeBox
       parameters:
       - in: path
