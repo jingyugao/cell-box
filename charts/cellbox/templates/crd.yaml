@@ -81,6 +81,9 @@ spec:
                       message: debugReadWriteHostPath is immutable
                 persistentHome:
                   type: boolean
+                rebuildNonce:
+                  type: string
+                  maxLength: 128
                 retryNonce:
                   type: string
                   maxLength: 128

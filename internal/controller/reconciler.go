@@ -45,6 +45,14 @@ type executionRuntime interface {
 	WaitWarmStarted(context.Context, *api.ResumablePod, *core.Pod) (*api.Execution, error)
 }
 
+type homeRebuilder interface {
+	Rebuild(context.Context, *api.ResumablePod) error
+}
+
+type failureDiagnostics interface {
+	CaptureFailure(context.Context, *api.ResumablePod, *core.Pod) error
+}
+
 func (r *Reconciler) syncInventoryPhase(ctx context.Context, w *api.ResumablePod, phase string) error {
 	syncer, ok := r.Runtime.(inventoryRuntime)
 	if !ok {
@@ -507,6 +515,11 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, r.Update(ctx, w)
 	}
 	if w.Status.Phase == "Failing" {
+		if diagnostics, ok := r.Runtime.(failureDiagnostics); ok {
+			if err := diagnostics.CaptureFailure(ctx, w, p); err != nil {
+				return again, err
+			}
+		}
 		done, err := r.removePod(ctx, w, p)
 		if err != nil || !done {
 			return again, err
@@ -521,6 +534,26 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return r.phase(ctx, w, "Failing", validationErr.Error())
 	}
 	if w.Status.Phase == "Failed" {
+		if w.Spec.RebuildNonce != "" && w.Spec.RebuildNonce != w.Status.RebuildNonce {
+			if !w.Spec.PersistentHome || w.Spec.DesiredState != "Running" {
+				return again, fmt.Errorf("rebuild requires persistent HOME and Running state")
+			}
+			done, err := r.removePod(ctx, w, p)
+			if err != nil || !done {
+				return again, err
+			}
+			backend, ok := r.Runtime.(homeRebuilder)
+			if !ok {
+				return again, fmt.Errorf("runtime does not support HOME rebuild")
+			}
+			if err := backend.Rebuild(ctx, w); err != nil {
+				w.Status.RebuildNonce = w.Spec.RebuildNonce
+				return r.phase(ctx, w, "Failed", "Persistent HOME rebuild failed: "+err.Error())
+			}
+			w.Status.RebuildNonce = w.Spec.RebuildNonce
+			w.Status.Snapshot = ""
+			return r.begin(ctx, w)
+		}
 		if w.Spec.RetryNonce == w.Status.RetryNonce {
 			return again, nil
 		}
@@ -535,6 +568,13 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return r.begin(ctx, w)
 	}
 	fail := func(err error) (ctrl.Result, error) {
+		if diagnostics, ok := r.Runtime.(failureDiagnostics); ok {
+			evidence := w.DeepCopy()
+			evidence.Status.Message = err.Error()
+			if captureErr := diagnostics.CaptureFailure(ctx, evidence, p); captureErr != nil {
+				return again, captureErr
+			}
+		}
 		w.Status.RetryNonce = w.Spec.RetryNonce
 		return r.phase(ctx, w, "Failing", err.Error())
 	}

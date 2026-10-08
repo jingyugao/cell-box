@@ -215,11 +215,21 @@ func Main() {
 	a := Adapter{Base: node.DefaultBase, Runsc: node.DefaultRunsc}
 	args, err := a.Rewrite(os.Args[1:])
 	if err == nil {
+		args, err = a.DiagnosticArgs(args)
+	}
+	if err == nil {
 		err = syscall.Exec(a.Runsc, append([]string{a.Runsc}, args...), os.Environ())
 	}
 	// OCI JSON log is consumed by the shim. Stderr may already be a closed pipe.
 	entry, _ := json.Marshal(map[string]string{"level": "error", "msg": err.Error(), "time": time.Now().UTC().Format(time.RFC3339Nano)})
-	for _, path := range []string{filepath.Join(a.Base, "adapter.log"), argValue(os.Args[1:], "--log")} {
+	paths := []string{filepath.Join(a.Base, "adapter.log"), argValue(os.Args[1:], "--log")}
+	if len(os.Args) > 1 && sandboxID.MatchString(os.Args[len(os.Args)-1]) {
+		dir := filepath.Join(a.Base, "logs", os.Args[len(os.Args)-1])
+		if os.MkdirAll(dir, 0700) == nil {
+			paths = append(paths, filepath.Join(dir, "adapter.log"))
+		}
+	}
+	for _, path := range paths {
 		if path == "" {
 			continue
 		}

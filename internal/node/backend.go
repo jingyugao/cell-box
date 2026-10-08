@@ -67,6 +67,14 @@ func (b *Backend) command(ctx context.Context, args ...string) error {
 	defer cancel()
 	command := b.Runsc
 	commandArgs := append([]string{"--root=" + b.Root}, args...)
+	if len(args) > 1 && len(args[len(args)-1]) == 64 && ValidID(args[len(args)-1]) {
+		dir := filepath.Join(b.Base, "logs", args[len(args)-1])
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return fmt.Errorf("create controller runtime logs: %w", err)
+		}
+		commandArgs = append([]string{"--debug-log=" + filepath.Join(dir, "controller.%TIMESTAMP%.%COMMAND%.log"),
+			"--panic-log=" + filepath.Join(dir, "controller-panic.%TIMESTAMP%.%COMMAND%.log")}, commandArgs...)
+	}
 	if b.HostMountNamespace {
 		command = "nsenter"
 		commandArgs = append([]string{"--target=1", "--mount", "--root", "--", b.Runsc}, commandArgs...)
@@ -451,4 +459,18 @@ func (b *Backend) clearForgetOwnerLocked(owner string) {
 			delete(b.forgetSuccess, key)
 		}
 	}
+}
+
+// Rebuild discards failed runtime/checkpoint artifacts while preserving the owned HOME.
+func (b *Backend) Rebuild(ctx context.Context, r *api.ResumablePod) error {
+	if !r.Spec.PersistentHome || r.DeletionTimestamp != nil {
+		return fmt.Errorf("rebuild requires an existing persistent HOME")
+	}
+	if _, err := b.persistentHome(r, false); err != nil {
+		return err
+	}
+	if err := b.Forget(ctx, r); err != nil {
+		return err
+	}
+	return homevolume.Rearm(b.Base, string(r.UID), r.Spec.NodeName, r.Status.SpecHash, r.Status.PodUID, r.Spec.RebuildNonce)
 }

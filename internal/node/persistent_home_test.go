@@ -110,3 +110,26 @@ func TestPersistentHomeRestoreNeverCreatesMissingStorage(t *testing.T) {
 		t.Fatal("restore wrote authorization for missing HOME")
 	}
 }
+
+func TestFailedBoxRebuildPreservesExistingHomeAndRejectsMissingHome(t *testing.T) {
+	base := t.TempDir()
+	b := &Backend{Base: base}
+	w := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{UID: "owner"}, Spec: api.Spec{NodeName: "node", PersistentHome: true, RebuildNonce: "restart"}, Status: api.Status{Cycle: 2, SpecHash: "spec", PodUID: "old-pod", Snapshot: "stale"}}
+	home, err := homevolume.Prepare(base, "owner", "node", "spec", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := homevolume.ClaimExecution(base, "owner", home.ID, "old-pod", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Rebuild(context.Background(), w); err != nil {
+		t.Fatal(err)
+	}
+	if err := homevolume.ClaimExecution(base, "owner", home.ID, "new-pod", ""); err != nil {
+		t.Fatal(err)
+	}
+	w.UID = "missing"
+	if err := b.Rebuild(context.Background(), w); err == nil {
+		t.Fatal("missing HOME silently replaced")
+	}
+}

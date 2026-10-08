@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -713,4 +714,81 @@ func TestProfilesExposeOnlySupportedRuntimeBehaviorKinds(t *testing.T) {
 			t.Fatalf("profile metadata missing: %+v", profile)
 		}
 	}
+}
+
+type homeRebuildProvider struct {
+	*fakeCoreProvider
+	calls atomic.Int32
+}
+
+func (p *homeRebuildProvider) Action(_ context.Context, _ boxprovider.Handle, action string) error {
+	if action != "rebuild" {
+		return errors.New("unexpected action")
+	}
+	p.calls.Add(1)
+	p.setExecutionID("rebuilt-execution")
+	return nil
+}
+func TestHomeRebuildGuardsAndIdempotencyRetainBox(t *testing.T) {
+	f := newCoreFixture(t)
+	_, box := f.createBox(t, "home-rebuild-create")
+	provider := &homeRebuildProvider{fakeCoreProvider: f.provider}
+	f.service.providers["resumable-k8s-pod"] = provider
+	change := func(phase string, persistent bool, lease bool) {
+		t.Helper()
+		if err := f.service.store.Update(func(st *State) error {
+			b := st.Boxes[box.ID]
+			b.Box.Phase = phase
+			b.Profile.Provider = "resumable-k8s-pod"
+			b.Profile.PersistentHome = persistent
+			st.Boxes[box.ID] = b
+			if lease {
+				st.Leases["busy-lease"] = Lease{ID: "busy-lease", BoxID: box.ID, ExpiresAt: time.Now().Add(time.Minute)}
+			} else {
+				delete(st.Leases, "busy-lease")
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct {
+		phase             string
+		persistent, lease bool
+	}{{"running", true, false}, {"failed", false, false}, {"failed", true, true}} {
+		change(c.phase, c.persistent, c.lease)
+		if _, err := f.service.action("client-a", "reject-"+c.phase+fmt.Sprint(c.persistent, c.lease), box.ID, "rebuild"); err == nil {
+			t.Fatal("unsafe rebuild accepted", c)
+		}
+	}
+	change("failed", true, false)
+	op, err := f.service.action("client-a", "same-home-rebuild", box.ID, "rebuild")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.waitOperation(t, op.ID, "succeeded")
+	again, err := f.service.action("client-a", "same-home-rebuild", box.ID, "rebuild")
+	if err != nil || again.ID != op.ID || provider.calls.Load() != 1 {
+		t.Fatal("rebuild was not idempotent", again, err)
+	}
+	record, err := f.service.rawBox(box.ID)
+	if err != nil || record.Box.Phase != "running" || record.Box.Generation <= box.Generation {
+		t.Fatal(record, err)
+	}
+	creates, deletes := f.provider.counts()
+	if creates != 1 || deletes != 0 {
+		t.Fatal("Box identity replaced", creates, deletes)
+	}
+	if f.activateCalls.Load() != 1 {
+		t.Fatal("cold rebuild did not activate workload")
+	}
+	reconcile, err := f.service.action("client-a", "reconcile-rebuilt", box.ID, "reconcile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.waitOperation(t, reconcile.ID, "succeeded")
+	if f.activateCalls.Load() != 2 {
+		t.Fatal("ready retry did not ensure workload activation")
+	}
+
 }

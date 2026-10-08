@@ -40,6 +40,7 @@ type Identity struct {
 }
 
 type executionState struct {
+	RebuildNonce     string `json:"rebuildNonce,omitempty"`
 	Phase            string `json:"phase"`
 	Pod              string `json:"pod,omitempty"`
 	Snapshot         string `json:"snapshot,omitempty"`
@@ -650,4 +651,33 @@ func checkPathNoSymlink(base, target string) error {
 		}
 	}
 	return nil
+}
+
+// Rearm permits an explicit cold start only after the controller has removed the old execution.
+// It keeps the validated HOME identity and contents, and never replays consumed checkpoints.
+func Rearm(base, owner, node, spec, oldPod, nonce string) error {
+	if nonce == "" {
+		return errors.New("rebuild nonce is required")
+	}
+	unlock, err := lockOwner(base, owner, false)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if _, err := Verify(base, owner, node, spec, ""); err != nil {
+		return err
+	}
+	_, dir, _, _ := paths(base, owner)
+	state, err := readState(filepath.Join(dir, stateName))
+	if err != nil {
+		return err
+	}
+	if state.RebuildNonce == nonce {
+		return nil
+	}
+	if state.Phase != "new" && (oldPod == "" || state.Pod != oldPod) {
+		return errors.New("HOME belongs to a different execution")
+	}
+	state.Phase, state.Pod, state.Snapshot, state.RebuildNonce = "new", "", "", nonce
+	return writeJSONAtomic(filepath.Join(dir, stateName), state, 0600)
 }
