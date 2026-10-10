@@ -2,9 +2,11 @@ package resumable
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/boxprovider"
@@ -60,6 +62,57 @@ func TestPersistentHomeSpecPropagationAndReentryCheck(t *testing.T) {
 	s.PersistentHome = false
 	if _, err := p.Create(ctx, s); err == nil {
 		t.Fatal("re-entered Box with a different persistentHome setting")
+	}
+}
+
+func TestCaptureWorkspaceArchiveRequiresSuspendedAndConsumesMatchingResult(t *testing.T) {
+	p, s, ctx := fixture(t)
+	s.PersistentHome = true
+	s.Config.Workspace = "/home/agent/workspace"
+	h, err := p.Create(ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &api.ResumablePod{}
+	if err = p.Client.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
+		t.Fatal(err)
+	}
+	id := "arc-0123456789abcdef0123456789abcdef"
+	if _, _, err = p.CaptureWorkspaceArchive(ctx, h, id); err == nil {
+		t.Fatal("running box was admitted for disk capture")
+	}
+	w.Spec.DesiredState = "Suspended"
+	w.Spec.PersistentHome = true
+	if w.Annotations == nil {
+		w.Annotations = map[string]string{}
+	}
+	request, _ := json.Marshal(api.ArchiveCaptureRequest{ID: id, Snapshot: "checkpoint-1", ExpiresAt: meta.NewTime(time.Now().Add(time.Minute)).Time})
+	result, _ := json.Marshal(api.ArchiveCaptureResult{ID: id, Snapshot: "checkpoint-1", Size: 123, SHA256: strings.Repeat("a", 64)})
+	w.Annotations[api.ArchiveRequestAnnotation] = string(request)
+	w.Annotations[api.ArchiveResultAnnotation] = string(result)
+	if err = p.Client.Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	w.Status.Phase, w.Status.Snapshot, w.Status.PodUID = "Suspended", "checkpoint-1", ""
+	if err = p.Client.Status().Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	size, digest, err := p.CaptureWorkspaceArchive(ctx, h, id)
+	if err != nil || size != 123 || digest != strings.Repeat("a", 64) {
+		t.Fatalf("capture result = %d/%s/%v", size, digest, err)
+	}
+	if err = p.Client.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
+		t.Fatal(err)
+	}
+	if w.Spec.DesiredState != "Suspended" || w.Annotations[api.ArchiveRequestAnnotation] != "" {
+		t.Fatal("archive capture resumed the box or left its request behind")
+	}
+	w.Status.Snapshot = "checkpoint-2"
+	if err = p.Client.Status().Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = p.CaptureWorkspaceArchive(ctx, h, id); err == nil {
+		t.Fatal("same request ID was accepted against a different checkpoint")
 	}
 }
 

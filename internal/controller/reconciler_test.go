@@ -6,6 +6,7 @@ import (
 	api "cellbox.local/cellbox/api/v1alpha1"
 	lifecycle "cellbox.local/cellbox/internal/runtime"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	core "k8s.io/api/core/v1"
@@ -71,6 +72,7 @@ func TestSharedDirectoryMountAdmissionAndFingerprint(t *testing.T) {
 
 type fakeRuntime struct {
 	checkpoints, prepares, cleanups int
+	archiveCaptures                 int
 	prepareError, cleanupError      error
 	checkpointError                 error
 	checkpointFailures              int
@@ -104,6 +106,76 @@ func (f *fakeRuntime) Forget(context.Context, *api.ResumablePod) error { return 
 func (f *fakeRuntime) SyncInventory(_ context.Context, w *api.ResumablePod) error {
 	f.inventoryPhases = append(f.inventoryPhases, w.Status.Phase)
 	return f.inventoryError
+}
+func (f *fakeRuntime) CaptureWorkspaceArchive(_ context.Context, _ *api.ResumablePod, request api.ArchiveCaptureRequest) (api.ArchiveCaptureResult, error) {
+	f.archiveCaptures++
+	return api.ArchiveCaptureResult{ID: request.ID, Snapshot: request.Snapshot, Size: 12, SHA256: strings.Repeat("a", 64)}, nil
+}
+
+func TestSuspendedWorkspaceArchiveDispatchAndStaleRequestProgress(t *testing.T) {
+	t.Run("captures only suspended persistent HOME", func(t *testing.T) {
+		r, runtime, w := fixture(t)
+		if err := r.Get(context.Background(), client.ObjectKeyFromObject(w), w); err != nil {
+			t.Fatal(err)
+		}
+		w.Spec.PersistentHome = true
+		w.Spec.DesiredState = "Suspended"
+		w.Annotations = map[string]string{api.ArchiveRequestAnnotation: `{"id":"arc-0123456789abcdef0123456789abcdef","snapshot":"checkpoint-1","expiresAt":"2099-01-01T00:00:00Z"}`}
+		if err := r.Update(context.Background(), w); err != nil {
+			t.Fatal(err)
+		}
+		w.Status.Phase = "Suspended"
+		w.Status.Snapshot = "checkpoint-1"
+		w.Status.PodName, w.Status.PodUID = "", ""
+		if err := r.Status().Update(context.Background(), w); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(w)}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(w)}); err != nil {
+			t.Fatal(err)
+		}
+		current := &api.ResumablePod{}
+		if err := r.Get(context.Background(), client.ObjectKeyFromObject(w), current); err != nil {
+			t.Fatal(err)
+		}
+		var result api.ArchiveCaptureResult
+		if err := json.Unmarshal([]byte(current.Annotations[api.ArchiveResultAnnotation]), &result); err != nil {
+			t.Fatalf("archive result was not published: %v", err)
+		}
+		if runtime.archiveCaptures != 1 || result.Error != "" || result.ID != "arc-0123456789abcdef0123456789abcdef" {
+			t.Fatalf("capture count/result = %d/%+v", runtime.archiveCaptures, result)
+		}
+	})
+
+	t.Run("stale request does not block resume lifecycle", func(t *testing.T) {
+		r, runtime, w := fixture(t)
+		if err := r.Get(context.Background(), client.ObjectKeyFromObject(w), w); err != nil {
+			t.Fatal(err)
+		}
+		w.Annotations = map[string]string{api.ArchiveRequestAnnotation: `{"id":"arc-0123456789abcdef0123456789abcdef"}`}
+		if err := r.Update(context.Background(), w); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(w)}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(w)}); err != nil {
+			t.Fatal(err)
+		}
+		current := &api.ResumablePod{}
+		if err := r.Get(context.Background(), client.ObjectKeyFromObject(w), current); err != nil {
+			t.Fatal(err)
+		}
+		var result api.ArchiveCaptureResult
+		if err := json.Unmarshal([]byte(current.Annotations[api.ArchiveResultAnnotation]), &result); err != nil {
+			t.Fatalf("stale request result was not published: %v", err)
+		}
+		if runtime.archiveCaptures != 0 || result.Error == "" || current.Status.Phase != "Running" {
+			t.Fatalf("stale request blocked lifecycle: captures=%d phase=%s result=%+v", runtime.archiveCaptures, current.Status.Phase, result)
+		}
+	})
 }
 func fixture(t *testing.T) (*Reconciler, *fakeRuntime, *api.ResumablePod) {
 	t.Helper()

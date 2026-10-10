@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"time"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/boxprovider"
@@ -342,6 +343,154 @@ func (p *Provider) Action(ctx context.Context, h boxprovider.Handle, action stri
 		return err
 	}
 	return nil
+}
+
+var archiveIDPattern = regexp.MustCompile(`^arc-[0-9a-f]{32}$`)
+var archiveSHA256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+func validSuspendedArchiveTarget(w *api.ResumablePod, h boxprovider.Handle) error {
+	if w.DeletionTimestamp != nil || w.Spec.DesiredState != "Suspended" || w.Status.Phase != "Suspended" ||
+		!w.Spec.PersistentHome || w.Status.Snapshot == "" || w.Status.PodUID != "" || w.Status.PodName != "" || w.Spec.NodeName != h.NodeName {
+		return errors.New("workspace archive requires a suspended persistent HOME")
+	}
+	return nil
+}
+
+// CaptureWorkspaceArchive asks the owning node controller to package the
+// configured workspace from the already-suspended persistent HOME. It never
+// changes DesiredState or creates a Pod.
+func (p *Provider) CaptureWorkspaceArchive(ctx context.Context, h boxprovider.Handle, id string) (int64, string, error) {
+	if !archiveIDPattern.MatchString(id) {
+		return 0, "", errors.New("invalid archive identifier")
+	}
+	if p == nil || p.Client == nil {
+		return 0, "", errors.New("Kubernetes client is required")
+	}
+	w, err := p.get(ctx, h)
+	if err != nil {
+		return 0, "", err
+	}
+	if err = validSuspendedArchiveTarget(w, h); err != nil {
+		return 0, "", err
+	}
+	expectedSnapshot := w.Status.Snapshot
+	if raw := w.Annotations[api.ArchiveResultAnnotation]; raw != "" {
+		var prior api.ArchiveCaptureResult
+		if json.Unmarshal([]byte(raw), &prior) == nil && prior.ID == id {
+			if prior.Snapshot != expectedSnapshot {
+				return 0, "", errors.New("workspace checkpoint changed since this archive request")
+			}
+			if prior.Error != "" || prior.Size < 1 || !archiveSHA256Pattern.MatchString(prior.SHA256) {
+				return 0, "", errors.New("prior workspace archive request did not complete successfully")
+			}
+			p.clearArchiveCapture(h, id, true)
+			return prior.Size, prior.SHA256, nil
+		}
+	}
+	if raw := w.Annotations[api.ArchiveRequestAnnotation]; raw != "" {
+		var request api.ArchiveCaptureRequest
+		if err = json.Unmarshal([]byte(raw), &request); err != nil || (request.ID != id && time.Now().Before(request.ExpiresAt)) || (request.ID == id && request.Snapshot != expectedSnapshot) {
+			return 0, "", errors.New("another workspace archive request is pending")
+		}
+		if request.ID == id && time.Now().Before(request.ExpiresAt) {
+			// An identical live request is safe to observe after an API retry.
+		} else {
+			old := w.DeepCopy()
+			if w.Annotations == nil {
+				w.Annotations = map[string]string{}
+			}
+			request, _ := json.Marshal(api.ArchiveCaptureRequest{ID: id, Snapshot: expectedSnapshot, ExpiresAt: time.Now().UTC().Add(14 * time.Minute)})
+			w.Annotations[api.ArchiveRequestAnnotation] = string(request)
+			delete(w.Annotations, api.ArchiveResultAnnotation)
+			if err = p.Client.Patch(ctx, w, client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{})); err != nil {
+				return 0, "", err
+			}
+		}
+	} else {
+		old := w.DeepCopy()
+		if w.Annotations == nil {
+			w.Annotations = map[string]string{}
+		}
+		request, _ := json.Marshal(api.ArchiveCaptureRequest{ID: id, Snapshot: expectedSnapshot, ExpiresAt: time.Now().UTC().Add(14 * time.Minute)})
+		w.Annotations[api.ArchiveRequestAnnotation] = string(request)
+		delete(w.Annotations, api.ArchiveResultAnnotation)
+		if err = p.Client.Patch(ctx, w, client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{})); err != nil {
+			return 0, "", err
+		}
+	}
+	completed := false
+	defer func() {
+		if !completed {
+			p.clearArchiveCapture(h, id, false)
+		}
+	}()
+
+	waitCtx, cancel := context.WithTimeout(ctx, 14*time.Minute)
+	defer cancel()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		w, err = p.get(waitCtx, h)
+		if err != nil {
+			return 0, "", err
+		}
+		if err = validSuspendedArchiveTarget(w, h); err != nil {
+			return 0, "", err
+		}
+		if w.Status.Snapshot != expectedSnapshot {
+			return 0, "", errors.New("workspace checkpoint changed during archive capture")
+		}
+		if raw := w.Annotations[api.ArchiveResultAnnotation]; raw != "" {
+			var result api.ArchiveCaptureResult
+			if json.Unmarshal([]byte(raw), &result) != nil {
+				return 0, "", errors.New("invalid workspace archive result")
+			}
+			if result.ID == id && result.Snapshot == expectedSnapshot {
+				if result.Error != "" {
+					p.clearArchiveCapture(h, id, false)
+					completed = true
+					return 0, "", errors.New("node workspace archive capture failed")
+				}
+				if result.Size < 1 || !archiveSHA256Pattern.MatchString(result.SHA256) {
+					return 0, "", errors.New("node returned invalid workspace archive metadata")
+				}
+				p.clearArchiveCapture(h, id, true)
+				completed = true
+				return result.Size, result.SHA256, nil
+			}
+		}
+		var request api.ArchiveCaptureRequest
+		if raw := w.Annotations[api.ArchiveRequestAnnotation]; raw == "" || json.Unmarshal([]byte(raw), &request) != nil || request.ID != id || request.Snapshot != expectedSnapshot {
+			return 0, "", errors.New("workspace archive request was replaced")
+		}
+		if !request.ExpiresAt.IsZero() && !time.Now().Before(request.ExpiresAt) {
+			return 0, "", errors.New("workspace archive request expired")
+		}
+		select {
+		case <-waitCtx.Done():
+			return 0, "", waitCtx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (p *Provider) clearArchiveCapture(h boxprovider.Handle, id string, preserveResult bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	w, err := p.get(ctx, h)
+	if err != nil || w.Annotations[api.ArchiveRequestAnnotation] == "" {
+		return
+	}
+	var request api.ArchiveCaptureRequest
+	if json.Unmarshal([]byte(w.Annotations[api.ArchiveRequestAnnotation]), &request) != nil || request.ID != id {
+		return
+	}
+	old := w.DeepCopy()
+	delete(w.Annotations, api.ArchiveRequestAnnotation)
+	if !preserveResult {
+		delete(w.Annotations, api.ArchiveResultAnnotation)
+	}
+	_ = p.Client.Patch(ctx, w, client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{}))
 }
 
 func (p *Provider) Upgrade(ctx context.Context, h boxprovider.Handle, spec boxprovider.Spec, nonce string) (boxprovider.Handle, error) {

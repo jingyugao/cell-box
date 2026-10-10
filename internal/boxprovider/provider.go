@@ -91,3 +91,9 @@ type InventoryProvider interface {
 type ResourceInventoryProvider interface {
 	ListResources(context.Context, string, string) ([]inventory.Record, error)
 }
+
+// WorkspaceArchiveProvider captures a workspace from persistent storage while
+// its sandbox is suspended. The implementation must not resume the sandbox.
+type WorkspaceArchiveProvider interface {
+	CaptureWorkspaceArchive(context.Context, Handle, string) (int64, string, error)
+}

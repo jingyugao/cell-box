@@ -16,6 +16,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"cellbox.local/cellbox/internal/boxprovider"
+	"cellbox.local/cellbox/internal/guestapi"
 )
 
 type archiveTestEntry struct {
@@ -430,6 +433,120 @@ func TestCaptureRejectsInvalidGuestArchiveAndCleansTemp(t *testing.T) {
 	if err := f.service.store.View(func(st State) error {
 		if len(st.Archives) != 0 {
 			t.Fatal("invalid capture persisted metadata")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type suspendedArchiveTestProvider struct {
+	*fakeCoreProvider
+	objects   *ledgerObjects
+	payload   []byte
+	badDigest bool
+	calls     int
+}
+
+func (p *suspendedArchiveTestProvider) CaptureWorkspaceArchive(ctx context.Context, _ boxprovider.Handle, id string) (int64, string, error) {
+	p.calls++
+	if _, err := p.objects.Put(ctx, "archives/"+id+".tar.gz", bytes.NewReader(p.payload), int64(len(p.payload)), "*"); err != nil {
+		return 0, "", err
+	}
+	sum := sha256.Sum256(p.payload)
+	digest := hex.EncodeToString(sum[:])
+	if p.badDigest {
+		digest = strings.Repeat("0", 64)
+	}
+	return int64(len(p.payload)), digest, nil
+}
+
+func TestSuspendedArchiveValidatesStoredNodeCaptureBeforePublishingMetadata(t *testing.T) {
+	for _, badDigest := range []bool{false, true} {
+		name := "valid node bytes"
+		if badDigest {
+			name = "corrupt node digest"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := OpenStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			objects := &ledgerObjects{data: map[string][]byte{}}
+			payload := makeArchiveTestData(t, archiveTestEntry{"src/", tar.TypeDir, ""}, archiveTestEntry{"src/main.go", tar.TypeReg, "package main\n"})
+			provider := &suspendedArchiveTestProvider{fakeCoreProvider: &fakeCoreProvider{}, objects: objects, payload: payload, badDigest: badDigest}
+			s := &Service{config: Config{DataDir: dir}, store: store, objects: objects,
+				providers: map[string]boxprovider.Provider{"resumable-k8s-pod": provider}}
+			box := boxRecord{Box: Box{ID: "box-1", ProfileID: "profile-1", ImageID: "image-1"}, ClientID: "client-1",
+				Profile: Profile{ID: "profile-1", Provider: "resumable-k8s-pod", Guest: guestapi.Config{Workspace: "/home/agent/workspace"}},
+				Handle:  boxprovider.Handle{Provider: "resumable-k8s-pod", ID: "box-1"}}
+			archive, captureErr := s.captureSuspendedArchive(context.Background(), box)
+			if provider.calls != 1 || provider.guestCount() != 0 {
+				t.Fatalf("capture calls=%d guest calls=%d", provider.calls, provider.guestCount())
+			}
+			var archiveCount int
+			if err = store.Update(func(st *State) error { archiveCount = len(st.Archives); return nil }); err != nil {
+				t.Fatal(err)
+			}
+			if badDigest {
+				if captureErr == nil || archiveCount != 0 {
+					t.Fatalf("corrupt node bytes were published: err=%v archives=%d", captureErr, archiveCount)
+				}
+				return
+			}
+			if captureErr != nil {
+				t.Fatal(captureErr)
+			}
+			if archive.ID == "" || archive.SourceBoxID != box.Box.ID || archive.ProfileID != box.Box.ProfileID || archive.ImageID != box.Box.ImageID || archive.Size != int64(len(payload)) {
+				t.Fatalf("archive metadata does not describe source capture: %+v", archive)
+			}
+			if archiveCount != 1 {
+				t.Fatalf("published %d archive metadata records", archiveCount)
+			}
+		})
+	}
+}
+
+func (*suspendedArchiveTestProvider) Inspect(context.Context, boxprovider.Handle) (boxprovider.Observation, error) {
+	return boxprovider.Observation{Phase: "suspended"}, nil
+}
+
+func TestSuspendedArchiveHTTPDispatchKeepsSourcePausedAndReusesOperation(t *testing.T) {
+	f := newCoreFixture(t)
+	_, source := f.createBox(t, "suspended-capture-source")
+	objects := &ledgerObjects{data: map[string][]byte{}}
+	provider := &suspendedArchiveTestProvider{fakeCoreProvider: f.provider, objects: objects,
+		payload: makeArchiveTestData(t, archiveTestEntry{"state.txt", tar.TypeReg, "latest workspace"})}
+	f.service.objects = objects
+	f.service.providers["resumable-k8s-pod"] = provider
+	if err := f.service.store.Update(func(st *State) error {
+		box := st.Boxes[source.ID]
+		box.Box.Phase = "suspended"
+		box.Profile.Provider = "resumable-k8s-pod"
+		box.Profile.Guest.Workspace = "/home/agent/workspace"
+		st.Boxes[source.ID] = box
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	guestCalls := f.provider.guestCount()
+	status, body := f.call(t, "POST", "/v1/boxes/"+source.ID+"/archives", testClientToken, "disk-capture", nil)
+	wantStatus(t, status, 202, body)
+	op := decodeResponse[Operation](t, body)
+	completed := f.waitOperation(t, op.ID, "succeeded")
+	if completed.Result["archiveId"] == "" {
+		t.Fatal("capture operation returned no archive reference")
+	}
+	status, body = f.call(t, "POST", "/v1/boxes/"+source.ID+"/archives", testClientToken, "disk-capture", nil)
+	wantStatus(t, status, 202, body)
+	if decodeResponse[Operation](t, body).ID != op.ID || provider.calls != 1 || f.provider.guestCount() != guestCalls {
+		t.Fatal("replay recaptured the disk or called the guest")
+	}
+	if err := f.service.store.View(func(st State) error {
+		if st.Boxes[source.ID].Box.Phase != "suspended" || st.Boxes[source.ID].Box.OperationID != "" {
+			t.Fatal("archive altered source lifecycle state or left it busy")
 		}
 		return nil
 	}); err != nil {
