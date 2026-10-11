@@ -25,6 +25,81 @@ func replaceQueryProvider(f *coreFixture, inspect func(context.Context, boxprovi
 	f.service.providers["docker"] = &queryProviderHook{Provider: f.provider, inspect: inspect}
 }
 
+func TestObserveRestoresSuspendedGenerationAfterServiceRestart(t *testing.T) {
+	objects := &ledgerObjects{}
+	initial := openRecords(t, objects)
+	updateRecords(t, initial, func(st *State) {
+		b := coreBox("paused-after-restart")
+		b.Profile.Provider = "resumable-k8s-pod"
+		b.Box.Phase = "suspended"
+		st.Boxes[b.Box.ID] = b
+	})
+
+	// Object-store recovery deliberately drops runtime observations. The CR is
+	// the durable source for this generation, including while no Pod is running.
+	restarted := openRecords(t, objects)
+	record, err := restarted.BoxRecord("paused-after-restart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Box.Generation != 0 || record.ExecutionID != "" {
+		t.Fatalf("restart retained derived runtime identity: generation=%d execution=%q", record.Box.Generation, record.ExecutionID)
+	}
+
+	generation := uint64(17)
+	provider := &queryProviderHook{
+		Provider: &fakeCoreProvider{},
+		inspect: func(context.Context, boxprovider.Handle) (boxprovider.Observation, error) {
+			return boxprovider.Observation{Phase: "suspended", Generation: generation}, nil
+		},
+	}
+	s := &Service{ctx: context.Background(), store: restarted,
+		providers: map[string]boxprovider.Provider{"resumable-k8s-pod": provider}}
+	observed, err := s.observe(context.Background(), record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.Phase != "suspended" || observed.Generation != 17 {
+		t.Fatalf("paused CR observation did not restore generation: %+v", observed)
+	}
+	current, err := restarted.BoxRecord(record.Box.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.ExecutionID != "" || current.Box.Generation != 17 {
+		t.Fatalf("suspended observation produced wrong runtime identity: generation=%d execution=%q", current.Box.Generation, current.ExecutionID)
+	}
+
+	// A delayed stale observation must not move the durable fence backwards.
+	generation = 16
+	observed, err = s.observe(context.Background(), current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.Generation != 17 {
+		t.Fatalf("stale provider generation regressed the Box fence: %+v", observed)
+	}
+
+	generation = 18
+	provider.inspect = func(context.Context, boxprovider.Handle) (boxprovider.Observation, error) {
+		return boxprovider.Observation{Phase: "running", Generation: generation, ExecutionID: "pod-18"}, nil
+	}
+	observed, err = s.observe(context.Background(), current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.Generation != 18 || observed.Phase != "running" {
+		t.Fatalf("new execution did not advance generation fence: %+v", observed)
+	}
+	current, err = restarted.BoxRecord(record.Box.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Box.Generation != 18 || current.ExecutionID != "pod-18" {
+		t.Fatalf("new execution identity was not adopted: generation=%d execution=%q", current.Box.Generation, current.ExecutionID)
+	}
+}
+
 func TestObserveUnchangedBoxDoesNotRewriteStateFile(t *testing.T) {
 	f := newCoreFixture(t)
 	_, box := f.createBox(t, "query-no-write")
