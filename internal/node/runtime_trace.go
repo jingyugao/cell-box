@@ -215,6 +215,14 @@ func (b *Backend) recordRuntimeTraceAt(ctx context.Context, sid string, now time
 		registrationGap, hasRegistrationGap = wait, true
 		restoreAttributes = append(restoreAttributes, attribute.Int64("runtime.trace.registration_gap_us", wait.Microseconds()))
 	}
+	for _, phase := range []struct{ from, to, key string }{
+		{"restore cont 2/2", "loading kernel", "runtime.trace.kernel_load_start_gap_us"},
+		{"kernel loaded", "kernel notified", "runtime.trace.kernel_notify_us"},
+	} {
+		if elapsed, ok := timing.duration(phase.from, phase.to); ok {
+			restoreAttributes = append(restoreAttributes, attribute.Int64(phase.key, elapsed.Microseconds()))
+		}
+	}
 	if kernelLoad, ok := timing.duration("loading kernel", "kernel loaded"); ok && kernelLoad > 0 {
 		restoreAttributes = append(restoreAttributes,
 			attribute.Int64("runtime.trace.kernel_load_us", kernelLoad.Microseconds()),

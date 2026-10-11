@@ -34,8 +34,6 @@ func checkpointObjectKey(owner, snapshot string) (string, error) {
 }
 
 func (b *Backend) uploadSnapshot(ctx context.Context, r *api.ResumablePod, snapshotPath string) (resultErr error) {
-	ctx, span := telemetry.Start(ctx, "node.snapshot.upload")
-	defer func() { telemetry.End(span, resultErr) }()
 	if b.Objects == nil {
 		return nil
 	}
@@ -52,6 +50,10 @@ func (b *Backend) uploadSnapshot(ctx context.Context, r *api.ResumablePod, snaps
 	if durable {
 		return nil
 	}
+	// A cached durable checkpoint needs no transfer. Trace only the remote
+	// verification/upload path, which can actually incur storage latency.
+	ctx, span := telemetry.Start(ctx, "node.snapshot.upload")
+	defer func() { telemetry.End(span, resultErr) }()
 	if body, _, _, getErr := b.Objects.Get(ctx, key); getErr == nil {
 		_ = body.Close()
 		b.rememberDurable(r)
