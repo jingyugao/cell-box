@@ -142,7 +142,11 @@ func (b *Backend) ActivateWarm(ctx context.Context, w *api.ResumablePod, p *core
 	if err != nil {
 		return true, err
 	}
-	t := Ticket{OwnerUID: string(w.UID), PodUID: string(p.UID), Namespace: p.Namespace, PodName: p.Name, Snapshot: w.Status.Snapshot, SpecHash: w.Status.SpecHash}
+	homeID, err := b.persistentHome(w, false)
+	if err != nil {
+		return true, err
+	}
+	t := Ticket{OwnerUID: string(w.UID), PodUID: string(p.UID), Namespace: p.Namespace, PodName: p.Name, Snapshot: w.Status.Snapshot, SpecHash: w.Status.SpecHash, HomeID: homeID}
 	if l.Phase == "claimed" || l.Phase == "restoring" {
 		if l.Ticket != t {
 			return true, fmt.Errorf("warm slot assigned to another execution")

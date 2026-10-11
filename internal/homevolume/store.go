@@ -125,6 +125,31 @@ func Verify(base, owner, node, spec, id string) (Identity, error) {
 	return verify(base, owner, node, spec, id)
 }
 
+// VerifyExecution checks the parent sandbox's durable claim before a child
+// Gofer may open HOME. A valid directory alone does not authorize execution.
+func VerifyExecution(base, owner, spec, id, pod string) error {
+	if id == "" || pod == "" {
+		return errors.New("home and execution identities are required")
+	}
+	unlock, err := lockOwner(base, owner, false)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if _, err := Verify(base, owner, "", spec, id); err != nil {
+		return err
+	}
+	_, dir, _, _ := paths(base, owner)
+	state, err := readState(filepath.Join(dir, stateName))
+	if err != nil {
+		return err
+	}
+	if state.Phase != "active" || state.Pod != pod {
+		return errors.New("home is not claimed by this execution Pod")
+	}
+	return nil
+}
+
 func verify(base, owner, node, spec, id string) (Identity, error) {
 	_, dir, data, err := paths(base, owner)
 	if err != nil {

@@ -192,7 +192,14 @@ func admittedDebugMount(w *api.ResumablePod, p *core.Pod) bool {
 	if len(p.Spec.Containers) != 1 {
 		return false
 	}
-	wantVolumes, wantMounts := hostVolumes(w), hostMounts(w)
+	template := w
+	if p.Labels[warmLabel] == "true" {
+		// Pooled Pods must not expose a template Box's HOME. The authorized
+		// child OCI create binds HOME after this Pod has been claimed.
+		template = w.DeepCopy()
+		template.Spec.PersistentHome = false
+	}
+	wantVolumes, wantMounts := hostVolumes(template), hostMounts(template)
 	if len(p.Spec.Volumes) != len(wantVolumes) || len(p.Spec.Containers[0].VolumeMounts) != len(wantMounts) {
 		return false
 	}
@@ -329,7 +336,7 @@ func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (ctrl.Resul
 	w.Status.PodName = fmt.Sprintf("cb-%s-%d", string(w.UID)[:8], w.Status.Cycle)
 	w.Status.PodUID = ""
 	w.Status.Execution = nil
-	if w.Status.Snapshot != "" && r.WarmPool != nil && !w.Spec.PersistentHome {
+	if w.Status.Snapshot != "" && r.WarmPool != nil {
 		p, err := r.WarmPool.acquire(ctx, w)
 		if err != nil {
 			return again, err

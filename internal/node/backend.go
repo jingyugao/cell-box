@@ -380,7 +380,7 @@ func (b *Backend) Cleanup(ctx context.Context, p *core.Pod) error {
 		if err != nil {
 			return err
 		}
-		for _, suffix := range []string{".json", ".json.started"} {
+		for _, suffix := range []string{".json", ".json.started", ".json.child"} {
 			if err = os.Remove(filepath.Join(b.Base, "requests", id+suffix)); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
