@@ -109,10 +109,12 @@ func (s *Store) UpdateBoxContext(requestContext context.Context, id string, fn f
 	unlock := s.lockBoxWriter(id)
 	lockSpan.End()
 	defer unlock()
+	_, prepareSpan := telemetry.Start(requestContext, "cellbox.persist.prepare_state")
 	s.mu.Lock()
 	if s.failure != nil {
 		err := s.failure
 		s.mu.Unlock()
+		prepareSpan.End()
 		return err
 	}
 	before := boxState(s.state, id)
@@ -124,12 +126,14 @@ func (s *Store) UpdateBoxContext(requestContext context.Context, id string, fn f
 	}
 	if _, ok := before.Boxes[id]; !ok {
 		s.mu.Unlock()
+		prepareSpan.End()
 		return apiError("NOT_FOUND", "Box not found")
 	}
 	next, err := cloneState(before)
 	key := recordKey("boxes", id)
 	etag, previous, parent := s.records.etags[key], s.records.data[key], s.records.headRevision
 	s.mu.Unlock()
+	prepareSpan.End()
 	if err != nil {
 		return err
 	}

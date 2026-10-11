@@ -59,6 +59,9 @@ spec:
                   name: {{ .Values.objectStorage.credentialsSecret }}
                   key: {{ .Values.objectStorage.secretKeyKey }}
             {{- end }}
+            {{- with .Values.controller.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           securityContext:
             privileged: true
             runAsUser: 0

@@ -8,6 +8,7 @@ import (
 	"cellbox.local/cellbox/internal/imagecache"
 	"cellbox.local/cellbox/internal/node"
 	"cellbox.local/cellbox/internal/objectstorage"
+	"cellbox.local/cellbox/internal/telemetry"
 	"cellbox.local/cellbox/internal/version"
 	"context"
 	"encoding/json"
@@ -23,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metrics "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"time"
 )
 
 func main() {
@@ -58,6 +60,16 @@ func run() error {
 		leaderNamespace = namespace
 	}
 	ctrl.SetLogger(zap.New())
+	signalContext := ctrl.SetupSignalHandler()
+	shutdownTracing, err := telemetry.InitializeNamed(signalContext, "cellbox-controller")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(ctx)
+	}()
 	scheme := runtime.NewScheme()
 	core.AddToScheme(scheme)
 	api.AddToScheme(scheme)
@@ -109,5 +121,5 @@ func run() error {
 		Complete(&controller.ImageCacheReconciler{Client: direct, Runtime: backend, NodeName: nodeName}); err != nil {
 		return err
 	}
-	return mgr.Start(ctrl.SetupSignalHandler())
+	return mgr.Start(signalContext)
 }

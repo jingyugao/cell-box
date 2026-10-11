@@ -26,6 +26,8 @@ controller:
   serviceAccountName: cellbox-controller
   # Shared across compatible container specs, plus one slot during rotation.
   warmPoolSize: 2
+  # Optional OTLP exporter configuration, same protocol as the API.
+  extraEnv: []
   criDirectory: /run/containerd
   criSocket: /run/containerd/containerd.sock
   # Provision gVisor, the wrapper, and runtime configuration manually on each node.

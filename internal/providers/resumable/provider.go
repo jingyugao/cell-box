@@ -21,6 +21,7 @@ import (
 	"cellbox.local/cellbox/internal/boxprovider"
 	"cellbox.local/cellbox/internal/guestapi"
 	"cellbox.local/cellbox/internal/inventory"
+	"cellbox.local/cellbox/internal/telemetry"
 	core "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -298,7 +299,9 @@ func (p *Provider) readyPod(ctx context.Context, w *api.ResumablePod) (*core.Pod
 	return nil, boxprovider.ErrNotReady
 }
 
-func (p *Provider) Action(ctx context.Context, h boxprovider.Handle, action string) error {
+func (p *Provider) Action(ctx context.Context, h boxprovider.Handle, action string) (retErr error) {
+	ctx, span := telemetry.Start(ctx, "cellbox.provider.action", telemetry.String("action", action))
+	defer func() { telemetry.End(span, retErr) }()
 	var desired string
 	switch action {
 	case "suspend":
@@ -326,6 +329,7 @@ func (p *Provider) Action(ctx context.Context, h boxprovider.Handle, action stri
 		if _, err := rand.Read(nonce); err != nil {
 			return err
 		}
+		telemetry.InjectOperation(ctx, w)
 		w.Spec.RebuildNonce = hex.EncodeToString(nonce)
 		w.Spec.DesiredState = "Running"
 		return p.Client.Patch(ctx, w, client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{}))
@@ -337,6 +341,7 @@ func (p *Provider) Action(ctx context.Context, h boxprovider.Handle, action stri
 		return nil
 	}
 	old := w.DeepCopy()
+	telemetry.InjectOperation(ctx, w)
 	w.Spec.DesiredState = desired
 	// An optimistic update prevents stale operations from changing a newer CR.
 	if err = p.Client.Patch(ctx, w, client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{})); err != nil {

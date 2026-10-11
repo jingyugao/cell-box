@@ -18,6 +18,10 @@ import (
 
 // Initialize is opt-in. Export runs in the background and never gates a Box action.
 func Initialize(ctx context.Context) (func(context.Context) error, error) {
+	return InitializeNamed(ctx, "cellbox-api")
+}
+
+func InitializeNamed(ctx context.Context, defaultName string) (func(context.Context) error, error) {
 	if os.Getenv("OTEL_SDK_DISABLED") == "true" ||
 		(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") == "" && os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") == "") {
 		return func(context.Context) error { return nil }, nil
@@ -35,7 +39,7 @@ func Initialize(ctx context.Context) (func(context.Context) error, error) {
 	}
 	name := os.Getenv("OTEL_SERVICE_NAME")
 	if name == "" {
-		name = "cellbox-api"
+		name = defaultName
 	}
 	provider := sdktrace.NewTracerProvider(
 		sdktrace.WithResource(resource.NewSchemaless(attribute.String("service.name", name))),

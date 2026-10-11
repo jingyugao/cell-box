@@ -1,6 +1,7 @@
 package resumable
 
 import (
+	"cellbox.local/cellbox/internal/telemetry"
 	"errors"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
@@ -36,7 +37,7 @@ func NewForConfig(cfg *rest.Config) (*Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	return New(c), nil
+	return New(telemetry.TraceClient(c)), nil
 }
 
 // NewInCluster uses the Pod's service account. The account needs scoped

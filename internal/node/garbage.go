@@ -13,6 +13,7 @@ import (
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/inventory"
 	"cellbox.local/cellbox/internal/objectstorage"
+	"cellbox.local/cellbox/internal/telemetry"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -31,7 +32,9 @@ func (b *Backend) snapshotConsumed(owner, snapshot string) bool {
 // InvalidateSnapshot removes replay eligibility synchronously. The durable
 // local marker also prevents an interrupted CR transition republishing it.
 // Only exact-version physical deletion is left to the background collector.
-func (b *Backend) InvalidateSnapshot(ctx context.Context, w *api.ResumablePod) error {
+func (b *Backend) InvalidateSnapshot(ctx context.Context, w *api.ResumablePod) (resultErr error) {
+	ctx, span := telemetry.Start(ctx, "node.snapshot.invalidate")
+	defer func() { telemetry.End(span, resultErr) }()
 	owner, snapshot := string(w.UID), w.Status.Snapshot
 	if !ValidID(owner) || !ValidID(snapshot) {
 		return fmt.Errorf("invalid snapshot invalidation identity")
@@ -67,9 +70,12 @@ func (b *Backend) InvalidateSnapshot(ctx context.Context, w *api.ResumablePod) e
 				job.IndexETag = version
 			}
 		}
+		_, persistSpan := telemetry.Start(ctx, "node.snapshot.invalidation.persist_intent")
 		if err := AtomicJSON(path, job); err != nil {
+			telemetry.End(persistSpan, err)
 			return err
 		}
+		telemetry.End(persistSpan, nil)
 	} else if err != nil {
 		return err
 	}
@@ -77,9 +83,12 @@ func (b *Backend) InvalidateSnapshot(ctx context.Context, w *api.ResumablePod) e
 		return fmt.Errorf("invalid snapshot invalidation record")
 	}
 	if b.Objects != nil && job.IndexETag != "" {
+		_, deleteSpan := telemetry.Start(ctx, "node.snapshot.invalidation.delete_index")
 		if err := b.Objects.DeleteIfMatch(ctx, "checkpoints/"+owner+"/metadata.json", job.IndexETag); err != nil && !errors.Is(err, objectstorage.ErrNotFound) {
+			telemetry.End(deleteSpan, err)
 			return retryableStorage(err)
 		}
+		telemetry.End(deleteSpan, nil)
 	}
 	b.clearInventoryState(owner)
 	if err := os.Rename(path, strings.TrimSuffix(path, ".intent")+".json"); err != nil {

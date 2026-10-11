@@ -34,7 +34,9 @@ func imageMetadataKey(id string) (string, error) {
 	}
 	return "images/" + id + "/metadata.json", nil
 }
-func readObject(ctx context.Context, objects objectstorage.Objects, key string) ([]byte, string, error) {
+func readObject(ctx context.Context, objects objectstorage.Objects, key string) (result []byte, resultETag string, retErr error) {
+	ctx, span := telemetry.Start(ctx, "cellbox.storage.read_object")
+	defer func() { telemetry.End(span, retErr) }()
 	body, size, etag, err := objects.Get(ctx, key)
 	if err != nil {
 		return nil, "", err

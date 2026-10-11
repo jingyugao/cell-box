@@ -436,7 +436,9 @@ func (s *Service) saveHandle(id string, handle boxprovider.Handle) error {
 		return nil
 	})
 }
-func (s *Service) observe(ctx context.Context, b boxRecord) (Box, error) {
+func (s *Service) observe(ctx context.Context, b boxRecord) (result Box, retErr error) {
+	ctx, span := telemetry.Start(ctx, "cellbox.observe_runtime")
+	defer func() { telemetry.End(span, retErr) }()
 	if b.Upgrade != nil {
 		var err error
 		b, err = s.commitDiskUpgrade(ctx, b)
@@ -661,8 +663,10 @@ func (s *Service) waitState(ctx context.Context, id, want string, checkHealth bo
 		if changes != nil {
 			interval = 5 * time.Second
 		}
+		_, notificationSpan := telemetry.Start(ctx, "cellbox.wait_runtime_notification")
 		select {
 		case <-ctx.Done():
+			telemetry.End(notificationSpan, ctx.Err())
 			return Box{}, ctx.Err()
 		case _, ok := <-changes:
 			if !ok {
@@ -670,6 +674,7 @@ func (s *Service) waitState(ctx context.Context, id, want string, checkHealth bo
 			}
 		case <-time.After(interval):
 		}
+		notificationSpan.End()
 	}
 }
 
