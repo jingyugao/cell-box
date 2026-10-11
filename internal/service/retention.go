@@ -138,7 +138,7 @@ func (s *Service) pruneMetadata(now time.Time) error {
 	if headVersion != headETag {
 		return objectstorage.ErrConflict
 	}
-	keys, err := s.objects.List(ctx, resultPrefix)
+	keys, err := objectstorage.ListMetadata(ctx, s.objects, resultPrefix)
 	if err != nil {
 		return err
 	}

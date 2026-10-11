@@ -35,7 +35,7 @@ func imageMetadataKey(id string) (string, error) {
 	return "images/" + id + "/metadata.json", nil
 }
 func readObject(ctx context.Context, objects objectstorage.Objects, key string) (result []byte, resultETag string, retErr error) {
-	ctx, span := telemetry.Start(ctx, "cellbox.storage.read_object")
+	ctx, span := telemetry.Start(ctx, "cellbox.storage.read_object", telemetry.String("storage.backend", objectstorage.MetadataBackend(objects)))
 	defer func() { telemetry.End(span, retErr) }()
 	body, size, etag, err := objects.Get(ctx, key)
 	if err != nil {
@@ -72,7 +72,7 @@ func readObject(ctx context.Context, objects objectstorage.Objects, key string) 
 	return data, etag, nil
 }
 func writeObject(ctx context.Context, objects objectstorage.Objects, key string, data []byte, before string) (result string, retErr error) {
-	ctx, span := telemetry.Start(ctx, "cellbox.storage.write_object")
+	ctx, span := telemetry.Start(ctx, "cellbox.storage.write_object", telemetry.String("storage.backend", objectstorage.MetadataBackend(objects)))
 	defer func() { telemetry.End(span, retErr) }()
 	if len(data) == 0 || int64(len(data)) > stateObjectLimit {
 		return "", errors.New("invalid metadata object size")
@@ -114,7 +114,7 @@ func writeObject(ctx context.Context, objects objectstorage.Objects, key string,
 }
 
 func (s *Store) loadImageObjects(ctx context.Context) error {
-	keys, err := s.objects.List(ctx, "images")
+	keys, err := objectstorage.ListMetadata(ctx, s.objects, "images")
 	if err != nil {
 		return err
 	}

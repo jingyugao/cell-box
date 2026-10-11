@@ -186,7 +186,7 @@ func (s *Service) purgeBox(ctx context.Context, client, id string) error {
 			for _, execution := range st.Executions {
 				referenced[execution.ResultObject] = true
 			}
-			keys, err := s.objects.List(ctx, resultPrefix)
+			keys, err := objectstorage.ListMetadata(ctx, s.objects, resultPrefix)
 			if err != nil {
 				return err
 			}

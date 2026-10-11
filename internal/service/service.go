@@ -58,6 +58,10 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 		}
 	}
 	ctx, cancel := context.WithCancel(parent)
+	if config.LocalMetadataDir != "" && config.ObjectStorage == (objectstorage.Config{}) {
+		cancel()
+		return nil, errors.New("local metadata requires object storage for checkpoint and archive content")
+	}
 	var store *Store
 	var objects objectstorage.Objects
 	var err error
@@ -68,13 +72,26 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 			return nil, lockErr
 		}
 		objects, err = objectstorage.New(ctx, config.ObjectStorage)
+		if err == nil && config.LocalMetadataDir != "" {
+			var metadata *objectstorage.Metadata
+			metadata, err = objectstorage.OpenMetadata(ctx, config.LocalMetadataDir, objects, config.InitializeLocalMetadata)
+			if err == nil {
+				objects = metadata
+			}
+		}
 		if err == nil {
 			store, err = OpenObjectStore(ctx, objects)
 		}
 		if err != nil {
 			localLock.Close()
+			if closer, ok := objects.(io.Closer); ok && objects != nil {
+				closer.Close()
+			}
 		} else {
 			store.dir, store.lock = config.DataDir, localLock
+			if closer, ok := objects.(io.Closer); ok {
+				store.objectsCloser = closer
+			}
 		}
 	} else {
 		store, err = OpenStore(config.DataDir)

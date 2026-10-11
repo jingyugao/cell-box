@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"golang.org/x/sys/unix"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -14,18 +15,19 @@ import (
 type Store struct {
 	// Writers remain serialized for cross-resource invariants. Readers only hold
 	// mu while copying committed memory, never while object storage is accessed.
-	writeMu   sync.RWMutex
-	boxWrites keyedLocks
-	records   *recordStore
-	objects   objectstorage.Objects
-	etag      string
-	failure   error
-	onFailure func()
-	mu        sync.Mutex
-	changes   chan struct{}
-	state     State
-	dir       string
-	lock      *os.File
+	writeMu       sync.RWMutex
+	boxWrites     keyedLocks
+	records       *recordStore
+	objects       objectstorage.Objects
+	etag          string
+	failure       error
+	onFailure     func()
+	mu            sync.Mutex
+	changes       chan struct{}
+	state         State
+	dir           string
+	lock          *os.File
+	objectsCloser io.Closer
 }
 
 func lockDataDirectory(dir string) (*os.File, error) {
@@ -231,10 +233,20 @@ func (s *Store) UpdateObservedBox(base boxRecord, update func(*boxRecord) (bool,
 	return cloneBoxRecord(next)
 }
 func (s *Store) Close() error {
-	if s.lock == nil {
-		return nil
+	var closeErr error
+	if s.objectsCloser != nil {
+		closeErr = s.objectsCloser.Close()
+		s.objectsCloser = nil
 	}
-	return s.lock.Close()
+	if s.lock == nil {
+		return closeErr
+	}
+	err := s.lock.Close()
+	s.lock = nil
+	if closeErr != nil {
+		return closeErr
+	}
+	return err
 }
 func (s *Store) View(fn func(State) error) error {
 	s.mu.Lock()

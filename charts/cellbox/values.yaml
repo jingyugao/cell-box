@@ -18,6 +18,13 @@ crd:
   create: true
 runtimeClass:
   create: true
+# Opt-in node-local durable metadata. The API and controller must run on this
+# same node and share this dedicated hostPath root.
+localMetadata:
+  enabled: false
+  initialize: false
+  nodeName: ""
+  hostPath: /var/lib/cellbox-metadata
 controller:
   enabled: true
   image: gaojingyu628/cellbox-controller@sha256:519e622384ffc1227847ec30b575343ba80552a18036c6d13be31cf259ec422e

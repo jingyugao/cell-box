@@ -35,6 +35,8 @@ type Config struct {
 	// ClientID is a data/idempotency namespace, not an authenticated identity.
 	ClientID                  string               `json:"clientId,omitempty"`
 	ObjectStorage             objectstorage.Config `json:"objectStorage,omitempty"`
+	LocalMetadataDir          string               `json:"localMetadataDir,omitempty"`
+	InitializeLocalMetadata   bool                 `json:"initializeLocalMetadata,omitempty"`
 	Listen                    string               `json:"listen"`
 	DataDir                   string               `json:"dataDir"`
 	PublicURL                 string               `json:"publicUrl,omitempty"`

@@ -46,6 +46,8 @@ func run(args []string) error {
 	configPath := flags.String("config", "", "path to the Cellbox JSON configuration")
 	kubeconfig := flags.String("kubeconfig", "", "explicit kubeconfig path (default: in-cluster credentials)")
 	storageConfigPath := flags.String("object-storage-config", "", "shared S3 storage JSON configuration")
+	localMetadataDir := flags.String("local-metadata-dir", "", "persistent node directory for control metadata; asset content remains in object storage")
+	initializeLocalMetadata := flags.Bool("initialize-local-metadata", false, "one-time metadata import; stop all old API/controller writers first")
 	leaderNamespace := flags.String("leader-election-namespace", "", "API Lease namespace (required with object storage)")
 	dockerBinary := flags.String("docker", "docker", "Docker CLI executable")
 	buildkitAddress := flags.String("buildkit-addr", "", "Unix BuildKit socket for REST image builds")
@@ -84,6 +86,12 @@ func run(args []string) error {
 	}
 	if *insecureRegistry != "" {
 		config.ImageBuild.InsecureRegistry = *insecureRegistry
+	}
+	if *localMetadataDir != "" {
+		config.LocalMetadataDir = *localMetadataDir
+	}
+	if *initializeLocalMetadata {
+		config.InitializeLocalMetadata = true
 	}
 
 	if *storageConfigPath != "" {

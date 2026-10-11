@@ -34,7 +34,7 @@ func main() {
 	}
 }
 func run() error {
-	var nodeName, namespace, leaderNamespace, socket, objectStorageConfig string
+	var nodeName, namespace, leaderNamespace, socket, objectStorageConfig, localMetadataDir string
 	var showVersion, hostMountNamespace bool
 	var warmPoolSize int
 	flag.IntVar(&warmPoolSize, "warm-pool-size", 2, "maximum unassigned warm Pods per node (0 disables, one extra during rotation)")
@@ -45,6 +45,7 @@ func run() error {
 	flag.StringVar(&leaderNamespace, "leader-election-namespace", "", "leader election namespace (defaults to managed namespace)")
 	flag.StringVar(&socket, "cri-socket", "/run/containerd/containerd.sock", "CRI Unix socket")
 	flag.StringVar(&objectStorageConfig, "object-storage-config", "", "path to S3-compatible checkpoint storage configuration JSON")
+	flag.StringVar(&localMetadataDir, "local-metadata-dir", "", "initialized shared node metadata directory; checkpoint content remains in object storage")
 	flag.Parse()
 	if showVersion {
 		fmt.Println(version.String("cellbox-node-controller"))
@@ -95,6 +96,14 @@ func run() error {
 			return storageErr
 		}
 		backend.Objects = objects
+	}
+	if localMetadataDir != "" {
+		metadata, err := objectstorage.OpenMetadata(signalContext, localMetadataDir, backend.Objects, false)
+		if err != nil {
+			return err
+		}
+		defer metadata.Close()
+		backend.Objects = metadata
 	}
 	backend.HostMountNamespace = hostMountNamespace
 	r := &controller.Reconciler{Client: mgr.GetClient(), Runtime: backend, NodeName: nodeName}

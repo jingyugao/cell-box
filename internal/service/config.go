@@ -29,6 +29,12 @@ func LoadConfig(r io.Reader) (Config, error) {
 	return c, c.Validate()
 }
 func (c *Config) Validate() error {
+	if c.LocalMetadataDir != "" && (!path.IsAbs(c.LocalMetadataDir) || path.Clean(c.LocalMetadataDir) != c.LocalMetadataDir || c.LocalMetadataDir == "/" || strings.ContainsAny(c.LocalMetadataDir, "\x00\r\n")) {
+		return fmt.Errorf("localMetadataDir must be a dedicated clean absolute directory")
+	}
+	if c.InitializeLocalMetadata && c.LocalMetadataDir == "" {
+		return fmt.Errorf("initializeLocalMetadata requires localMetadataDir")
+	}
 	if c.OperationRetentionSeconds == 0 {
 		c.OperationRetentionSeconds = 86400
 	}

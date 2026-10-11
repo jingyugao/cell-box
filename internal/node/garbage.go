@@ -33,7 +33,7 @@ func (b *Backend) snapshotConsumed(owner, snapshot string) bool {
 // local marker also prevents an interrupted CR transition republishing it.
 // Only exact-version physical deletion is left to the background collector.
 func (b *Backend) InvalidateSnapshot(ctx context.Context, w *api.ResumablePod) (resultErr error) {
-	ctx, span := telemetry.Start(ctx, "node.snapshot.invalidate")
+	ctx, span := telemetry.Start(ctx, "node.snapshot.invalidate", telemetry.String("storage.backend", objectstorage.MetadataBackend(b.Objects)))
 	defer func() { telemetry.End(span, resultErr) }()
 	owner, snapshot := string(w.UID), w.Status.Snapshot
 	if !ValidID(owner) || !ValidID(snapshot) {
