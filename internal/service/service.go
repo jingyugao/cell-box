@@ -930,6 +930,9 @@ func (s *Service) action(client, key, id, action string) (Operation, error) {
 	return s.actionContext(context.Background(), client, key, id, action)
 }
 func (s *Service) actionContext(request context.Context, client, key, id, action string) (result Operation, retErr error) {
+	return s.actionContextWithGeneration(request, client, key, id, action, nil)
+}
+func (s *Service) actionContextWithGeneration(request context.Context, client, key, id, action string, expectedGeneration *uint64) (result Operation, retErr error) {
 	var total trace.Span
 	handedOff := false
 	if action == "resume" {
@@ -950,6 +953,12 @@ func (s *Service) actionContext(request context.Context, client, key, id, action
 		b, err = owned(st, client, id)
 		if err != nil {
 			return err
+		}
+		// This check runs only for a fresh idempotency key and in the same Box
+		// transaction as phase admission. Existing keys replay their original
+		// operation before this callback, including legacy no-body resume keys.
+		if expectedGeneration != nil && *expectedGeneration != b.Box.Generation {
+			return apiError("STALE_GENERATION", "Lifecycle request targets another Box generation")
 		}
 		if err = busy(st, b, true); err != nil {
 			return err

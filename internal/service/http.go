@@ -79,6 +79,20 @@ func decodeLimit(w http.ResponseWriter, r *http.Request, target any, limit int64
 	}
 	return nil
 }
+func decodeOptionalLimit(w http.ResponseWriter, r *http.Request, target any, limit int64) error {
+	if r.Body == nil || r.Body == http.NoBody {
+		return nil
+	}
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
+	if err != nil {
+		return apiError("INVALID_REQUEST", "Invalid JSON request")
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil
+	}
+	r.Body = io.NopCloser(bytes.NewReader(data))
+	return decodeLimit(w, r, target, limit)
+}
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/profiles", s.listProfiles)
@@ -154,7 +168,18 @@ func (s *Service) Handler() http.Handler {
 			s.upgradeBox(w, r, id)
 			return
 		}
-		op, err := s.actionContext(r.Context(), clientID(r), r.Header.Get("Idempotency-Key"), id, action)
+		var input struct {
+			ExpectedGeneration *uint64 `json:"expectedGeneration,omitempty"`
+		}
+		if err := decodeOptionalLimit(w, r, &input, 4096); err != nil {
+			fail(w, err)
+			return
+		}
+		if input.ExpectedGeneration != nil && *input.ExpectedGeneration == 0 {
+			fail(w, apiError("INVALID_REQUEST", "expectedGeneration must be positive"))
+			return
+		}
+		op, err := s.actionContextWithGeneration(r.Context(), clientID(r), r.Header.Get("Idempotency-Key"), id, action, input.ExpectedGeneration)
 		if err != nil {
 			fail(w, err)
 			return

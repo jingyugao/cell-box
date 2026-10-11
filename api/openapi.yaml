@@ -13,6 +13,19 @@ components:
         maxLength: 200
         minLength: 1
         type: string
+  requestBodies:
+    LifecyclePrecondition:
+      required: false
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            properties:
+              expectedGeneration:
+                type: integer
+                minimum: 1
+                description: Atomically checked on fresh admission; a mismatch returns STALE_GENERATION without executing. An existing Idempotency-Key replays its original operation without rechecking this precondition. Empty request bodies remain supported.
   responses:
     Error:
       content:
@@ -534,7 +547,6 @@ components:
       required: []
       type: object
     ImportedImage:
-      type: object
       additionalProperties: false
       properties:
         id:
@@ -1238,6 +1250,8 @@ paths:
       summary: Run an immutable admitted tool as debug
   /v1/boxes/{id}:activate:
     post:
+      requestBody:
+        $ref: '#/components/requestBodies/LifecyclePrecondition'
       description: An active operation, service request, or unexpired usage lease
         blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
         never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
@@ -1261,6 +1275,8 @@ paths:
       summary: Start the product workload in a successfully restored candidate
   /v1/boxes/{id}:destroy:
     post:
+      requestBody:
+        $ref: '#/components/requestBodies/LifecyclePrecondition'
       description: An active operation, service request, or unexpired usage lease
         blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
         never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
@@ -1284,6 +1300,8 @@ paths:
       summary: Delete runtime while retaining archives
   /v1/boxes/{id}:freeze:
     post:
+      requestBody:
+        $ref: '#/components/requestBodies/LifecyclePrecondition'
       description: An active operation, service request, or unexpired usage lease
         blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
         never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
@@ -1307,6 +1325,8 @@ paths:
       summary: Pause a Docker container
   /v1/boxes/{id}:reconcile:
     post:
+      requestBody:
+        $ref: '#/components/requestBodies/LifecyclePrecondition'
       description: An active operation, service request, or unexpired usage lease
         blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
         never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
@@ -1330,6 +1350,8 @@ paths:
       summary: Explicitly recover observed state after an interrupted operation
   /v1/boxes/{id}:rebuild:
     post:
+      requestBody:
+        $ref: '#/components/requestBodies/LifecyclePrecondition'
       description: Explicitly cold-start a failed same-node Box using its existing validated persistent HOME. Preserves Box identity and latest disk contents, discards checkpoint state, and never restores an archive. Missing or invalid HOME stops the operation. Active operations, executions and leases block rebuilding.
       operationId: rebuildBox
       parameters:
@@ -1384,6 +1406,8 @@ paths:
       summary: Upgrade a Box image while retaining its persistent HOME
   /v1/boxes/{id}:resume:
     post:
+      requestBody:
+        $ref: '#/components/requestBodies/LifecyclePrecondition'
       description: An active operation, service request, or unexpired usage lease
         blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
         never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
@@ -1413,6 +1437,8 @@ paths:
       summary: Restore a resumable Kubernetes checkpoint
   /v1/boxes/{id}:suspend:
     post:
+      requestBody:
+        $ref: '#/components/requestBodies/LifecyclePrecondition'
       description: An active operation, service request, or unexpired usage lease
         blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
         never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
@@ -1436,6 +1462,8 @@ paths:
       summary: Checkpoint a resumable Kubernetes box on its node
   /v1/boxes/{id}:unfreeze:
     post:
+      requestBody:
+        $ref: '#/components/requestBodies/LifecyclePrecondition'
       description: An active operation, service request, or unexpired usage lease
         blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
         never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
