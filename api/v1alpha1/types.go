@@ -4,6 +4,8 @@
 package v1alpha1
 
 import (
+	"time"
+
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -13,17 +15,36 @@ import (
 var GroupVersion = schema.GroupVersion{Group: "cellbox.local", Version: "v1alpha1"}
 
 const (
-	Kind               = "Cellbox"
-	Finalizer          = "cellbox.local/cleanup"
-	OwnerLabel         = "cellbox.local/owner"
-	ServingLabel       = "cellbox.local/serving"
-	TicketAnnotation   = "dev.gvisor.internal.recovery.ticket"
-	Gate               = "cellbox.local/prepared"
-	RuntimeClass       = "runsc-recoverable"
-	DebugHostMountPath = "/var/lib/cellbox/debug/host"
-	DebugHomeMountPath = "/home/debug"
-	SharedMountPath    = "/var/lib/cellbox/shared"
+	Kind                     = "Cellbox"
+	Finalizer                = "cellbox.local/cleanup"
+	OwnerLabel               = "cellbox.local/owner"
+	ServingLabel             = "cellbox.local/serving"
+	TicketAnnotation         = "dev.gvisor.internal.recovery.ticket"
+	Gate                     = "cellbox.local/prepared"
+	RuntimeClass             = "runsc-recoverable"
+	DebugHostMountPath       = "/var/lib/cellbox/debug/host"
+	DebugHomeMountPath       = "/home/debug"
+	SharedMountPath          = "/var/lib/cellbox/shared"
+	ArchiveRequestAnnotation = "cellbox.local/archive-request"
+	ArchiveResultAnnotation  = "cellbox.local/archive-result"
 )
+
+// ArchiveCaptureRequest asks the node controller to export a workspace from a
+// suspended persistent HOME. ID is also the object-store archive identifier.
+type ArchiveCaptureRequest struct {
+	ID        string    `json:"id"`
+	Snapshot  string    `json:"snapshot"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
+// ArchiveCaptureResult is written only after archive content is durable.
+type ArchiveCaptureResult struct {
+	ID       string `json:"id"`
+	Snapshot string `json:"snapshot"`
+	Size     int64  `json:"size,omitempty"`
+	SHA256   string `json:"sha256,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
 
 type UpgradeRequest struct {
 	Nonce             string         `json:"nonce"`

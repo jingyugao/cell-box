@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"cellbox.local/cellbox/internal/archivelimits"
+	"cellbox.local/cellbox/internal/boxprovider"
 	"golang.org/x/sys/unix"
 )
 
@@ -202,8 +203,16 @@ func (s *Service) captureArchive(w http.ResponseWriter, r *http.Request) {
 		if activeExec(st, id) {
 			return apiError("BUSY", "Box has an active execution")
 		}
-		if box.Box.Phase != "running" && box.Box.Phase != "staged" {
+		if box.Box.Phase != "running" && box.Box.Phase != "staged" && box.Box.Phase != "suspended" {
 			return apiError("CONFLICT", "Archive requires an accessible box")
+		}
+		if box.Box.Phase == "suspended" {
+			if box.Profile.Provider != "resumable-k8s-pod" || !workspaceUnderPersistentHome(box.Profile.Guest.Workspace) {
+				return apiError("UNSUPPORTED_CAPABILITY", "Suspended workspace archives require a workspace inside persistent HOME")
+			}
+			if _, ok := s.providers[box.Profile.Provider].(boxprovider.WorkspaceArchiveProvider); !ok || s.objects == nil {
+				return apiError("UNSUPPORTED_CAPABILITY", "Suspended workspace archives require node archive support and object storage")
+			}
 		}
 		if box.Box.ImageID == "" {
 			return apiError("CONFLICT", "Box has no immutable image identity")
@@ -219,7 +228,13 @@ func (s *Service) captureArchive(w http.ResponseWriter, r *http.Request) {
 	}
 	if fresh {
 		s.launch(op, func(ctx context.Context) (map[string]string, error) {
-			a, err := s.captureArchiveHTTP(ctx, box)
+			var a Archive
+			var err error
+			if box.Box.Phase == "suspended" {
+				a, err = s.captureSuspendedArchive(ctx, box)
+			} else {
+				a, err = s.captureArchiveHTTP(ctx, box)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -227,6 +242,88 @@ func (s *Service) captureArchive(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusAccepted, op)
+}
+
+func (s *Service) captureSuspendedArchive(ctx context.Context, b boxRecord) (Archive, error) {
+	provider, ok := s.providers[b.Profile.Provider].(boxprovider.WorkspaceArchiveProvider)
+	if !ok || s.objects == nil || !workspaceUnderPersistentHome(b.Profile.Guest.Workspace) {
+		return Archive{}, apiError("UNSUPPORTED_CAPABILITY", "Suspended workspace archives are unavailable")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 14*time.Minute)
+	defer cancel()
+	id := randomID("arc-")
+	size, digest, err := provider.CaptureWorkspaceArchive(ctx, b.Handle, id)
+	if err != nil {
+		return Archive{}, err
+	}
+	if size < 1 || size > archiveWireLimit || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(digest) {
+		return Archive{}, apiError("ARCHIVE_CORRUPT", "Node returned invalid archive metadata")
+	}
+	if err = s.validateStoredCapture(ctx, id, size, digest); err != nil {
+		return Archive{}, err
+	}
+	a := Archive{ID: id, SourceBoxID: b.Box.ID, ProfileID: b.Box.ProfileID, ImageID: b.Box.ImageID,
+		Agent: b.Profile.Guest.Agent, SHA256: digest, Size: size, Consistency: "workspace-best-effort", Portable: true,
+		CreatedAt: time.Now().UTC(), ManifestVersion: 1, ImportedImageID: b.Box.ImportedImageID, PreparedImage: b.Profile.Image}
+	if err = s.store.Update(func(st *State) error { st.Archives[id] = archiveRecord{Archive: a, ClientID: b.ClientID}; return nil }); err != nil {
+		return Archive{}, err
+	}
+	return a, nil
+}
+
+func workspaceUnderPersistentHome(workspace string) bool {
+	return path.IsAbs(workspace) && path.Clean(workspace) == workspace && workspace != "/home/agent" && strings.HasPrefix(workspace, "/home/agent/")
+}
+
+// validateStoredCapture makes the API validate node-produced bytes before its
+// archive metadata becomes authoritative.
+func (s *Service) validateStoredCapture(ctx context.Context, id string, expectedSize int64, expectedSHA256 string) error {
+	body, size, _, err := s.objects.Get(ctx, "archives/"+id+".tar.gz")
+	if err != nil {
+		return err
+	}
+	defer body.Close()
+	if size != expectedSize || size < 1 || size > archiveWireLimit {
+		return apiError("ARCHIVE_CORRUPT", "Node archive size does not match metadata")
+	}
+	dir, err := s.archivesDir()
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, ".download-capture-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	defer os.Remove(name)
+	if err = f.Chmod(0600); err != nil {
+		f.Close()
+		return err
+	}
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(body, archiveWireLimit+1))
+	if err == nil && n > archiveWireLimit {
+		err = errors.New("archive exceeds wire limit")
+	}
+	if err == nil && n != expectedSize {
+		err = apiError("ARCHIVE_CORRUPT", "Node archive content is truncated")
+	}
+	if err == nil && hex.EncodeToString(h.Sum(nil)) != expectedSHA256 {
+		err = apiError("ARCHIVE_CORRUPT", "Node archive checksum does not match")
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if err == nil {
+		_, err = f.Seek(0, io.SeekStart)
+	}
+	if err == nil {
+		err = validateArchive(f)
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	return err
 }
 
 func (s *Service) captureArchiveHTTP(ctx context.Context, b boxRecord) (Archive, error) {

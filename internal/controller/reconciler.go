@@ -61,6 +61,10 @@ type failureDiagnostics interface {
 	CaptureFailure(context.Context, *api.ResumablePod, *core.Pod) error
 }
 
+type workspaceArchiveRuntime interface {
+	CaptureWorkspaceArchive(context.Context, *api.ResumablePod, api.ArchiveCaptureRequest) (api.ArchiveCaptureResult, error)
+}
+
 func (r *Reconciler) syncInventoryPhase(ctx context.Context, w *api.ResumablePod, phase string) error {
 	syncer, ok := r.Runtime.(inventoryRuntime)
 	if !ok {
@@ -475,6 +479,9 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if w.Spec.NodeName != r.NodeName {
 		return ctrl.Result{}, nil
 	}
+	if result, handled, err := r.captureWorkspaceArchive(ctx, w); handled || err != nil {
+		return result, err
+	}
 	if w.Status.Snapshot != "" {
 		phase := w.Status.Phase
 		// The following begin transition will update the index directly to
@@ -764,4 +771,90 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return fail(fmt.Errorf("unknown lifecycle phase %q", w.Status.Phase))
 	}
 	return again, nil
+}
+
+func (r *Reconciler) captureWorkspaceArchive(ctx context.Context, w *api.ResumablePod) (ctrl.Result, bool, error) {
+	raw := w.Annotations[api.ArchiveRequestAnnotation]
+	if raw == "" {
+		return ctrl.Result{}, false, nil
+	}
+	var request api.ArchiveCaptureRequest
+	if err := json.Unmarshal([]byte(raw), &request); err != nil || !regexp.MustCompile(`^arc-[0-9a-f]{32}$`).MatchString(request.ID) {
+		current := &api.ResumablePod{}
+		if getErr := r.Get(ctx, client.ObjectKeyFromObject(w), current); getErr != nil {
+			return again, true, getErr
+		}
+		if current.Annotations[api.ArchiveRequestAnnotation] != raw {
+			return ctrl.Result{}, false, nil
+		}
+		delete(current.Annotations, api.ArchiveRequestAnnotation)
+		delete(current.Annotations, api.ArchiveResultAnnotation)
+		return again, true, r.Update(ctx, current)
+	}
+	if resultRaw := w.Annotations[api.ArchiveResultAnnotation]; resultRaw != "" {
+		var prior api.ArchiveCaptureResult
+		if json.Unmarshal([]byte(resultRaw), &prior) == nil && prior.ID == request.ID {
+			return ctrl.Result{}, false, nil
+		}
+	}
+	var result api.ArchiveCaptureResult
+	var captureErr error
+	if w.DeletionTimestamp != nil || !w.Spec.PersistentHome || w.Spec.DesiredState != "Suspended" ||
+		w.Status.Phase != "Suspended" || w.Status.Snapshot == "" || w.Status.PodUID != "" || w.Status.PodName != "" {
+		captureErr = stderrors.New("workspace archive requires a suspended persistent HOME with no active Pod")
+	} else if !request.ExpiresAt.IsZero() && !time.Now().Before(request.ExpiresAt) {
+		result = api.ArchiveCaptureResult{ID: request.ID, Snapshot: request.Snapshot, Error: "archive request expired"}
+	} else if request.Snapshot == "" || request.Snapshot != w.Status.Snapshot {
+		result = api.ArchiveCaptureResult{ID: request.ID, Snapshot: request.Snapshot, Error: "archive request checkpoint changed"}
+	} else {
+		archiver, ok := r.Runtime.(workspaceArchiveRuntime)
+		if !ok {
+			captureErr = stderrors.New("node runtime does not support workspace archives")
+		} else {
+			captureCtx, cancel := context.WithTimeout(ctx, 12*time.Minute)
+			result, captureErr = archiver.CaptureWorkspaceArchive(captureCtx, w, request)
+			cancel()
+			if captureErr != nil {
+				ctrl.LoggerFrom(ctx).Error(captureErr, "workspace archive capture failed", "namespace", w.Namespace, "name", w.Name, "requestID", request.ID, "snapshot", request.Snapshot)
+				result = api.ArchiveCaptureResult{ID: request.ID, Snapshot: request.Snapshot, Error: "archive capture failed"}
+			} else if result.ID != request.ID || result.Snapshot != request.Snapshot || result.Size < 1 || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(result.SHA256) {
+				captureErr = stderrors.New("archive capture returned invalid metadata")
+				result = api.ArchiveCaptureResult{ID: request.ID, Snapshot: request.Snapshot, Error: "archive capture returned invalid metadata"}
+			}
+		}
+	}
+	if result.ID == "" {
+		result = api.ArchiveCaptureResult{ID: request.ID, Snapshot: request.Snapshot, Error: "archive capture is no longer valid"}
+	}
+
+	current := &api.ResumablePod{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(w), current); err != nil {
+		if errors.IsNotFound(err) {
+			return ctrl.Result{}, false, nil
+		}
+		return again, true, err
+	}
+	var liveRequest api.ArchiveCaptureRequest
+	if json.Unmarshal([]byte(current.Annotations[api.ArchiveRequestAnnotation]), &liveRequest) != nil || liveRequest.ID != request.ID || liveRequest.Snapshot != request.Snapshot {
+		return ctrl.Result{}, false, nil
+	}
+	lifecycleChanged := current.DeletionTimestamp != nil || !current.Spec.PersistentHome || current.Spec.DesiredState != "Suspended" ||
+		current.Status.Phase != "Suspended" || current.Status.Snapshot == "" || current.Status.Snapshot != w.Status.Snapshot || current.Status.PodUID != "" || current.Status.PodName != ""
+	if lifecycleChanged {
+		result = api.ArchiveCaptureResult{ID: request.ID, Snapshot: request.Snapshot, Error: "archive capture is no longer valid"}
+	}
+	if captureErr != nil && stderrors.Is(captureErr, runtime.ErrRetryableStorage) && !lifecycleChanged {
+		return again, true, captureErr
+	}
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	encoded, _ := json.Marshal(result)
+	current.Annotations[api.ArchiveResultAnnotation] = string(encoded)
+	if err := r.Update(ctx, current); err != nil {
+		return again, true, fmt.Errorf("publish workspace archive result: %w", err)
+	}
+	// The result write changed resourceVersion. Requeue the lifecycle from a
+	// fresh object so a concurrent request cannot make this pass use stale state.
+	return again, true, nil
 }
