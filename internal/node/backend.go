@@ -149,9 +149,7 @@ func runningImageMatches(actual string, image *cri.Image) bool {
 func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.Pod) (resultErr error) {
 	ctx, span := telemetry.Start(ctx, "node.checkpoint")
 	defer func() { telemetry.End(span, resultErr) }()
-	_, homeSpan := telemetry.Start(ctx, "node.home.prepare")
 	homeID, err := b.persistentHome(r, false)
-	telemetry.End(homeSpan, err)
 	if err != nil {
 		return err
 	}
@@ -231,12 +229,9 @@ func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.P
 		return err
 	}
 	if homeID != "" {
-		_, homeSpan = telemetry.Start(ctx, "node.home.checkpoint")
 		if err = homevolume.Checkpoint(b.Base, string(r.UID), homeID, string(p.UID), r.Status.Snapshot); err != nil {
-			telemetry.End(homeSpan, err)
 			return err
 		}
-		telemetry.End(homeSpan, nil)
 	}
 	if err = Seal(pending, Manifest{OwnerUID: string(r.UID), SpecHash: r.Status.SpecHash, ImageID: image.Id, RunscHash: binaryHash, HomeID: homeID}); err != nil {
 		return err
@@ -253,9 +248,7 @@ func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.P
 	return b.uploadSnapshot(ctx, r, path)
 }
 
-func (b *Backend) verifySnapshotImage(ctx context.Context, r *api.ResumablePod, path string) (manifest *Manifest, resultErr error) {
-	ctx, span := telemetry.Start(ctx, "node.snapshot.verify")
-	defer func() { telemetry.End(span, resultErr) }()
+func (b *Backend) verifySnapshotImage(ctx context.Context, r *api.ResumablePod, path string) (*Manifest, error) {
 	m, err := VerifyCached(path, string(r.UID), r.Status.SpecHash, b.Runsc)
 	if err != nil {
 		return nil, err
@@ -287,9 +280,7 @@ func (b *Backend) verifySnapshotHome(r *api.ResumablePod, m *Manifest) error {
 	return nil
 }
 
-func (b *Backend) prepareSnapshot(ctx context.Context, r *api.ResumablePod) (resultErr error) {
-	ctx, span := telemetry.Start(ctx, "node.snapshot.prepare")
-	defer func() { telemetry.End(span, resultErr) }()
+func (b *Backend) prepareSnapshot(ctx context.Context, r *api.ResumablePod) error {
 	if r.Status.Snapshot != "" {
 		if b.snapshotConsumed(string(r.UID), r.Status.Snapshot) {
 			return fmt.Errorf("checkpoint was consumed by a previous execution")
@@ -318,11 +309,7 @@ func (b *Backend) prepareSnapshot(ctx context.Context, r *api.ResumablePod) (res
 }
 
 func (b *Backend) Prepare(ctx context.Context, r *api.ResumablePod, p *core.Pod) (resultErr error) {
-	ctx, span := telemetry.Start(ctx, "node.prepare")
-	defer func() { telemetry.End(span, resultErr) }()
-	_, homeSpan := telemetry.Start(ctx, "node.home.prepare")
 	homeID, err := b.persistentHome(r, r.Status.Cycle == 1 && r.Status.Snapshot == "")
-	telemetry.End(homeSpan, err)
 	if err != nil {
 		return err
 	}

@@ -307,9 +307,7 @@ func (s *Service) prepareOperationContext(ctx context.Context, client, key, kind
 			runtimeTiming(operation.TargetID, "cellbox.accept_"+kind, started, err)
 		}
 	}()
-	_, lockSpan := telemetry.Start(ctx, "cellbox.operation.admission_lock")
 	unlock := s.admissions.lock(target)
-	lockSpan.End()
 	defer unlock()
 	key = client + ":" + kind + ":" + target + ":" + key
 	digest := inputHash(input)
@@ -365,10 +363,17 @@ func (s *Service) launchWithCompletion(request context.Context, op Operation, wo
 		defer s.wg.Done()
 		ctx, cancel := context.WithTimeout(telemetry.Detached(request, s.ctx), 15*time.Minute)
 		defer cancel()
-		ctx, operationSpan := telemetry.Start(ctx, "cellbox.operation."+op.Kind, telemetry.String("sandbox.id", op.TargetID), telemetry.String("operation.id", op.ID))
+		// Resume already owns a span from admission through durable completion.
+		// Its worker and controller must share that lifetime, not a dispatch span.
+		operationSpan := trace.SpanFromContext(request)
+		if op.Kind != "resume" {
+			ctx, operationSpan = telemetry.Start(ctx, "cellbox.operation."+op.Kind, telemetry.String("sandbox.id", op.TargetID), telemetry.String("operation.id", op.ID))
+		}
 		var completionErr error
 		defer func() {
-			operationSpan.End()
+			if op.Kind != "resume" {
+				operationSpan.End()
+			}
 			if completed != nil {
 				completed(completionErr)
 			}
@@ -456,8 +461,6 @@ func (s *Service) saveHandle(id string, handle boxprovider.Handle) error {
 	})
 }
 func (s *Service) observe(ctx context.Context, b boxRecord) (result Box, retErr error) {
-	ctx, span := telemetry.Start(ctx, "cellbox.observe_runtime")
-	defer func() { telemetry.End(span, retErr) }()
 	if b.Upgrade != nil {
 		var err error
 		b, err = s.commitDiskUpgrade(ctx, b)
@@ -682,10 +685,8 @@ func (s *Service) waitState(ctx context.Context, id, want string, checkHealth bo
 		if changes != nil {
 			interval = 5 * time.Second
 		}
-		_, notificationSpan := telemetry.Start(ctx, "cellbox.wait_runtime_notification")
 		select {
 		case <-ctx.Done():
-			telemetry.End(notificationSpan, ctx.Err())
 			return Box{}, ctx.Err()
 		case _, ok := <-changes:
 			if !ok {
@@ -693,7 +694,6 @@ func (s *Service) waitState(ctx context.Context, id, want string, checkHealth bo
 			}
 		case <-time.After(interval):
 		}
-		notificationSpan.End()
 	}
 }
 
@@ -1054,16 +1054,21 @@ func (s *Service) actionContext(request context.Context, client, key, id, action
 					return nil, err
 				}
 			}
-			if err := p.Action(ctx, b.Handle, action); err != nil {
+			// This phase owns both command dispatch and observation. The controller
+			// receives its context through the CR annotation and is a child of the
+			// whole runtime transition, not the short K8s patch that triggers it.
+			runtimeCtx, runtimeSpan := telemetry.Start(ctx, "cellbox.runtime.transition", telemetry.String("action", action))
+			if err := p.Action(runtimeCtx, b.Handle, action); err != nil {
+				telemetry.End(runtimeSpan, err)
 				if action == "suspend" {
 					_ = s.guestAction(ctx, b, "/v1/unquiesce")
 				}
 				return nil, err
 			}
+			runtimeSpan.AddEvent("cellbox.runtime.requested")
 			want := map[string]string{"freeze": "frozen", "unfreeze": "running", "suspend": "suspended", "resume": "running", "rebuild": "running"}[action]
-			waitCtx, waitSpan := telemetry.Start(ctx, "cellbox.wait_runtime")
-			_, waitErr := s.waitState(waitCtx, id, want, action != "resume")
-			telemetry.End(waitSpan, waitErr)
+			_, waitErr := s.waitState(runtimeCtx, id, want, action != "resume")
+			telemetry.End(runtimeSpan, waitErr)
 			if err := waitErr; err != nil {
 				return nil, err
 			}

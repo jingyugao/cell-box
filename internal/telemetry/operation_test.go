@@ -5,9 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"go.opentelemetry.io/otel/trace"
-	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"testing"
 	"time"
 )
@@ -47,19 +44,4 @@ func TestOperationPropagationRejectsStaleAndSettledWork(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestTraceClientPreservesWatchCapability(t *testing.T) {
-	scheme := runtime.NewScheme()
-	_ = api.AddToScheme(scheme)
-	c := TraceClient(fake.NewClientBuilder().WithScheme(scheme).Build())
-	watcher, ok := c.(client.WithWatch)
-	if !ok {
-		t.Fatal("tracing disables watch and forces lifecycle polling")
-	}
-	stream, err := watcher.Watch(context.Background(), &api.ResumablePodList{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	stream.Stop()
 }

@@ -12,7 +12,6 @@ import (
 	backend "cellbox.local/cellbox/internal/runtime"
 	"cellbox.local/cellbox/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sys/unix"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,20 +27,11 @@ type WarmLease struct {
 	Ticket                                     Ticket
 }
 
-func startWarmTrace(ctx context.Context, name string) (context.Context, trace.Span) {
-	if !trace.SpanFromContext(ctx).SpanContext().IsValid() {
-		return ctx, trace.SpanFromContext(ctx)
-	}
-	return telemetry.Start(ctx, name)
-}
-
 func warmUpdate(base, uid string, create bool, fn func(*WarmLease) error) (WarmLease, error) {
 	return warmUpdateContext(context.Background(), base, uid, create, fn)
 }
 
-func warmUpdateContext(ctx context.Context, base, uid string, create bool, fn func(*WarmLease) error) (l WarmLease, resultErr error) {
-	ctx, leaseSpan := startWarmTrace(ctx, "node.warm.lease_lock")
-	defer func() { telemetry.End(leaseSpan, resultErr) }()
+func warmUpdateContext(_ context.Context, base, uid string, create bool, fn func(*WarmLease) error) (l WarmLease, resultErr error) {
 	if !ValidID(uid) {
 		return l, fmt.Errorf("invalid warm Pod UID")
 	}
@@ -49,36 +39,25 @@ func warmUpdateContext(ctx context.Context, base, uid string, create bool, fn fu
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return l, err
 	}
-	_, span := startWarmTrace(ctx, "node.warm.lease.lock_file")
 	f, err := os.OpenFile(filepath.Join(dir, uid+".lock"), os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
-		telemetry.End(span, err)
 		return l, err
 	}
-	telemetry.End(span, nil)
 	defer f.Close()
-	_, span = startWarmTrace(ctx, "node.warm.lease.flock")
 	if err = unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
-		telemetry.End(span, err)
 		return l, err
 	}
-	telemetry.End(span, nil)
 	defer unix.Flock(int(f.Fd()), unix.LOCK_UN)
 	path := filepath.Join(dir, uid+".json")
-	_, span = startWarmTrace(ctx, "node.warm.lease.read")
 	if err = ReadJSON(path, &l); err != nil && !(create && errors.Is(err, os.ErrNotExist)) {
-		telemetry.End(span, err)
 		return l, err
 	}
-	telemetry.End(span, nil)
 	before := l
 	if err = fn(&l); err != nil {
 		return l, err
 	}
 	if before != l {
-		_, span = startWarmTrace(ctx, "node.warm.lease.persist")
 		err = AtomicJSON(path, l)
-		telemetry.End(span, err)
 	}
 	return l, err
 }
@@ -170,9 +149,7 @@ func (b *Backend) ActivateWarm(ctx context.Context, w *api.ResumablePod, p *core
 	if err != nil {
 		return true, err
 	}
-	_, homeSpan := telemetry.Start(ctx, "node.home.verify")
 	homeID, err := b.persistentHome(w, false)
-	telemetry.End(homeSpan, err)
 	if err != nil {
 		return true, err
 	}

@@ -3,7 +3,6 @@
 package main
 
 import (
-	"cellbox.local/cellbox/internal/telemetry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
@@ -13,5 +12,5 @@ func clientNew(m manager.Manager) (client.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return telemetry.TraceClient(c), nil
+	return c, nil
 }

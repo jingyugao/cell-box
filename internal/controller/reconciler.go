@@ -68,8 +68,6 @@ type workspaceArchiveRuntime interface {
 }
 
 func (r *Reconciler) syncInventoryPhase(ctx context.Context, w *api.ResumablePod, phase string) (retErr error) {
-	ctx, span := telemetry.Start(ctx, "cellbox.controller.sync_inventory")
-	defer func() { telemetry.End(span, retErr) }()
 	syncer, ok := r.Runtime.(inventoryRuntime)
 	if !ok {
 		return nil
@@ -84,8 +82,6 @@ var errServiceCollision = stderrors.New("Service name is already owned by anothe
 var pullableImage = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}$`)
 
 func (r *Reconciler) phase(ctx context.Context, w *api.ResumablePod, phase, message string, podReady ...bool) (traceResult ctrl.Result, retErr error) {
-	ctx, span := telemetry.Start(ctx, "cellbox.controller.phase", telemetry.String("phase", phase))
-	defer func() { telemetry.End(span, retErr) }()
 	w.Status.Message = message
 	if err := r.syncInventoryPhase(ctx, w, phase); err != nil {
 		return again, err
@@ -275,8 +271,6 @@ func owned(w *api.ResumablePod, o client.Object) bool {
 	return ref != nil && ref.UID == w.UID && ref.Kind == api.Kind && ref.APIVersion == api.GroupVersion.String()
 }
 func (r *Reconciler) pod(ctx context.Context, w *api.ResumablePod) (traceResult *core.Pod, retErr error) {
-	ctx, span := telemetry.Start(ctx, "cellbox.controller.pod")
-	defer func() { telemetry.End(span, retErr) }()
 	if w.Status.PodName == "" {
 		return nil, nil
 	}
@@ -335,8 +329,6 @@ func (r *Reconciler) startupFailure(ctx context.Context, p *core.Pod) string {
 	return message
 }
 func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (traceResult ctrl.Result, retErr error) {
-	ctx, span := telemetry.Start(ctx, "cellbox.controller.begin")
-	defer func() { telemetry.End(span, retErr) }()
 	started := time.Now()
 	defer func() {
 		ctrl.LoggerFrom(ctx).Info("execution preparation finished", "podUID", w.Status.PodUID, "durationMs", time.Since(started).Milliseconds())
@@ -395,8 +387,6 @@ func (r *Reconciler) waitWarmStarted(ctx context.Context, w *api.ResumablePod, p
 }
 
 func (r *Reconciler) started(ctx context.Context, w *api.ResumablePod, p *core.Pod) (traceResult ctrl.Result, retErr error) {
-	ctx, span := telemetry.Start(ctx, "cellbox.controller.started")
-	defer func() { telemetry.End(span, retErr) }()
 	if backend, ok := r.Runtime.(snapshotInvalidator); ok && w.Status.Snapshot != "" {
 		if err := backend.InvalidateSnapshot(ctx, w); err != nil {
 			return again, err
@@ -415,8 +405,6 @@ func (r *Reconciler) started(ctx context.Context, w *api.ResumablePod, p *core.P
 	return result, err
 }
 func (r *Reconciler) service(ctx context.Context, w *api.ResumablePod) (retErr error) {
-	ctx, span := telemetry.Start(ctx, "cellbox.controller.service")
-	defer func() { telemetry.End(span, retErr) }()
 	if len(w.Spec.ServicePorts) == 0 {
 		return nil
 	}
@@ -445,8 +433,6 @@ func (r *Reconciler) service(ctx context.Context, w *api.ResumablePod) (retErr e
 	return r.Patch(ctx, s, client.MergeFrom(old))
 }
 func (r *Reconciler) serving(ctx context.Context, p *core.Pod, on bool) (retErr error) {
-	ctx, span := telemetry.Start(ctx, "cellbox.controller.serving")
-	defer func() { telemetry.End(span, retErr) }()
 	value := "false"
 	if on {
 		value = "true"
@@ -508,8 +494,6 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (traceResu
 		var span trace.Span
 		ctx, span = telemetry.StartAt(ctx, "cellbox.controller.reconcile", readStart, telemetry.String("phase", w.Status.Phase), telemetry.String("pod.uid", w.Status.PodUID))
 		defer func() { telemetry.End(span, retErr) }()
-		_, readSpan := telemetry.StartAt(ctx, "cellbox.controller.read_resource", readStart)
-		readSpan.End()
 	}
 	if result, handled, err := r.captureWorkspaceArchive(ctx, w); handled || err != nil {
 		return result, err

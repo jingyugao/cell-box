@@ -22,7 +22,6 @@ import (
 	"cellbox.local/cellbox/internal/version"
 	"crypto/sha256"
 	"encoding/hex"
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/kubernetes"
@@ -209,7 +208,7 @@ func serve(ctx context.Context, config service.Config, providers map[string]boxp
 	if err != nil {
 		return fmt.Errorf("cannot start Cellbox service: %w", err)
 	}
-	server := &http.Server{Addr: config.Listen, Handler: otelhttp.NewHandler(app.Handler(), "cellbox.http"), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 1 << 20,
+	server := &http.Server{Addr: config.Listen, Handler: telemetry.HTTPHandler(app.Handler()), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 1 << 20,
 		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 	serveResult := make(chan error, 1)

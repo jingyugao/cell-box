@@ -126,9 +126,8 @@ func (b *Backend) recordRuntimeTraceAt(ctx context.Context, sid string, now time
 	if !parent.IsRecording() || !ValidID(sid) || len(sid) != 64 {
 		return
 	}
-	_, importSpan := otel.Tracer("cellbox.runtime").Start(ctx, "node.runtime_trace.import")
 	imported := false
-	defer func() { importSpan.SetAttributes(attribute.Bool("runtime.trace.imported", imported)); importSpan.End() }()
+	defer func() { parent.SetAttributes(attribute.Bool("runtime.trace.imported", imported)) }()
 	dir := filepath.Join(b.Base, "logs", sid)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -209,23 +208,35 @@ func (b *Backend) recordRuntimeTraceAt(ctx context.Context, sid string, now time
 		return
 	}
 	imported = true
-	restoreCtx := addRuntimeTraceSpan(ctx, "runsc.restore", start, end, "gvisor.info_timer", "Restore")
+	var restoreAttributes []attribute.KeyValue
+	var registrationGap time.Duration
+	var hasRegistrationGap bool
 	if wait, ok := timing.duration("restore cont 1/2", "restore cont 2/2"); ok && wait > 0 {
-		addRuntimeTraceSpan(restoreCtx, "runsc.restore.container_2_registration_gap", timing.points["restore cont 1/2"], timing.points["restore cont 2/2"], "gvisor.info_timer", "Restore")
+		registrationGap, hasRegistrationGap = wait, true
+		restoreAttributes = append(restoreAttributes, attribute.Int64("runtime.trace.registration_gap_us", wait.Microseconds()))
 	}
 	if kernelLoad, ok := timing.duration("loading kernel", "kernel loaded"); ok && kernelLoad > 0 {
-		addRuntimeTraceSpan(restoreCtx, "runsc.restore.kernel_load", timing.points["loading kernel"], timing.points["kernel loaded"], "gvisor.info_timer", "Restore")
+		restoreAttributes = append(restoreAttributes,
+			attribute.Int64("runtime.trace.kernel_load_us", kernelLoad.Microseconds()),
+			attribute.Int64("runtime.trace.kernel_load_start_offset_us", timing.points["loading kernel"].Sub(start).Microseconds()),
+		)
+	}
+	restoreCtx := addRuntimeTraceSpan(ctx, "runsc.restore", start, end, "gvisor.info_timer", "Restore", restoreAttributes...)
+	if hasRegistrationGap && registrationGap >= 50*time.Millisecond {
+		addRuntimeTraceSpan(restoreCtx, "runsc.restore.container_2_registration_gap", timing.points["restore cont 1/2"], timing.points["restore cont 2/2"], "gvisor.info_timer", "Restore")
 	}
 }
 
-func addRuntimeTraceSpan(ctx context.Context, name string, start, end time.Time, source, timer string) context.Context {
+func addRuntimeTraceSpan(ctx context.Context, name string, start, end time.Time, source, timer string, extra ...attribute.KeyValue) context.Context {
+	attrs := []attribute.KeyValue{
+		attribute.String("runtime.trace.source", source),
+		attribute.String("runtime.trace.timer", timer),
+		attribute.Int64("runtime.trace.duration_us", end.Sub(start).Microseconds()),
+	}
+	attrs = append(attrs, extra...)
 	_, span := otel.Tracer("cellbox.runtime").Start(ctx, name,
 		trace.WithTimestamp(start),
-		trace.WithAttributes(
-			attribute.String("runtime.trace.source", source),
-			attribute.String("runtime.trace.timer", timer),
-			attribute.Int64("runtime.trace.duration_us", end.Sub(start).Microseconds()),
-		),
+		trace.WithAttributes(attrs...),
 	)
 	span.End(trace.WithTimestamp(end))
 	return trace.ContextWithSpan(ctx, span)

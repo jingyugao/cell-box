@@ -38,7 +38,7 @@ func TestResumeAdmissionStorageRetainsRequestTrace(t *testing.T) {
 		}
 		seen[s.Name()] = true
 	}
-	for _, name := range []string{"cellbox.operation.admission", "cellbox.operation.admission_lock", "cellbox.persist.wait_writer", "cellbox.storage.put"} {
+	for _, name := range []string{"cellbox.operation.admission", "cellbox.storage.write_object"} {
 		if !seen[name] {
 			t.Fatalf("missing %s", name)
 		}
@@ -119,7 +119,7 @@ func TestResumeTotalSurvivesRequestAndContainsAdmissionAndCompletion(t *testing.
 	if spans["cellbox.resume.replay"] == nil {
 		t.Fatal("missing idempotent replay span")
 	}
-	for _, name := range []string{"cellbox.operation.admission", "cellbox.operation.resume", "cellbox.persist_completion"} {
+	for _, name := range []string{"cellbox.operation.admission", "cellbox.runtime.transition", "cellbox.unquiesce", "cellbox.persist_completion"} {
 		var child sdktrace.ReadOnlySpan
 		for _, s := range recorder.Ended() {
 			if s.Name() == name && s.SpanContext().TraceID() == total.SpanContext().TraceID() {
@@ -130,7 +130,7 @@ func TestResumeTotalSurvivesRequestAndContainsAdmissionAndCompletion(t *testing.
 		if child == nil || child.StartTime().Before(total.StartTime()) || child.EndTime().After(total.EndTime()) {
 			t.Fatalf("total does not contain %s", name)
 		}
-		if name != "cellbox.persist_completion" && child.Parent().SpanID() != total.SpanContext().SpanID() {
+		if child.Parent().SpanID() != total.SpanContext().SpanID() {
 			t.Fatalf("wrong parent for %s", name)
 		}
 	}

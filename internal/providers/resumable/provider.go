@@ -300,8 +300,6 @@ func (p *Provider) readyPod(ctx context.Context, w *api.ResumablePod) (*core.Pod
 }
 
 func (p *Provider) Action(ctx context.Context, h boxprovider.Handle, action string) (retErr error) {
-	ctx, span := telemetry.Start(ctx, "cellbox.provider.action", telemetry.String("action", action))
-	defer func() { telemetry.End(span, retErr) }()
 	var desired string
 	switch action {
 	case "suspend":

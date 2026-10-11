@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
@@ -123,10 +124,28 @@ func TestRecordRuntimeTraceImportsRestoreIntervals(t *testing.T) {
 	if got, want := wait.Parent().SpanID(), restore.SpanContext().SpanID(); got != want {
 		t.Fatalf("wait span parent ID = %v, want restore span %v", got, want)
 	}
-	if _, ok := byName["runsc.restore.kernel_load"]; !ok {
-		t.Fatal("missing kernel load span")
+	if _, ok := byName["runsc.restore.kernel_load"]; ok {
+		t.Fatal("unexpected short kernel load span")
 	}
-	if _, ok := byName["node.runtime_trace.import"]; !ok {
-		t.Fatal("missing runtime trace importer span")
+	if _, ok := byName["node.runtime_trace.import"]; ok {
+		t.Fatal("unexpected importer bookkeeping span")
 	}
+	if got := attributeValue(restore.Attributes(), "runtime.trace.kernel_load_us"); got != int64(40214) {
+		t.Fatalf("kernel load duration attribute = %v, want %d", got, 40214)
+	}
+	if got := attributeValue(restore.Attributes(), "runtime.trace.registration_gap_us"); got != int64(130216) {
+		t.Fatalf("registration gap duration attribute = %v, want %d", got, 130216)
+	}
+	if got := attributeValue(byName["warm.restore"].Attributes(), "runtime.trace.imported"); got != true {
+		t.Fatalf("runtime trace imported attribute = %v, want true", got)
+	}
+}
+
+func attributeValue(attrs []attribute.KeyValue, key string) any {
+	for _, attr := range attrs {
+		if string(attr.Key) == key {
+			return attr.Value.AsInterface()
+		}
+	}
+	return nil
 }

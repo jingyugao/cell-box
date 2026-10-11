@@ -71,9 +71,9 @@ func readObject(ctx context.Context, objects objectstorage.Objects, key string) 
 	}
 	return data, etag, nil
 }
-func writeObject(ctx context.Context, objects objectstorage.Objects, key string, data []byte, before string) (string, error) {
+func writeObject(ctx context.Context, objects objectstorage.Objects, key string, data []byte, before string) (result string, retErr error) {
 	ctx, span := telemetry.Start(ctx, "cellbox.storage.write_object")
-	defer span.End()
+	defer func() { telemetry.End(span, retErr) }()
 	if len(data) == 0 || int64(len(data)) > stateObjectLimit {
 		return "", errors.New("invalid metadata object size")
 	}
@@ -98,9 +98,7 @@ func writeObject(ctx context.Context, objects objectstorage.Objects, key string,
 	if condition == "" {
 		condition = "*"
 	}
-	putCtx, putSpan := telemetry.Start(ctx, "cellbox.storage.put")
-	etag, err := objects.Put(putCtx, key, bytes.NewReader(wire), int64(len(wire)), condition)
-	telemetry.End(putSpan, err)
+	etag, err := objects.Put(ctx, key, bytes.NewReader(wire), int64(len(wire)), condition)
 	if err == nil && etag != "" {
 		return etag, nil
 	}

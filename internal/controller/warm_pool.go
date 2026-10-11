@@ -8,7 +8,6 @@ import (
 	"time"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/telemetry"
 	core "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -237,15 +236,11 @@ func (p *WarmPool) reconcile(ctx context.Context) error {
 }
 
 func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (result *core.Pod, retErr error) {
-	ctx, span := telemetry.Start(ctx, "cellbox.controller.warm_acquire")
-	defer func() { telemetry.End(span, retErr) }()
 	if p.Size == 0 {
 		return nil, nil
 	}
 	started := time.Now()
-	_, lockSpan := telemetry.Start(ctx, "cellbox.controller.warm_pool_lock")
 	p.mu.Lock()
-	lockSpan.End()
 	defer p.mu.Unlock()
 	locked := time.Now()
 	var listed time.Time
