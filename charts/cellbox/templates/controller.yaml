@@ -50,6 +50,25 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if $localMetadataEnabled }}
+      initContainers:
+        - name: wait-local-metadata
+          image: {{ include "cellbox.image" (dict "root" . "image" .Values.controller.image) | quote }}
+          imagePullPolicy: {{ .Values.controller.imagePullPolicy }}
+          command: [/bin/sh, -ec, 'attempt=0; while [ "$attempt" -lt 300 ]; do if [ -f /var/lib/cellbox-metadata/objects/.initialized ]; then exit 0; fi; attempt=$((attempt + 1)); sleep 1; done; echo "local metadata initialization marker did not appear within 300 seconds" >&2; exit 1']
+          securityContext:
+            runAsUser: 10001
+            runAsGroup: 10001
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: local-metadata
+              mountPath: /var/lib/cellbox-metadata
+              readOnly: true
+      {{- end }}
       containers:
         - name: controller
           image: {{ include "cellbox.image" (dict "root" . "image" .Values.controller.image) | quote }}
