@@ -496,11 +496,17 @@ func (s *Service) observe(ctx context.Context, b boxRecord) (Box, error) {
 			} else {
 				changed = changed || previousError != current.Box.Error
 			}
+			// The provider generation is authoritative even when there is no
+			// current execution identity (for example, a suspended ResumablePod).
+			// Keep it monotonic so a stale observation cannot weaken generation
+			// fencing after a newer execution has already been observed.
+			if ob.Generation > current.Box.Generation {
+				current.Box.Generation = ob.Generation
+				changed = true
+			}
 			if ob.ExecutionID != "" && current.ExecutionID != ob.ExecutionID {
 				current.ExecutionID = ob.ExecutionID
-				if ob.Generation > 0 {
-					current.Box.Generation = ob.Generation
-				} else {
+				if ob.Generation == 0 {
 					current.Box.Generation++
 				}
 				changed = true
