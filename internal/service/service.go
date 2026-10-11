@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Service struct {
@@ -355,13 +356,23 @@ func (s *Service) launchWithCommit(op Operation, work func(context.Context) (map
 	s.launchWithCommitContext(s.ctx, op, work, commit)
 }
 func (s *Service) launchWithCommitContext(request context.Context, op Operation, work func(context.Context) (map[string]string, error), commit func(*State) error) {
+	s.launchWithCompletion(request, op, work, commit, nil)
+}
+
+func (s *Service) launchWithCompletion(request context.Context, op Operation, work func(context.Context) (map[string]string, error), commit func(*State) error, completed func(error)) {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		ctx, cancel := context.WithTimeout(telemetry.Detached(request, s.ctx), 15*time.Minute)
 		defer cancel()
 		ctx, operationSpan := telemetry.Start(ctx, "cellbox.operation."+op.Kind, telemetry.String("sandbox.id", op.TargetID), telemetry.String("operation.id", op.ID))
-		defer operationSpan.End()
+		var completionErr error
+		defer func() {
+			operationSpan.End()
+			if completed != nil {
+				completed(completionErr)
+			}
+		}()
 		result, err := work(ctx)
 		saveStarted := time.Now()
 		persistCtx, persistSpan := telemetry.Start(ctx, "cellbox.persist_completion")
@@ -394,6 +405,7 @@ func (s *Service) launchWithCommitContext(request context.Context, op Operation,
 			return nil
 		})
 		telemetry.End(persistSpan, saveErr)
+		completionErr = errors.Join(err, saveErr)
 		if err != nil || saveErr != nil {
 			operationSpan.SetStatus(codes.Error, "")
 		}
@@ -900,7 +912,17 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 func (s *Service) action(client, key, id, action string) (Operation, error) {
 	return s.actionContext(context.Background(), client, key, id, action)
 }
-func (s *Service) actionContext(request context.Context, client, key, id, action string) (Operation, error) {
+func (s *Service) actionContext(request context.Context, client, key, id, action string) (result Operation, retErr error) {
+	var total trace.Span
+	handedOff := false
+	if action == "resume" {
+		request, total = telemetry.Start(request, "cellbox.resume.total", telemetry.String("sandbox.id", id))
+		defer func() {
+			if !handedOff {
+				telemetry.End(total, retErr)
+			}
+		}()
+	}
 	allowed := map[string]bool{"freeze": true, "unfreeze": true, "suspend": true, "resume": true, "destroy": true, "activate": true, "reconcile": true, "rebuild": true}
 	if !allowed[action] {
 		return Operation{}, apiError("INVALID_REQUEST", "Unknown lifecycle action")
@@ -960,10 +982,22 @@ func (s *Service) actionContext(request context.Context, client, key, id, action
 		st.Boxes[id] = b
 		return nil
 	})
+	if total != nil {
+		total.SetAttributes(telemetry.String("operation.id", op.ID))
+		// An idempotent replay observes an existing operation, not a new restore.
+		if err == nil && !fresh {
+			total.SetName("cellbox.resume.replay")
+		}
+	}
 	if err != nil || !fresh {
 		return op, err
 	}
-	s.launchWithCommitContext(request, op, func(ctx context.Context) (map[string]string, error) {
+	var completed func(error)
+	if total != nil {
+		completed = func(err error) { telemetry.End(total, err) }
+		handedOff = true
+	}
+	s.launchWithCompletion(request, op, func(ctx context.Context) (map[string]string, error) {
 		p := s.providers[b.Profile.Provider]
 		switch action {
 		case "destroy":
@@ -1076,7 +1110,7 @@ func (s *Service) actionContext(request context.Context, client, key, id, action
 		v.Box.Version++
 		st.Boxes[id] = v
 		return nil
-	})
+	}, completed)
 	return op, nil
 }
 
