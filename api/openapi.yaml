@@ -1387,6 +1387,9 @@ paths:
       description: An active operation, service request, or unexpired usage lease
         blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
         never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
+        This endpoint waits synchronously and returns a succeeded Operation with HTTP 200,
+        or a standard error response if resume fails. Disconnecting does not cancel
+        accepted work; retry the same Idempotency-Key to wait for its result.
         Resume completion confirms the runtime is running and the Guest has been
         unquiesced. Guest health checks run asynchronously and report diagnostics
         without delaying completion or changing the box lifecycle phase.
@@ -1399,12 +1402,12 @@ paths:
           type: string
       - $ref: '#/components/parameters/IdempotencyKey'
       responses:
-        "202":
+        "200":
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Operation'
-          description: Success
+          description: Resume completed successfully and the operation result is durable.
         default:
           $ref: '#/components/responses/Error'
       summary: Restore a resumable Kubernetes checkpoint

@@ -159,6 +159,15 @@ func (s *Service) Handler() http.Handler {
 			fail(w, err)
 			return
 		}
+		if action == "resume" {
+			op, err = s.waitResume(r.Context(), clientID(r), op.ID)
+			if err != nil {
+				fail(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, op)
+			return
+		}
 		writeJSON(w, 202, op)
 	})
 	mux.HandleFunc("POST /v1/boxes/{id}/execs", func(w http.ResponseWriter, r *http.Request) {

@@ -44,3 +44,24 @@ func (s *Service) waitOperation(ctx context.Context, client, id string, wait tim
 		}
 	}
 }
+
+// The HTTP caller waits for a durable terminal result. Accepted work retains its
+// service-owned context: a lost connection does not cancel or duplicate restore.
+func (s *Service) waitResume(ctx context.Context, client, id string) (Operation, error) {
+	// The worker has a 15 minute deadline plus a bounded completion commit.
+	op, err := s.waitOperation(ctx, client, id, 16*time.Minute)
+	if err != nil {
+		return Operation{}, err
+	}
+	switch op.Status {
+	case "succeeded":
+		return op, nil
+	case "failed":
+		if op.Error != nil {
+			return Operation{}, op.Error
+		}
+		return Operation{}, apiError("RUNTIME_ERROR", "Resume failed")
+	default:
+		return Operation{}, apiError("TIMEOUT", "Resume is still pending; retry with the same idempotency key")
+	}
+}
