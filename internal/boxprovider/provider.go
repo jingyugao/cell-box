@@ -12,6 +12,7 @@ import (
 var ErrNotFound = errors.New("runtime not found")
 var ErrUnsupported = errors.New("unsupported runtime operation")
 var ErrStaleExecution = errors.New("runtime execution changed")
+var ErrStaleTransition = errors.New("runtime lifecycle transition changed")
 var ErrNotReady = errors.New("current runtime is not ready")
 
 type Spec struct {
@@ -40,10 +41,12 @@ type Handle struct {
 }
 
 type Observation struct {
-	Generation  uint64 // Provider-owned durable execution cycle, when available.
-	Phase       string // creating, running, freezing, frozen, unfreezing, checkpointing, suspending, suspended, resuming, restoring, staged, deleting, deleted, failed
-	ExecutionID string // immutable runtime identity; changes after Pod replacement
-	Message     string
+	Generation           uint64 // Provider-owned durable execution cycle, when available.
+	Phase                string // creating, running, freezing, frozen, unfreezing, checkpointing, suspending, suspended, resuming, restoring, staged, deleting, deleted, failed
+	ExecutionID          string // immutable runtime identity; changes after Pod replacement
+	TransitionID         string // provider lifecycle transition associated with this observation
+	ObservedTransitionID string // transition token last committed by the runtime controller
+	Message              string
 }
 
 type Connection struct {
@@ -79,6 +82,12 @@ type FencedGuestProvider interface {
 // ChangeProvider wakes lifecycle waiters when the runtime resource changes.
 type ChangeProvider interface {
 	WatchChanges(context.Context, Handle) (<-chan struct{}, error)
+}
+
+// TransitionProvider atomically fences a lifecycle request against the last
+// transition observed by Cellbox. Legacy providers continue to use Action.
+type TransitionProvider interface {
+	ActionTransition(context.Context, Handle, string, string, string) error // action, expected previous ID, new ID
 }
 
 // InventoryProvider enumerates workloads from the runtime, without the service ledger.

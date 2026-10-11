@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -233,45 +232,23 @@ func TestObserveCanceledDuringInspectDoesNotCommit(t *testing.T) {
 	}
 }
 
-func TestListObservationIsBoundedAndReturnsNoPartialSuccess(t *testing.T) {
+func TestListQueryUsesSavedProjectionWithoutInspectingRuntime(t *testing.T) {
 	f := newCoreFixture(t)
 	for i := 0; i < 10; i++ {
 		f.createBox(t, "query-workers-"+string(rune('a'+i)))
 	}
-	var active, maxActive atomic.Int32
 	var calls atomic.Int32
-	var mu sync.Mutex
-	failed := false
-	replaceQueryProvider(f, func(ctx context.Context, handle boxprovider.Handle) (boxprovider.Observation, error) {
+	replaceQueryProvider(f, func(context.Context, boxprovider.Handle) (boxprovider.Observation, error) {
 		calls.Add(1)
-		current := active.Add(1)
-		defer active.Add(-1)
-		for old := maxActive.Load(); current > old && !maxActive.CompareAndSwap(old, current); old = maxActive.Load() {
-		}
-		time.Sleep(20 * time.Millisecond)
-		observation, err := f.provider.Inspect(ctx, handle)
-		mu.Lock()
-		shouldFail := failed
-		mu.Unlock()
-		if shouldFail {
-			return boxprovider.Observation{}, errors.New("provider inspect failed")
-		}
-		return observation, err
+		return boxprovider.Observation{}, errors.New("GET must not inspect runtime")
 	})
 	status, body := f.call(t, "GET", "/v1/boxes", testClientToken, "", nil)
 	wantStatus(t, status, 200, body)
 	if boxes := decodeResponse[[]Box](t, body); len(boxes) != 10 {
 		t.Fatalf("list returned %d boxes, want 10", len(boxes))
 	}
-	if got := maxActive.Load(); got > 8 || got < 2 || calls.Load() != 10 {
-		t.Fatalf("Inspect concurrency/calls = %d/%d, want concurrency 2..8 and 10 calls", got, calls.Load())
-	}
-	mu.Lock()
-	failed = true
-	mu.Unlock()
-	status, body = f.call(t, "GET", "/v1/boxes", testClientToken, "", nil)
-	if status == 200 {
-		t.Fatalf("provider error returned a successful list: %s", body)
+	if calls.Load() != 0 {
+		t.Fatalf("list query inspected runtime %d times", calls.Load())
 	}
 }
 
@@ -293,11 +270,19 @@ func TestFailedOrMissingRuntimeOverridesActiveTransition(t *testing.T) {
 			replaceQueryProvider(f, func(context.Context, boxprovider.Handle) (boxprovider.Observation, error) {
 				return boxprovider.Observation{Phase: phase}, nil
 			})
-			status, body := f.call(t, "GET", "/v1/boxes/"+box.ID, testClientToken, "", nil)
-			wantStatus(t, status, 200, body)
-			got := decodeResponse[Box](t, body)
-			if got.Phase != "failed" {
-				t.Fatalf("phase %q was hidden by active transition: %+v", phase, got)
+			base, err := f.service.rawBox(box.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.service.observe(context.Background(), base); err != nil {
+				t.Fatal(err)
+			}
+			updated, err := f.service.rawBox(box.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if updated.Box.Phase != "failed" {
+				t.Fatalf("phase %q was hidden by active transition: %+v", phase, updated.Box)
 			}
 		})
 	}

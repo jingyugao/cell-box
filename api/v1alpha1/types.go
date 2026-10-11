@@ -54,6 +54,10 @@ type UpgradeRequest struct {
 type Spec struct {
 	NodeName     string `json:"nodeName"`
 	DesiredState string `json:"desiredState"`
+	// TransitionID identifies the Cellbox lifecycle operation that requested
+	// DesiredState. A newer operation must fence stale workers by supplying the
+	// previously observed transition ID.
+	TransitionID string `json:"transitionID,omitempty"`
 	// Container is immutable. The controller owns optional directory mounts.
 	Container              core.Container     `json:"container"`
 	SharedReadOnlyHostPath string             `json:"sharedReadOnlyHostPath,omitempty"`
@@ -67,20 +71,23 @@ type Spec struct {
 	StartupTimeoutSeconds  int64              `json:"startupTimeoutSeconds,omitempty"`
 }
 type Status struct {
-	Phase              string           `json:"phase,omitempty"`
-	Message            string           `json:"message,omitempty"`
-	ObservedGeneration int64            `json:"observedGeneration,omitempty"`
-	SpecHash           string           `json:"specHash,omitempty"`
-	Cycle              int64            `json:"cycle,omitempty"`
-	PodName            string           `json:"podName,omitempty"`
-	PodUID             string           `json:"podUID,omitempty"`
-	Execution          *Execution       `json:"execution,omitempty"`
-	Snapshot           string           `json:"snapshot,omitempty"`
-	RebuildNonce       string           `json:"rebuildNonce,omitempty"`
-	UpgradeNonce       string           `json:"upgradeNonce,omitempty"`
-	RetryNonce         string           `json:"retryNonce,omitempty"`
-	Since              meta.Time        `json:"since,omitempty"`
-	Conditions         []meta.Condition `json:"conditions,omitempty"`
+	Phase              string `json:"phase,omitempty"`
+	Message            string `json:"message,omitempty"`
+	ObservedGeneration int64  `json:"observedGeneration,omitempty"`
+	// ObservedTransitionID is set with lifecycle phase updates and identifies
+	// the transition whose requested state the controller has observed.
+	ObservedTransitionID string           `json:"observedTransitionID,omitempty"`
+	SpecHash             string           `json:"specHash,omitempty"`
+	Cycle                int64            `json:"cycle,omitempty"`
+	PodName              string           `json:"podName,omitempty"`
+	PodUID               string           `json:"podUID,omitempty"`
+	Execution            *Execution       `json:"execution,omitempty"`
+	Snapshot             string           `json:"snapshot,omitempty"`
+	RebuildNonce         string           `json:"rebuildNonce,omitempty"`
+	UpgradeNonce         string           `json:"upgradeNonce,omitempty"`
+	RetryNonce           string           `json:"retryNonce,omitempty"`
+	Since                meta.Time        `json:"since,omitempty"`
+	Conditions           []meta.Condition `json:"conditions,omitempty"`
 }
 type ResumablePod struct {
 	meta.TypeMeta   `json:",inline"`

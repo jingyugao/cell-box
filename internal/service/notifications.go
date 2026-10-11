@@ -59,6 +59,6 @@ func (s *Service) waitResume(ctx context.Context, client, id string) (Operation,
 		}
 		return Operation{}, apiError("RUNTIME_ERROR", "Resume failed")
 	default:
-		return Operation{}, apiError("TIMEOUT", "Resume is still pending; retry with the same idempotency key")
+		return Operation{}, apiError("UNKNOWN_OUTCOME", "Lifecycle operation is still pending; retry with the same idempotency key")
 	}
 }

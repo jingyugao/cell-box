@@ -103,6 +103,9 @@ components:
           type: object
         generation:
           type: integer
+        executionId:
+          description: Current runtime execution identity when observed; omitted when unknown or unavailable.
+          type: string
         id:
           type: string
         image:
@@ -117,6 +120,10 @@ components:
           type: string
         resourceVersion:
           type: integer
+        observedAt:
+          description: Time of the latest runtime observation. Omitted means no runtime observation has completed yet.
+          format: date-time
+          type: string
         phase:
           description: Runtime lifecycle phase. running does not imply guest readiness or health.
           enum:
@@ -381,6 +388,9 @@ components:
         createdAt:
           format: date-time
           type: string
+        box:
+          description: Full lifecycle snapshot captured atomically with successful completion; operationId is cleared.
+          $ref: '#/components/schemas/Box'
         error:
           additionalProperties: false
           properties:
@@ -1435,6 +1445,34 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       summary: Restore a resumable Kubernetes checkpoint
+  /v1/boxes/{id}:ensure-running:
+    post:
+      requestBody:
+        $ref: '#/components/requestBodies/LifecyclePrecondition'
+      description: Idempotently ensures the Box is running. A running Box returns
+        an immediate successful snapshot even while executions or usage leases are
+        active. A suspended Box is resumed and unquiesced; active work blocks that
+        transition. Concurrent ensure-running requests join the existing resume
+        intent. This endpoint waits synchronously for a durable terminal Operation.
+        Guest health checks run asynchronously and do not delay completion.
+      operationId: ensureBoxRunning
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+          description: The Box is running and the terminal operation includes its snapshot.
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Ensure a Box is running
   /v1/boxes/{id}:suspend:
     post:
       requestBody:

@@ -4,6 +4,7 @@ import (
 	"cellbox.local/cellbox/internal/boxprovider"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -117,6 +118,7 @@ func TestResumeRejectsStaleGenerationAtAdmission(t *testing.T) {
 	defer f.service.Close()
 	f.provider.mu.Lock()
 	f.provider.created = true
+	f.provider.inspectErr = errors.New("observer held outside stale-generation assertion")
 	f.provider.mu.Unlock()
 	f.service.providers["resumable-k8s-pod"] = f.provider
 	profile := f.config.Profiles[0]

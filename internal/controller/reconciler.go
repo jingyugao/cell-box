@@ -92,6 +92,7 @@ func (r *Reconciler) phase(ctx context.Context, w *api.ResumablePod, phase, mess
 	w.Status.Phase = phase
 	w.Status.Message = message
 	w.Status.ObservedGeneration = w.Generation
+	w.Status.ObservedTransitionID = w.Spec.TransitionID
 	ready := meta.ConditionFalse
 	if phase == "Running" {
 		if len(podReady) == 0 {
@@ -755,8 +756,9 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (traceResu
 			condition = meta.ConditionTrue
 		}
 		previous := apimeta.FindStatusCondition(w.Status.Conditions, "Ready")
-		if previous == nil || previous.Status != condition || w.Status.ObservedGeneration != w.Generation {
+		if previous == nil || previous.Status != condition || w.Status.ObservedGeneration != w.Generation || w.Status.ObservedTransitionID != w.Spec.TransitionID {
 			w.Status.ObservedGeneration = w.Generation
+			w.Status.ObservedTransitionID = w.Spec.TransitionID
 			apimeta.SetStatusCondition(&w.Status.Conditions, meta.Condition{Type: "Ready", Status: condition, Reason: "Running", Message: "Readiness follows the active Pod", ObservedGeneration: w.Generation})
 			return again, r.Status().Update(ctx, w)
 		}

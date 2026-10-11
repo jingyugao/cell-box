@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"cellbox.local/cellbox/internal/guestapi"
+	"cellbox.local/cellbox/internal/telemetry"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,7 +13,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -55,11 +55,11 @@ func fail(w http.ResponseWriter, err error) {
 		status = 404
 	case "OPERATION_EXPIRED", "RESULT_EXPIRED":
 		status = http.StatusGone
-	case "CONFLICT", "BUSY", "STALE_GENERATION", "ARCHIVE_INCOMPATIBLE":
+	case "CONFLICT", "BUSY", "STALE_GENERATION", "STALE_TRANSITION", "ARCHIVE_INCOMPATIBLE":
 		status = 409
 	case "UNSUPPORTED_CAPABILITY":
 		status = 422
-	case "TIMEOUT":
+	case "TIMEOUT", "UNKNOWN_OUTCOME":
 		status = 504
 	}
 	writeJSON(w, status, map[string]any{"error": e})
@@ -145,14 +145,7 @@ func (s *Service) Handler() http.Handler {
 			fail(w, err)
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		defer cancel()
-		box, err := s.observe(ctx, b)
-		if err != nil {
-			fail(w, err)
-			return
-		}
-		writeJSON(w, 200, box)
+		writeJSON(w, 200, b.Box)
 	})
 	mux.HandleFunc("POST /v1/boxes/{action}", func(w http.ResponseWriter, r *http.Request) {
 		id, action, ok := strings.Cut(r.PathValue("action"), ":")
@@ -177,6 +170,26 @@ func (s *Service) Handler() http.Handler {
 		}
 		if input.ExpectedGeneration != nil && *input.ExpectedGeneration == 0 {
 			fail(w, apiError("INVALID_REQUEST", "expectedGeneration must be positive"))
+			return
+		}
+		if action == "ensure-running" {
+			request, ensureSpan := telemetry.Start(r.Context(), "cellbox.ensure_running", telemetry.String("sandbox.id", id))
+			var ensureErr error
+			defer func() { telemetry.End(ensureSpan, ensureErr) }()
+			op, err := s.ensureRunning(request, clientID(r), r.Header.Get("Idempotency-Key"), id, input.ExpectedGeneration)
+			if err != nil {
+				ensureErr = err
+				fail(w, err)
+				return
+			}
+			ensureSpan.SetAttributes(telemetry.String("operation.id", op.ID))
+			op, err = s.waitResume(request, clientID(r), op.ID)
+			if err != nil {
+				ensureErr = err
+				fail(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, op)
 			return
 		}
 		op, err := s.actionContextWithGeneration(r.Context(), clientID(r), r.Header.Get("Idempotency-Key"), id, action, input.ExpectedGeneration)
@@ -282,8 +295,6 @@ func (s *Service) listProfiles(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Service) listLocalBoxes(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
 	ids := r.URL.Query()["id"]
 	if len(ids) > 0 {
 		seen := make(map[string]bool, len(ids))
@@ -302,45 +313,8 @@ func (s *Service) listLocalBoxes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	boxes := make([]Box, len(records))
-	workers := 8
-	if len(records) < workers {
-		workers = len(records)
-	}
-	if workers > 0 {
-		jobs := make(chan int, len(records))
-		for i := range records {
-			jobs <- i
-		}
-		close(jobs)
-		var wg sync.WaitGroup
-		var once sync.Once
-		var observeErr error
-		for n := 0; n < workers; n++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for i := range jobs {
-					if ctx.Err() != nil {
-						return
-					}
-					box, err := s.observe(ctx, records[i])
-					if err != nil {
-						once.Do(func() { observeErr = err; cancel() })
-						return
-					}
-					boxes[i] = box
-				}
-			}()
-		}
-		wg.Wait()
-		if observeErr != nil {
-			fail(w, observeErr)
-			return
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		fail(w, err)
-		return
+	for i := range records {
+		boxes[i] = records[i].Box
 	}
 	filtered := make([]Box, 0, len(boxes))
 	for _, box := range boxes {

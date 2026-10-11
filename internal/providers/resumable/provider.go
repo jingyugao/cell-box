@@ -188,7 +188,7 @@ func (p *Provider) Inspect(ctx context.Context, h boxprovider.Handle) (boxprovid
 	if err != nil {
 		return boxprovider.Observation{}, err
 	}
-	obs := boxprovider.Observation{ExecutionID: w.Status.PodUID, Message: w.Status.Message, Generation: uint64(w.Status.Cycle)}
+	obs := boxprovider.Observation{ExecutionID: w.Status.PodUID, Message: w.Status.Message, Generation: uint64(w.Status.Cycle), TransitionID: w.Spec.TransitionID, ObservedTransitionID: w.Status.ObservedTransitionID}
 	if w.DeletionTimestamp != nil {
 		obs.Phase = "deleting"
 		return obs, nil
@@ -299,7 +299,11 @@ func (p *Provider) readyPod(ctx context.Context, w *api.ResumablePod) (*core.Pod
 	return nil, boxprovider.ErrNotReady
 }
 
-func (p *Provider) Action(ctx context.Context, h boxprovider.Handle, action string) (retErr error) {
+func (p *Provider) Action(ctx context.Context, h boxprovider.Handle, action string) error {
+	return p.ActionTransition(ctx, h, action, "", "")
+}
+
+func (p *Provider) ActionTransition(ctx context.Context, h boxprovider.Handle, action, expectedPrevious, transitionID string) (retErr error) {
 	var desired string
 	switch action {
 	case "suspend":
@@ -318,6 +322,29 @@ func (p *Provider) Action(ctx context.Context, h boxprovider.Handle, action stri
 	if w.DeletionTimestamp != nil {
 		return errors.New("ResumablePod is deleting")
 	}
+	if transitionID != "" {
+		if w.Spec.TransitionID == transitionID {
+			// Recovery/retry of the same durable Cellbox operation.
+			if w.Spec.DesiredState == desired && action != "rebuild" {
+				return nil
+			}
+		} else {
+			if w.Spec.TransitionID != expectedPrevious {
+				return boxprovider.ErrStaleTransition
+			}
+			if expectedPrevious != "" && w.Status.ObservedTransitionID != expectedPrevious {
+				return boxprovider.ErrStaleTransition
+			}
+			legacyResumeInFlight := action == "resume" && expectedPrevious == "" && w.Spec.TransitionID == "" &&
+				w.Spec.DesiredState == "Running" && (w.Status.Phase == "Restoring" || w.Status.Phase == "Running")
+			if action == "resume" && w.Status.Phase != "Suspended" && !legacyResumeInFlight {
+				return boxprovider.ErrStaleTransition
+			}
+			if action == "suspend" && w.Status.Phase != "Running" && !(expectedPrevious == "" && w.Spec.DesiredState == "Suspended" && (w.Status.Phase == "Checkpointing" || w.Status.Phase == "Suspending")) {
+				return boxprovider.ErrStaleTransition
+			}
+		}
+	}
 	if action == "rebuild" {
 		if w.Status.Phase != "Failed" || !w.Spec.PersistentHome {
 			return errors.New("rebuild requires a failed Box with persistent HOME")
@@ -330,17 +357,23 @@ func (p *Provider) Action(ctx context.Context, h boxprovider.Handle, action stri
 		telemetry.InjectOperation(ctx, w)
 		w.Spec.RebuildNonce = hex.EncodeToString(nonce)
 		w.Spec.DesiredState = "Running"
+		if transitionID != "" {
+			w.Spec.TransitionID = transitionID
+		}
 		return p.Client.Patch(ctx, w, client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{}))
 	}
 	if w.Status.Phase == "Failed" || w.Status.Phase == "Failing" {
 		return errors.New("ResumablePod failed; explicit operator retry is required")
 	}
-	if w.Spec.DesiredState == desired {
+	if w.Spec.DesiredState == desired && (transitionID == "" || w.Spec.TransitionID == transitionID) {
 		return nil
 	}
 	old := w.DeepCopy()
 	telemetry.InjectOperation(ctx, w)
 	w.Spec.DesiredState = desired
+	if transitionID != "" {
+		w.Spec.TransitionID = transitionID
+	}
 	// An optimistic update prevents stale operations from changing a newer CR.
 	if err = p.Client.Patch(ctx, w, client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{})); err != nil {
 		return err

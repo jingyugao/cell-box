@@ -36,17 +36,20 @@ func (p *Provider) WatchChanges(ctx context.Context, h boxprovider.Handle) (<-ch
 	}
 	go func() {
 		defer close(changes)
+		reconnectDelay := 100 * time.Millisecond
 		for {
 			if stream == nil {
 				select {
 				case <-ctx.Done():
 					return
-				case <-time.After(100 * time.Millisecond):
+				case <-time.After(reconnectDelay):
 				}
 				stream, _ = open()
 				if stream == nil {
+					reconnectDelay = min(reconnectDelay*2, 5*time.Second)
 					continue
 				}
+				reconnectDelay = 100 * time.Millisecond
 				// Re-observe after reconnecting; the current state covers any gap.
 				notify()
 			}
@@ -61,6 +64,7 @@ func (p *Provider) WatchChanges(ctx context.Context, h boxprovider.Handle) (<-ch
 					notify()
 					continue
 				}
+				reconnectDelay = 100 * time.Millisecond
 				notify()
 			}
 		}
