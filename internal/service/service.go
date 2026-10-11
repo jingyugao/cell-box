@@ -290,6 +290,11 @@ func (s *Service) streamBusy(id string) error {
 	return nil
 }
 func (s *Service) prepareOperation(client, key, kind, target string, input any, prepare func(*State, *Operation) error) (Operation, bool, error) {
+	return s.prepareOperationContext(context.Background(), client, key, kind, target, input, prepare)
+}
+func (s *Service) prepareOperationContext(ctx context.Context, client, key, kind, target string, input any, prepare func(*State, *Operation) error) (result Operation, created bool, retErr error) {
+	ctx, span := telemetry.Start(ctx, "cellbox.operation.admission", telemetry.String("action", kind))
+	defer func() { telemetry.End(span, retErr) }()
 	if key == "" || len(key) > 200 {
 		return Operation{}, false, apiError("INVALID_REQUEST", "Idempotency-Key header (1..200 bytes) is required")
 	}
@@ -301,14 +306,16 @@ func (s *Service) prepareOperation(client, key, kind, target string, input any, 
 			runtimeTiming(operation.TargetID, "cellbox.accept_"+kind, started, err)
 		}
 	}()
+	_, lockSpan := telemetry.Start(ctx, "cellbox.operation.admission_lock")
 	unlock := s.admissions.lock(target)
+	lockSpan.End()
 	defer unlock()
 	key = client + ":" + kind + ":" + target + ":" + key
 	digest := inputHash(input)
 	fresh := false
 	update := s.store.Update
 	if kind == "resume" {
-		update = func(fn func(*State) error) error { return s.store.UpdateBox(target, fn) }
+		update = func(fn func(*State) error) error { return s.store.UpdateBoxContext(ctx, target, fn) }
 	}
 	err = update(func(st *State) error {
 		if previous, ok := st.Keys[key]; ok {
@@ -899,7 +906,7 @@ func (s *Service) actionContext(request context.Context, client, key, id, action
 		return Operation{}, apiError("INVALID_REQUEST", "Unknown lifecycle action")
 	}
 	var b boxRecord
-	op, fresh, err := s.prepareOperation(client, key, action, id, nil, func(st *State, op *Operation) error {
+	op, fresh, err := s.prepareOperationContext(request, client, key, action, id, nil, func(st *State, op *Operation) error {
 		var err error
 		b, err = owned(st, client, id)
 		if err != nil {

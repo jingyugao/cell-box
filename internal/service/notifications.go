@@ -1,6 +1,7 @@
 package service
 
 import (
+	"cellbox.local/cellbox/internal/telemetry"
 	"context"
 	"time"
 )
@@ -20,7 +21,9 @@ func (s *Store) notifyLocked() {
 	}
 }
 
-func (s *Service) waitOperation(ctx context.Context, client, id string, wait time.Duration) (Operation, error) {
+func (s *Service) waitOperation(ctx context.Context, client, id string, wait time.Duration) (result Operation, retErr error) {
+	ctx, span := telemetry.Start(ctx, "cellbox.operation.long_poll")
+	defer func() { telemetry.End(span, retErr) }()
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	for {
