@@ -20,7 +20,7 @@ func (s *Store) notifyLocked() {
 	}
 }
 
-func (s *Service) waitOperation(ctx context.Context, client, id string, wait time.Duration) (Operation, error) {
+func (s *Service) waitOperation(ctx context.Context, client, id string, wait time.Duration) (result Operation, retErr error) {
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	for {
@@ -39,5 +39,26 @@ func (s *Service) waitOperation(ctx context.Context, client, id string, wait tim
 			return s.operation(client, id)
 		case <-changed:
 		}
+	}
+}
+
+// The HTTP caller waits for a durable terminal result. Accepted work retains its
+// service-owned context: a lost connection does not cancel or duplicate restore.
+func (s *Service) waitResume(ctx context.Context, client, id string) (Operation, error) {
+	// The worker has a 15 minute deadline plus a bounded completion commit.
+	op, err := s.waitOperation(ctx, client, id, 16*time.Minute)
+	if err != nil {
+		return Operation{}, err
+	}
+	switch op.Status {
+	case "succeeded":
+		return op, nil
+	case "failed":
+		if op.Error != nil {
+			return Operation{}, op.Error
+		}
+		return Operation{}, apiError("RUNTIME_ERROR", "Resume failed")
+	default:
+		return Operation{}, apiError("UNKNOWN_OUTCOME", "Lifecycle operation is still pending; retry with the same idempotency key")
 	}
 }

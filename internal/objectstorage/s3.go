@@ -1,4 +1,4 @@
-// Package objectstorage owns Cellbox's durable objects. Local directories are caches only.
+// Package objectstorage owns durable assets and optionally node-local metadata.
 package objectstorage
 
 import (

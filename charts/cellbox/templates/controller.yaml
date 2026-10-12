@@ -1,4 +1,19 @@
 {{- if .Values.controller.enabled }}
+{{- $localMetadata := .Values.localMetadata | default dict }}
+{{- $localMetadataEnabled := get $localMetadata "enabled" | default false }}
+{{- $localMetadataInitialize := get $localMetadata "initialize" | default false }}
+{{- $localMetadataNode := get $localMetadata "nodeName" | default "" | toString | trim }}
+{{- $localMetadataHostPath := get $localMetadata "hostPath" | default "/var/lib/cellbox-metadata" | toString }}
+{{- if and $localMetadataInitialize (not $localMetadataEnabled) }}{{- fail "localMetadata.initialize requires localMetadata.enabled" }}{{- end }}
+{{- if $localMetadataEnabled }}
+  {{- if not .Values.api.enabled }}{{- fail "localMetadata.enabled requires api.enabled" }}{{- end }}
+  {{- if eq $localMetadataNode "" }}{{- fail "localMetadata.nodeName is required when localMetadata.enabled" }}{{- end }}
+  {{- if or (not (hasPrefix "/" $localMetadataHostPath)) (eq $localMetadataHostPath "/") (hasSuffix "/" $localMetadataHostPath) (contains "//" $localMetadataHostPath) (regexMatch "(^|/)\\.{1,2}(/|$)" $localMetadataHostPath) }}{{- fail "localMetadata.hostPath must be a clean absolute path other than /" }}{{- end }}
+  {{- $apiNodeSelector := .Values.api.nodeSelector | default dict }}
+  {{- if and (hasKey $apiNodeSelector "kubernetes.io/hostname") (ne (get $apiNodeSelector "kubernetes.io/hostname" | toString) $localMetadataNode) }}{{- fail "api.nodeSelector kubernetes.io/hostname conflicts with localMetadata.nodeName" }}{{- end }}
+  {{- $controllerNodeSelector := .Values.controller.nodeSelector | default dict }}
+  {{- if and (hasKey $controllerNodeSelector "kubernetes.io/hostname") (ne (get $controllerNodeSelector "kubernetes.io/hostname" | toString) $localMetadataNode) }}{{- fail "controller.nodeSelector kubernetes.io/hostname conflicts with localMetadata.nodeName" }}{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -22,13 +37,37 @@ spec:
       serviceAccountName: {{ .Values.controller.serviceAccountName }}
       hostPID: true
       terminationGracePeriodSeconds: 60
+      {{- if $localMetadataEnabled }}
+      nodeSelector:
+        {{- toYaml (mergeOverwrite (deepCopy (.Values.controller.nodeSelector | default dict)) (dict "kubernetes.io/hostname" $localMetadataNode)) | nindent 8 }}
+      {{- else }}
       {{- with .Values.controller.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- end }}
       {{- with .Values.controller.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $localMetadataEnabled }}
+      initContainers:
+        - name: wait-local-metadata
+          image: {{ include "cellbox.image" (dict "root" . "image" .Values.controller.image) | quote }}
+          imagePullPolicy: {{ .Values.controller.imagePullPolicy }}
+          command: [/bin/sh, -ec, 'attempt=0; while [ "$attempt" -lt 300 ]; do if [ -f /var/lib/cellbox-metadata/objects/.initialized ]; then exit 0; fi; attempt=$((attempt + 1)); sleep 1; done; echo "local metadata initialization marker did not appear within 300 seconds" >&2; exit 1']
+          securityContext:
+            runAsUser: 10001
+            runAsGroup: 10001
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: local-metadata
+              mountPath: /var/lib/cellbox-metadata
+              readOnly: true
       {{- end }}
       containers:
         - name: controller
@@ -42,6 +81,9 @@ spec:
             - --warm-pool-size={{ if hasKey .Values.controller "warmPoolSize" }}{{ .Values.controller.warmPoolSize }}{{ else }}2{{ end }}
             - --host-mount-namespace
             - --cri-socket={{ .Values.controller.criSocket }}
+            {{- if $localMetadataEnabled }}
+            - --local-metadata-dir=/var/lib/cellbox-metadata
+            {{- end }}
           env:
             - name: NODE_NAME
               valueFrom:
@@ -59,6 +101,9 @@ spec:
                   name: {{ .Values.objectStorage.credentialsSecret }}
                   key: {{ .Values.objectStorage.secretKeyKey }}
             {{- end }}
+            {{- with .Values.controller.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           securityContext:
             privileged: true
             runAsUser: 0
@@ -72,6 +117,10 @@ spec:
               mountPath: /run/containerd/runsc/k8s.io
             - name: snapshot-store
               mountPath: /var/lib/cellbox
+            {{- if $localMetadataEnabled }}
+            - name: local-metadata
+              mountPath: /var/lib/cellbox-metadata
+            {{- end }}
             - name: host-binaries
               mountPath: /usr/local/bin
               readOnly: true
@@ -92,6 +141,12 @@ spec:
           hostPath:
             path: /var/lib/cellbox
             type: DirectoryOrCreate
+        {{- if $localMetadataEnabled }}
+        - name: local-metadata
+          hostPath:
+            path: {{ $localMetadataHostPath | quote }}
+            type: DirectoryOrCreate
+        {{- end }}
         - name: host-binaries
           hostPath:
             path: /usr/local/bin

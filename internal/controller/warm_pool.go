@@ -64,6 +64,14 @@ func executionPod(w *api.ResumablePod, name string) *core.Pod {
 	return &core.Pod{ObjectMeta: meta.ObjectMeta{Name: name, Namespace: w.Namespace, Labels: map[string]string{api.OwnerLabel: string(w.UID)}}, Spec: core.PodSpec{DNSConfig: &core.PodDNSConfig{Options: []core.PodDNSConfigOption{{Name: "ndots", Value: &ndots}}}, Containers: []core.Container{container}, Volumes: hostVolumes(w), RuntimeClassName: &runtime, RestartPolicy: core.RestartPolicyNever, AutomountServiceAccountToken: &no, EnableServiceLinks: &no, Hostname: "recoverable", TerminationGracePeriodSeconds: &grace, NodeSelector: map[string]string{"kubernetes.io/hostname": w.Spec.NodeName}, SchedulingGates: []core.PodSchedulingGate{{Name: api.Gate}}}}
 }
 
+func warmExecutionPod(w *api.ResumablePod, name string) *core.Pod {
+	template := w.DeepCopy()
+	// Only the root sandbox is precreated. Its eventual child Gofer receives
+	// the claimed Box's HOME from the adapter, never from this template Box.
+	template.Spec.PersistentHome = false
+	return executionPod(template, name)
+}
+
 func (p *WarmPool) pods(ctx context.Context, options ...client.ListOption) ([]core.Pod, error) {
 	var list core.PodList
 	options = append(options, client.InNamespace(p.Namespace), client.MatchingLabels{warmLabel: "true"})
@@ -117,10 +125,6 @@ func (p *WarmPool) reconcile(ctx context.Context) error {
 	restoring := false
 	for i := range workloads.Items {
 		w := &workloads.Items[i]
-		// A prepared sandbox cannot acquire a different Box's HOME mount later.
-		if w.Spec.PersistentHome {
-			continue
-		}
 		eligible := w.Status.Phase == "Creating" || w.Status.Phase == "Running" || w.Status.Phase == "Checkpointing" || w.Status.Phase == "Suspending" || w.Status.Phase == "Suspended" || w.Status.Phase == "Restoring"
 		if w.Spec.NodeName == r.NodeName && w.DeletionTimestamp == nil && w.Status.SpecHash != "" && eligible && validate(w) == nil {
 			if w.Status.Phase == "Restoring" && time.Since(w.Status.Since.Time) < 2*time.Second {
@@ -222,7 +226,7 @@ func (p *WarmPool) reconcile(ctx context.Context) error {
 		if restoring {
 			return nil
 		}
-		pod := executionPod(templates[hash], "")
+		pod := warmExecutionPod(templates[hash], "")
 		pod.GenerateName = "cb-warm-"
 		pod.Labels = map[string]string{warmLabel: "true", api.ServingLabel: "false"}
 		pod.Annotations = map[string]string{warmSpec: hash}
@@ -231,10 +235,7 @@ func (p *WarmPool) reconcile(ctx context.Context) error {
 	return nil
 }
 
-func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (*core.Pod, error) {
-	if w.Spec.PersistentHome {
-		return nil, nil
-	}
+func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (result *core.Pod, retErr error) {
 	if p.Size == 0 {
 		return nil, nil
 	}
@@ -263,7 +264,7 @@ func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (*core.Pod,
 		if owner != nil && !owned(w, pod) {
 			continue
 		}
-		if pod.Annotations[warmSpec] != w.Status.SpecHash || pod.DeletionTimestamp != nil {
+		if pod.Annotations[warmSpec] != w.Status.SpecHash || pod.DeletionTimestamp != nil || !admittedDebugMount(w, pod) {
 			continue
 		}
 		if owned(w, pod) {

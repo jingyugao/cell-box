@@ -57,7 +57,7 @@ func TestChildIdentityDoesNotUseStateOrAllowColdRootStart(t *testing.T) {
 	node.AtomicJSON(filepath.Join(base, "tickets", "pod.json"), ticket)
 	node.AtomicJSON(filepath.Join(base, "requests", sid+".json"), ticket)
 	annotations := map[string]string{"io.kubernetes.cri.sandbox-id": sid, "io.kubernetes.cri.sandbox-uid": "pod", "io.kubernetes.cri.sandbox-name": "name", "io.kubernetes.cri.sandbox-namespace": "test"}
-	if err := a.childCreate(id, annotations); err != nil {
+	if err := a.childCreate(id, annotations, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := a.Rewrite([]string{"start", id}); err != nil {
@@ -67,7 +67,7 @@ func TestChildIdentityDoesNotUseStateOrAllowColdRootStart(t *testing.T) {
 		t.Fatal("duplicate child start accepted")
 	}
 	second := strings.Repeat("e", 64)
-	if err := a.childCreate(second, annotations); err != nil {
+	if err := a.childCreate(second, annotations, ""); err != nil {
 		t.Fatal(err)
 	}
 	os.Remove(filepath.Join(base, "tickets", "pod.json"))

@@ -60,7 +60,7 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 			return nil, err
 		}
 		if spec.Annotations["io.kubernetes.cri.container-type"] == "container" {
-			return args, a.childCreate(id, spec.Annotations)
+			return args, a.childCreate(id, spec.Annotations, bundle)
 		}
 		if spec.Annotations["io.kubernetes.cri.container-type"] != "sandbox" {
 			return nil, fmt.Errorf("unknown OCI container type")
@@ -242,7 +242,7 @@ func Main() {
 	os.Exit(1)
 }
 
-func (a Adapter) childCreate(id string, annotations map[string]string) error {
+func (a Adapter) childCreate(id string, annotations map[string]string, bundle string) error {
 	sid := annotations["io.kubernetes.cri.sandbox-id"]
 	if !sandboxID.MatchString(sid) {
 		return fmt.Errorf("invalid child sandbox ID")
@@ -260,6 +260,17 @@ func (a Adapter) childCreate(id string, annotations map[string]string) error {
 	if live != t {
 		return fmt.Errorf("child sandbox revoked")
 	}
+	if t.HomeID != "" {
+		if err := homevolume.VerifyExecution(a.Base, t.OwnerUID, t.SpecHash, t.HomeID, t.PodUID); err != nil {
+			return fmt.Errorf("persistent HOME execution: %w", err)
+		}
+		if err := a.claimHomeChild(sid, id); err != nil {
+			return err
+		}
+		if err := a.bindHome(bundle, t); err != nil {
+			return err
+		}
+	}
 	return node.AtomicJSON(filepath.Join(a.Base, "children", id+".json"), node.ChildRecord{Ticket: t, SandboxID: sid})
 }
 func (a Adapter) childStart(id string) error {
@@ -276,6 +287,14 @@ func (a Adapter) childStart(id string) error {
 	}
 	if live != c.Ticket || parent != c.Ticket {
 		return fmt.Errorf("child sandbox revoked")
+	}
+	if c.Ticket.HomeID != "" {
+		if err := homevolume.VerifyExecution(a.Base, c.Ticket.OwnerUID, c.Ticket.SpecHash, c.Ticket.HomeID, c.Ticket.PodUID); err != nil {
+			return fmt.Errorf("persistent HOME execution: %w", err)
+		}
+		if err := a.claimHomeChild(c.SandboxID, id); err != nil {
+			return err
+		}
 	}
 	path := filepath.Join(a.Base, "children", id+".json.started")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)

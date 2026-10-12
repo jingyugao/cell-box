@@ -13,6 +13,7 @@ import (
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/inventory"
 	"cellbox.local/cellbox/internal/objectstorage"
+	"cellbox.local/cellbox/internal/telemetry"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -31,7 +32,9 @@ func (b *Backend) snapshotConsumed(owner, snapshot string) bool {
 // InvalidateSnapshot removes replay eligibility synchronously. The durable
 // local marker also prevents an interrupted CR transition republishing it.
 // Only exact-version physical deletion is left to the background collector.
-func (b *Backend) InvalidateSnapshot(ctx context.Context, w *api.ResumablePod) error {
+func (b *Backend) InvalidateSnapshot(ctx context.Context, w *api.ResumablePod) (resultErr error) {
+	ctx, span := telemetry.Start(ctx, "node.snapshot.invalidate", telemetry.String("storage.backend", objectstorage.MetadataBackend(b.Objects)))
+	defer func() { telemetry.End(span, resultErr) }()
 	owner, snapshot := string(w.UID), w.Status.Snapshot
 	if !ValidID(owner) || !ValidID(snapshot) {
 		return fmt.Errorf("invalid snapshot invalidation identity")

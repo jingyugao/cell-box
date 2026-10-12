@@ -17,6 +17,7 @@ import (
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/objectstorage"
 	runtimebackend "cellbox.local/cellbox/internal/runtime"
+	"cellbox.local/cellbox/internal/telemetry"
 )
 
 const (
@@ -32,7 +33,7 @@ func checkpointObjectKey(owner, snapshot string) (string, error) {
 	return "checkpoints/" + owner + "/" + snapshot + ".tar", nil
 }
 
-func (b *Backend) uploadSnapshot(ctx context.Context, r *api.ResumablePod, snapshotPath string) error {
+func (b *Backend) uploadSnapshot(ctx context.Context, r *api.ResumablePod, snapshotPath string) (resultErr error) {
 	if b.Objects == nil {
 		return nil
 	}
@@ -49,6 +50,10 @@ func (b *Backend) uploadSnapshot(ctx context.Context, r *api.ResumablePod, snaps
 	if durable {
 		return nil
 	}
+	// A cached durable checkpoint needs no transfer. Trace only the remote
+	// verification/upload path, which can actually incur storage latency.
+	ctx, span := telemetry.Start(ctx, "node.snapshot.upload")
+	defer func() { telemetry.End(span, resultErr) }()
 	if body, _, _, getErr := b.Objects.Get(ctx, key); getErr == nil {
 		_ = body.Close()
 		b.rememberDurable(r)
@@ -165,7 +170,9 @@ func retryableStorage(err error) error {
 	return err
 }
 
-func (b *Backend) downloadSnapshot(ctx context.Context, r *api.ResumablePod, finalPath string) error {
+func (b *Backend) downloadSnapshot(ctx context.Context, r *api.ResumablePod, finalPath string) (resultErr error) {
+	ctx, span := telemetry.Start(ctx, "node.snapshot.download")
+	defer func() { telemetry.End(span, resultErr) }()
 	if b.Objects == nil {
 		return fmt.Errorf("snapshot is not cached and object storage is unavailable")
 	}

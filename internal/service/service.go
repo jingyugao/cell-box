@@ -22,22 +22,26 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Service struct {
-	objects    objectstorage.Objects
-	config     Config
-	store      *Store
-	providers  map[string]boxprovider.Provider
-	http       *http.Client
-	toolHTTP   *http.Client
-	ctx        context.Context
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
-	mu         sync.Mutex
-	admissions keyedLocks
-	gcMu       sync.Mutex
-	streams    map[string]activeStream
+	objects      objectstorage.Objects
+	config       Config
+	store        *Store
+	providers    map[string]boxprovider.Provider
+	http         *http.Client
+	toolHTTP     *http.Client
+	ctx          context.Context
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	mu           sync.Mutex
+	admissions   keyedLocks
+	observerMu   sync.Mutex
+	observers    map[string]bool
+	runtimeFeeds map[string]*runtimeFeed
+	gcMu         sync.Mutex
+	streams      map[string]activeStream
 }
 type activeStream struct {
 	boxID  string
@@ -57,6 +61,10 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 		}
 	}
 	ctx, cancel := context.WithCancel(parent)
+	if config.LocalMetadataDir != "" && config.ObjectStorage == (objectstorage.Config{}) {
+		cancel()
+		return nil, errors.New("local metadata requires object storage for checkpoint and archive content")
+	}
 	var store *Store
 	var objects objectstorage.Objects
 	var err error
@@ -67,13 +75,26 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 			return nil, lockErr
 		}
 		objects, err = objectstorage.New(ctx, config.ObjectStorage)
+		if err == nil && config.LocalMetadataDir != "" {
+			var metadata *objectstorage.Metadata
+			metadata, err = objectstorage.OpenMetadata(ctx, config.LocalMetadataDir, objects, config.InitializeLocalMetadata)
+			if err == nil {
+				objects = metadata
+			}
+		}
 		if err == nil {
 			store, err = OpenObjectStore(ctx, objects)
 		}
 		if err != nil {
 			localLock.Close()
+			if closer, ok := objects.(io.Closer); ok && objects != nil {
+				closer.Close()
+			}
 		} else {
 			store.dir, store.lock = config.DataDir, localLock
+			if closer, ok := objects.(io.Closer); ok {
+				store.objectsCloser = closer
+			}
 		}
 	} else {
 		store, err = OpenStore(config.DataDir)
@@ -106,6 +127,24 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 						if record.Operation.Result == nil {
 							record.Operation.Result = map[string]string{"deleted": "true"}
 						}
+						st.Operations[id] = record
+						continue
+					}
+				}
+				if resumeOperationKind(record.Operation.Kind) {
+					if b, ok := st.Boxes[record.Operation.TargetID]; ok && b.Box.OperationID == id && !b.ResumePending {
+						// Older state files persisted Box ownership but not the guest
+						// unquiesce recovery marker. Migrate only the exact active op.
+						b.ResumePending = true
+						b.ResumeIntentID = id
+						b.Box.Version++
+						st.Boxes[record.Operation.TargetID] = b
+					}
+					st.Operations[id] = record
+					continue
+				}
+				if record.Operation.Kind == "upgrade" {
+					if b, ok := st.Boxes[record.Operation.TargetID]; ok && b.Box.OperationID == id && b.Upgrade != nil && b.Upgrade.Nonce == id {
 						st.Operations[id] = record
 						continue
 					}
@@ -151,8 +190,8 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 			store.Close()
 			return nil, err
 		}
-		// Bound total startup probing, rather than waiting ten seconds for each
-		// unavailable runtime. Unobserved boxes stay unknown until the next GET.
+		// Seed the local projection once before opening the listener. Ongoing
+		// observation is driven by provider watches and bounded resyncs.
 		probe, stop := context.WithTimeout(ctx, 10*time.Second)
 		jobs := make(chan boxRecord, len(records))
 		for _, b := range records {
@@ -183,6 +222,9 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 		return nil, err
 	}
 	s.startRetention()
+	s.recoverResumeOperations()
+	s.recoverUpgradeOperations()
+	s.startRuntimeObservers()
 	return s, nil
 }
 func (s *Service) Done() <-chan struct{} { return s.ctx.Done() }
@@ -197,6 +239,13 @@ func (s *Service) Close() error {
 	s.wg.Wait()
 	s.http.CloseIdleConnections()
 	return s.store.Close()
+}
+func (s *Service) hasOwnedUpgradeIntent(op Operation) bool {
+	if op.Kind != "upgrade" {
+		return false
+	}
+	b, err := s.rawBox(op.TargetID)
+	return err == nil && b.Box.OperationID == op.ID && b.Upgrade != nil && b.Upgrade.Nonce == op.ID
 }
 func randomID(prefix string) string {
 	b := make([]byte, 16)
@@ -220,6 +269,9 @@ func cloneError(err error) *APIError {
 	}
 	if errors.Is(err, boxprovider.ErrUnsupported) {
 		return &APIError{Code: "UNSUPPORTED_CAPABILITY", Message: "The selected provider does not support this operation"}
+	}
+	if errors.Is(err, boxprovider.ErrStaleTransition) {
+		return &APIError{Code: "STALE_TRANSITION", Message: "Runtime transition token is stale or not yet observed"}
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return &APIError{Code: "TIMEOUT", Message: "Operation deadline exceeded; inspect resource state"}
@@ -290,6 +342,11 @@ func (s *Service) streamBusy(id string) error {
 	return nil
 }
 func (s *Service) prepareOperation(client, key, kind, target string, input any, prepare func(*State, *Operation) error) (Operation, bool, error) {
+	return s.prepareOperationContext(context.Background(), client, key, kind, target, input, prepare)
+}
+func (s *Service) prepareOperationContext(ctx context.Context, client, key, kind, target string, input any, prepare func(*State, *Operation) error) (result Operation, created bool, retErr error) {
+	ctx, span := telemetry.Start(ctx, "cellbox.operation.admission", telemetry.String("action", kind))
+	defer func() { telemetry.End(span, retErr) }()
 	if key == "" || len(key) > 200 {
 		return Operation{}, false, apiError("INVALID_REQUEST", "Idempotency-Key header (1..200 bytes) is required")
 	}
@@ -308,7 +365,7 @@ func (s *Service) prepareOperation(client, key, kind, target string, input any, 
 	fresh := false
 	update := s.store.Update
 	if kind == "resume" {
-		update = func(fn func(*State) error) error { return s.store.UpdateBox(target, fn) }
+		update = func(fn func(*State) error) error { return s.store.UpdateBoxContext(ctx, target, fn) }
 	}
 	err = update(func(st *State) error {
 		if previous, ok := st.Keys[key]; ok {
@@ -348,25 +405,53 @@ func (s *Service) launchWithCommit(op Operation, work func(context.Context) (map
 	s.launchWithCommitContext(s.ctx, op, work, commit)
 }
 func (s *Service) launchWithCommitContext(request context.Context, op Operation, work func(context.Context) (map[string]string, error), commit func(*State) error) {
+	s.launchWithCompletion(request, op, work, commit, nil)
+}
+
+func (s *Service) launchWithCompletion(request context.Context, op Operation, work func(context.Context) (map[string]string, error), commit func(*State) error, completed func(error)) {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		ctx, cancel := context.WithTimeout(telemetry.Detached(request, s.ctx), 15*time.Minute)
 		defer cancel()
-		ctx, operationSpan := telemetry.Start(ctx, "cellbox.operation."+op.Kind, telemetry.String("sandbox.id", op.TargetID), telemetry.String("operation.id", op.ID))
-		defer operationSpan.End()
+		// Resume already owns a span from admission through durable completion.
+		// Its worker and controller must share that lifetime, not a dispatch span.
+		operationSpan := trace.SpanFromContext(request)
+		if !resumeOperationKind(op.Kind) {
+			ctx, operationSpan = telemetry.Start(ctx, "cellbox.operation."+op.Kind, telemetry.String("sandbox.id", op.TargetID), telemetry.String("operation.id", op.ID))
+		}
+		var completionErr error
+		defer func() {
+			if !resumeOperationKind(op.Kind) {
+				operationSpan.End()
+			}
+			if completed != nil {
+				completed(completionErr)
+			}
+		}()
 		result, err := work(ctx)
+		// A process shutdown is not a failed lifecycle transition. Keep both the
+		// operation and Box ownership durable so the next API process can reconcile
+		// actual runtime state and continue the same intent.
+		if s.ctx.Err() != nil && (resumeOperationKind(op.Kind) || s.hasOwnedUpgradeIntent(op)) {
+			completionErr = context.Canceled
+			return
+		}
 		saveStarted := time.Now()
 		persistCtx, persistSpan := telemetry.Start(ctx, "cellbox.persist_completion")
 		update := s.store.Update
-		if op.Kind == "resume" {
+		if resumeOperationKind(op.Kind) {
 			update = func(fn func(*State) error) error { return s.store.UpdateBoxContext(persistCtx, op.TargetID, fn) }
 		}
 		saveErr := update(func(st *State) error {
+			record, exists := st.Operations[op.ID]
+			if !exists || (record.Operation.Status != "queued" && record.Operation.Status != "running") {
+				err = boxprovider.ErrStaleTransition
+				return err
+			}
 			if err == nil && commit != nil {
 				err = commit(st)
 			}
-			record := st.Operations[op.ID]
 			now := time.Now().UTC()
 			record.Operation.FinishedAt = &now
 			record.Operation.Version++
@@ -377,16 +462,32 @@ func (s *Service) launchWithCommitContext(request context.Context, op Operation,
 			} else {
 				record.Operation.Status = "succeeded"
 			}
-			st.Operations[op.ID] = record
 			if b, ok := st.Boxes[op.TargetID]; ok && b.Box.OperationID == op.ID {
-				b.Box.OperationID = ""
-				b.UpgradeImageID = ""
-				b.Box.Version++
+				preserveUpgradeIntent := op.Kind == "upgrade" && err != nil && b.Upgrade != nil && b.Upgrade.Nonce == op.ID
+				if !preserveUpgradeIntent {
+					b.Box.OperationID = ""
+					b.UpgradeImageID = ""
+					if op.Kind == "upgrade" && err == nil {
+						b.Upgrade = nil
+					}
+					b.Box.Version++
+				}
 				st.Boxes[op.TargetID] = b
+				if record.Operation.Status == "succeeded" && lifecycleOperationKind(record.Operation.Kind) {
+					box := b.Box
+					record.Operation.Box = &box
+				}
+			} else if lifecycleOperationKind(record.Operation.Kind) && err == nil {
+				record.Operation.Status = "failed"
+				record.Operation.Error = &APIError{Code: "STALE_TRANSITION", Message: "Lifecycle operation lost ownership before completion"}
+				record.Operation.Box = nil
+				err = boxprovider.ErrStaleTransition
 			}
+			st.Operations[op.ID] = record
 			return nil
 		})
 		telemetry.End(persistSpan, saveErr)
+		completionErr = errors.Join(err, saveErr)
 		if err != nil || saveErr != nil {
 			operationSpan.SetStatus(codes.Error, "")
 		}
@@ -394,7 +495,7 @@ func (s *Service) launchWithCommitContext(request context.Context, op Operation,
 			operationSpan.AddEvent("cellbox.operation.published")
 		}
 		runtimeTiming(op.TargetID, "cellbox.persist_completion", saveStarted, saveErr)
-		if saveErr != nil {
+		if saveErr != nil && !errors.Is(saveErr, boxprovider.ErrStaleTransition) {
 			fmt.Printf("Cellbox could not persist operation completion %s\n", op.ID)
 		}
 	}()
@@ -436,14 +537,7 @@ func (s *Service) saveHandle(id string, handle boxprovider.Handle) error {
 		return nil
 	})
 }
-func (s *Service) observe(ctx context.Context, b boxRecord) (Box, error) {
-	if b.Upgrade != nil {
-		var err error
-		b, err = s.commitDiskUpgrade(ctx, b)
-		if err != nil {
-			return Box{}, err
-		}
-	}
+func (s *Service) observe(ctx context.Context, b boxRecord) (result Box, retErr error) {
 	for attempt := 0; attempt < 3; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return Box{}, err
@@ -460,63 +554,7 @@ func (s *Service) observe(ctx context.Context, b boxRecord) (Box, error) {
 		if missing {
 			ob.Phase = "deleted"
 		}
-		updated, err := s.store.UpdateObservedBox(b, func(current *boxRecord) (bool, error) {
-			if err := ctx.Err(); err != nil {
-				return false, err
-			}
-			previousError := current.Box.Error
-			phase := ob.Phase
-			if phase == "deleted" {
-				if current.Box.Phase == "deleting" || current.Box.Phase == "deleted" {
-					phase = "deleted"
-				} else {
-					phase = "failed"
-					current.Box.Error = &APIError{Code: "RUNTIME_LOST", Message: "Runtime disappeared; automatic cold restart is disabled"}
-				}
-			}
-			if current.Staged && phase == "running" {
-				if current.Box.Phase == "failed" {
-					phase = "failed"
-				} else if current.RestoreComplete {
-					phase = "staged"
-				} else {
-					phase = "restoring"
-				}
-			}
-			if current.Box.Phase == "deleting" && phase != "deleted" {
-				phase = "deleting"
-			}
-			target := map[string]string{"freezing": "frozen", "unfreezing": "running", "suspending": "suspended", "resuming": "running", "rebuilding": "running", "upgrading": "staged"}[current.Box.Phase]
-			if current.Box.OperationID != "" && target != "" && phase != target && phase != "failed" && phase != "deleted" {
-				phase = current.Box.Phase
-			}
-			changed := current.Box.Phase != phase
-			if previousError != nil && current.Box.Error != nil {
-				changed = changed || *previousError != *current.Box.Error
-			} else {
-				changed = changed || previousError != current.Box.Error
-			}
-			// The provider generation is authoritative even when there is no
-			// current execution identity (for example, a suspended ResumablePod).
-			// Keep it monotonic so a stale observation cannot weaken generation
-			// fencing after a newer execution has already been observed.
-			if ob.Generation > current.Box.Generation {
-				current.Box.Generation = ob.Generation
-				changed = true
-			}
-			if ob.ExecutionID != "" && current.ExecutionID != ob.ExecutionID {
-				current.ExecutionID = ob.ExecutionID
-				if ob.Generation == 0 {
-					current.Box.Generation++
-				}
-				changed = true
-			}
-			current.Box.Phase = phase
-			if changed {
-				current.Box.Version++
-			}
-			return changed, nil
-		})
+		updated, err := s.applyRuntimeObservation(ctx, b, ob, missing)
 		if errors.Is(err, errBoxObservationConflict) {
 			if ctx.Err() != nil {
 				return Box{}, ctx.Err()
@@ -530,9 +568,106 @@ func (s *Service) observe(ctx context.Context, b boxRecord) (Box, error) {
 		if err != nil {
 			return Box{}, err
 		}
-		return updated.Box, nil
+		return updated, nil
 	}
 	return Box{}, apiError("CONFLICT", "Box changed repeatedly while observing runtime")
+}
+
+func (s *Service) applyRuntimeObservation(ctx context.Context, b boxRecord, ob boxprovider.Observation, missing bool) (Box, error) {
+	updated, err := s.store.UpdateObservedBox(b, func(current *boxRecord) (bool, error) {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		previousError := current.Box.Error
+		phase := ob.Phase
+		if phase == "deleted" {
+			if current.Box.Phase == "deleting" || current.Box.Phase == "deleted" {
+				phase = "deleted"
+			} else {
+				phase = "failed"
+				current.Box.Error = &APIError{Code: "RUNTIME_LOST", Message: "Runtime disappeared; automatic cold restart is disabled"}
+			}
+		}
+		if current.Staged && phase == "running" {
+			if current.Box.Phase == "failed" {
+				phase = "failed"
+			} else if current.RestoreComplete {
+				phase = "staged"
+			} else {
+				phase = "restoring"
+			}
+		}
+		if current.Box.Phase == "deleting" && phase != "deleted" {
+			phase = "deleting"
+		}
+		target := map[string]string{"freezing": "frozen", "unfreezing": "running", "suspending": "suspended", "resuming": "running", "rebuilding": "running", "upgrading": "staged"}[current.Box.Phase]
+		if current.Box.OperationID != "" && target != "" && phase != target && phase != "failed" && phase != "deleted" {
+			phase = current.Box.Phase
+		}
+		versionChanged := false
+		if previousError != nil && current.Box.Error != nil {
+			versionChanged = versionChanged || *previousError != *current.Box.Error
+		} else {
+			versionChanged = versionChanged || previousError != current.Box.Error
+		}
+		// The provider generation is authoritative even when there is no
+		// current execution identity (for example, a suspended ResumablePod).
+		// Keep it monotonic so a stale observation cannot weaken generation
+		// fencing after a newer execution has already been observed.
+		if ob.Generation > current.Box.Generation {
+			current.Box.Generation = ob.Generation
+			versionChanged = true
+		}
+		if current.ExecutionID != ob.ExecutionID {
+			current.ExecutionID = ob.ExecutionID
+			if ob.ExecutionID != "" && ob.Generation == 0 {
+				current.Box.Generation++
+			}
+			versionChanged = true
+		}
+		current.Box.ExecutionID = current.ExecutionID
+		if current.TransitionID != ob.TransitionID {
+			current.TransitionID = ob.TransitionID
+			versionChanged = true
+		}
+		if current.ObservedTransitionID != ob.ObservedTransitionID {
+			current.ObservedTransitionID = ob.ObservedTransitionID
+			versionChanged = true
+		}
+		if current.ResumePending {
+			if ob.Phase == "running" {
+				if current.Box.OperationID == "" && !current.ResumeNeedsGuest &&
+					((current.ResumeIntentID != "" && ob.TransitionID == current.ResumeIntentID && ob.ObservedTransitionID == current.ResumeIntentID) || (ob.TransitionID == "" && ob.ObservedTransitionID == "")) {
+					// Once the Guest stage is confirmed, keep its execution fence.
+					// Observation must never retarget a failed repair to another Pod.
+					current.ResumeNeedsGuest = true
+					current.ResumeExecutionID = ob.ExecutionID
+					current.ResumeTransitionID = ob.TransitionID
+					current.ResumeObservedTransitionID = ob.ObservedTransitionID
+					versionChanged = true
+				}
+				if current.Box.OperationID == "" || current.ResumeNeedsGuest {
+					phase = "resuming"
+				}
+			} else if ob.Phase == "suspended" && current.ResumeNeedsGuest {
+				current.ResumeNeedsGuest = false
+				versionChanged = true
+			}
+		}
+		versionChanged = versionChanged || current.Box.Phase != phase
+		current.Box.Phase = phase
+		if versionChanged {
+			current.Box.Version++
+		}
+		persistChanged := versionChanged
+		if current.Box.ObservedAt == nil || time.Since(*current.Box.ObservedAt) >= 5*time.Second || versionChanged {
+			now := time.Now().UTC()
+			current.Box.ObservedAt = &now
+			persistChanged = true
+		}
+		return persistChanged, nil
+	})
+	return updated.Box, err
 }
 func (s *Service) connection(ctx context.Context, b boxRecord) (boxprovider.Connection, error) {
 	p := s.providers[b.Profile.Provider]
@@ -619,6 +754,10 @@ func (s *Service) guestAction(ctx context.Context, b boxRecord, path string) err
 	return guestSuccess(res)
 }
 func (s *Service) waitState(ctx context.Context, id, want string, checkHealth bool) (Box, error) {
+	return s.waitStateTransition(ctx, id, want, checkHealth, "")
+}
+
+func (s *Service) waitStateTransition(ctx context.Context, id, want string, checkHealth bool, transitionID string) (Box, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(s.config.StartupTimeoutSeconds)*time.Second)
 	defer cancel()
 	var changes <-chan struct{}
@@ -633,7 +772,14 @@ func (s *Service) waitState(ctx context.Context, id, want string, checkHealth bo
 			return Box{}, err
 		}
 		box, err := s.observe(ctx, b)
-		if err == nil && box.Phase == want {
+		transitionReady := transitionID == ""
+		if err == nil && transitionID != "" {
+			latest, latestErr := s.rawBox(id)
+			transitionReady = latestErr == nil && latest.Box.Version == box.Version &&
+				latest.Box.OperationID == transitionID && latest.TransitionID == transitionID &&
+				latest.ObservedTransitionID == transitionID
+		}
+		if err == nil && box.Phase == want && transitionReady {
 			if !checkHealth || (want != "running" && want != "staged" && want != "restoring") {
 				return box, nil
 			}
@@ -888,17 +1034,36 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 func (s *Service) action(client, key, id, action string) (Operation, error) {
 	return s.actionContext(context.Background(), client, key, id, action)
 }
-func (s *Service) actionContext(request context.Context, client, key, id, action string) (Operation, error) {
+func (s *Service) actionContext(request context.Context, client, key, id, action string) (result Operation, retErr error) {
+	return s.actionContextWithGeneration(request, client, key, id, action, nil)
+}
+func (s *Service) actionContextWithGeneration(request context.Context, client, key, id, action string, expectedGeneration *uint64) (result Operation, retErr error) {
+	var total trace.Span
+	handedOff := false
+	if action == "resume" {
+		request, total = telemetry.Start(request, "cellbox.resume.total", telemetry.String("sandbox.id", id))
+		defer func() {
+			if !handedOff {
+				telemetry.End(total, retErr)
+			}
+		}()
+	}
 	allowed := map[string]bool{"freeze": true, "unfreeze": true, "suspend": true, "resume": true, "destroy": true, "activate": true, "reconcile": true, "rebuild": true}
 	if !allowed[action] {
 		return Operation{}, apiError("INVALID_REQUEST", "Unknown lifecycle action")
 	}
 	var b boxRecord
-	op, fresh, err := s.prepareOperation(client, key, action, id, nil, func(st *State, op *Operation) error {
+	op, fresh, err := s.prepareOperationContext(request, client, key, action, id, nil, func(st *State, op *Operation) error {
 		var err error
 		b, err = owned(st, client, id)
 		if err != nil {
 			return err
+		}
+		// This check runs only for a fresh idempotency key and in the same Box
+		// transaction as phase admission. Existing keys replay their original
+		// operation before this callback, including legacy no-body resume keys.
+		if expectedGeneration != nil && *expectedGeneration != b.Box.Generation {
+			return apiError("STALE_GENERATION", "Lifecycle request targets another Box generation")
 		}
 		if err = busy(st, b, true); err != nil {
 			return err
@@ -941,6 +1106,14 @@ func (s *Service) actionContext(request context.Context, client, key, id, action
 		}
 		b.Box.OperationID = op.ID
 		b.Box.Error = nil
+		if action == "resume" {
+			b.ResumePending = true
+			b.ResumeNeedsGuest = false
+			b.ResumeIntentID = op.ID
+			b.ResumeExecutionID = ""
+			b.ResumeTransitionID = ""
+			b.ResumeObservedTransitionID = ""
+		}
 		if phase := map[string]string{"destroy": "deleting", "freeze": "freezing", "unfreeze": "unfreezing", "suspend": "suspending", "resume": "resuming", "rebuild": "rebuilding"}[action]; phase != "" {
 			b.Box.Phase = phase
 		}
@@ -948,10 +1121,26 @@ func (s *Service) actionContext(request context.Context, client, key, id, action
 		st.Boxes[id] = b
 		return nil
 	})
+	if total != nil {
+		total.SetAttributes(telemetry.String("operation.id", op.ID))
+		// An idempotent replay observes an existing operation, not a new restore.
+		if err == nil && !fresh {
+			total.SetName("cellbox.resume.replay")
+		}
+	}
+	var completed func(error)
+	if total != nil && err == nil && fresh {
+		completed = func(err error) { telemetry.End(total, err) }
+		handedOff = true
+	}
 	if err != nil || !fresh {
 		return op, err
 	}
-	s.launchWithCommitContext(request, op, func(ctx context.Context) (map[string]string, error) {
+	if action == "resume" {
+		s.launchResumeOperation(request, op, b, false, completed)
+		return op, nil
+	}
+	s.launchWithCompletion(request, op, func(ctx context.Context) (map[string]string, error) {
 		p := s.providers[b.Profile.Provider]
 		switch action {
 		case "destroy":
@@ -1008,16 +1197,31 @@ func (s *Service) actionContext(request context.Context, client, key, id, action
 					return nil, err
 				}
 			}
-			if err := p.Action(ctx, b.Handle, action); err != nil {
+			// This phase owns both command dispatch and observation. The controller
+			// receives its context through the CR annotation and is a child of the
+			// whole runtime transition, not the short K8s patch that triggers it.
+			runtimeCtx, runtimeSpan := telemetry.Start(ctx, "cellbox.runtime.transition", telemetry.String("action", action))
+			var actionErr error
+			if transitionProvider, ok := p.(boxprovider.TransitionProvider); ok && op.ID != "" {
+				actionErr = transitionProvider.ActionTransition(runtimeCtx, b.Handle, action, b.TransitionID, op.ID)
+			} else {
+				actionErr = p.Action(runtimeCtx, b.Handle, action)
+			}
+			if actionErr != nil {
+				telemetry.End(runtimeSpan, actionErr)
 				if action == "suspend" {
 					_ = s.guestAction(ctx, b, "/v1/unquiesce")
 				}
-				return nil, err
+				return nil, actionErr
 			}
+			runtimeSpan.AddEvent("cellbox.runtime.requested")
 			want := map[string]string{"freeze": "frozen", "unfreeze": "running", "suspend": "suspended", "resume": "running", "rebuild": "running"}[action]
-			waitCtx, waitSpan := telemetry.Start(ctx, "cellbox.wait_runtime")
-			_, waitErr := s.waitState(waitCtx, id, want, action != "resume")
-			telemetry.End(waitSpan, waitErr)
+			transitionID := ""
+			if _, ok := p.(boxprovider.TransitionProvider); ok {
+				transitionID = op.ID
+			}
+			_, waitErr := s.waitStateTransition(runtimeCtx, id, want, action != "resume", transitionID)
+			telemetry.End(runtimeSpan, waitErr)
 			if err := waitErr; err != nil {
 				return nil, err
 			}
@@ -1064,7 +1268,7 @@ func (s *Service) actionContext(request context.Context, client, key, id, action
 		v.Box.Version++
 		st.Boxes[id] = v
 		return nil
-	})
+	}, completed)
 	return op, nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"cellbox.local/cellbox/internal/imagecache"
 	"cellbox.local/cellbox/internal/node"
 	"cellbox.local/cellbox/internal/objectstorage"
+	"cellbox.local/cellbox/internal/telemetry"
 	"cellbox.local/cellbox/internal/version"
 	"context"
 	"encoding/json"
@@ -23,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metrics "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"time"
 )
 
 func main() {
@@ -32,7 +34,7 @@ func main() {
 	}
 }
 func run() error {
-	var nodeName, namespace, leaderNamespace, socket, objectStorageConfig string
+	var nodeName, namespace, leaderNamespace, socket, objectStorageConfig, localMetadataDir string
 	var showVersion, hostMountNamespace bool
 	var warmPoolSize int
 	flag.IntVar(&warmPoolSize, "warm-pool-size", 2, "maximum unassigned warm Pods per node (0 disables, one extra during rotation)")
@@ -43,6 +45,7 @@ func run() error {
 	flag.StringVar(&leaderNamespace, "leader-election-namespace", "", "leader election namespace (defaults to managed namespace)")
 	flag.StringVar(&socket, "cri-socket", "/run/containerd/containerd.sock", "CRI Unix socket")
 	flag.StringVar(&objectStorageConfig, "object-storage-config", "", "path to S3-compatible checkpoint storage configuration JSON")
+	flag.StringVar(&localMetadataDir, "local-metadata-dir", "", "initialized shared node metadata directory; checkpoint content remains in object storage")
 	flag.Parse()
 	if showVersion {
 		fmt.Println(version.String("cellbox-node-controller"))
@@ -58,6 +61,16 @@ func run() error {
 		leaderNamespace = namespace
 	}
 	ctrl.SetLogger(zap.New())
+	signalContext := ctrl.SetupSignalHandler()
+	shutdownTracing, err := telemetry.InitializeNamed(signalContext, "cellbox-controller")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(ctx)
+	}()
 	scheme := runtime.NewScheme()
 	core.AddToScheme(scheme)
 	api.AddToScheme(scheme)
@@ -84,6 +97,14 @@ func run() error {
 		}
 		backend.Objects = objects
 	}
+	if localMetadataDir != "" {
+		metadata, err := objectstorage.OpenMetadata(signalContext, localMetadataDir, backend.Objects, false)
+		if err != nil {
+			return err
+		}
+		defer metadata.Close()
+		backend.Objects = metadata
+	}
 	backend.HostMountNamespace = hostMountNamespace
 	r := &controller.Reconciler{Client: mgr.GetClient(), Runtime: backend, NodeName: nodeName}
 	// Uncached reads avoid stale Pod adoption/deletion during host side effects.
@@ -109,5 +130,5 @@ func run() error {
 		Complete(&controller.ImageCacheReconciler{Client: direct, Runtime: backend, NodeName: nodeName}); err != nil {
 		return err
 	}
-	return mgr.Start(ctrl.SetupSignalHandler())
+	return mgr.Start(signalContext)
 }

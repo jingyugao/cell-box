@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"golang.org/x/sys/unix"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -14,18 +15,19 @@ import (
 type Store struct {
 	// Writers remain serialized for cross-resource invariants. Readers only hold
 	// mu while copying committed memory, never while object storage is accessed.
-	writeMu   sync.RWMutex
-	boxWrites keyedLocks
-	records   *recordStore
-	objects   objectstorage.Objects
-	etag      string
-	failure   error
-	onFailure func()
-	mu        sync.Mutex
-	changes   chan struct{}
-	state     State
-	dir       string
-	lock      *os.File
+	writeMu       sync.RWMutex
+	boxWrites     keyedLocks
+	records       *recordStore
+	objects       objectstorage.Objects
+	etag          string
+	failure       error
+	onFailure     func()
+	mu            sync.Mutex
+	changes       chan struct{}
+	state         State
+	dir           string
+	lock          *os.File
+	objectsCloser io.Closer
 }
 
 func lockDataDirectory(dir string) (*os.File, error) {
@@ -138,6 +140,92 @@ func (s *Store) BoxRecords(client string, ids []string) ([]boxRecord, error) {
 	return out, nil
 }
 
+// RuntimeBoxRecords returns isolated Box projections for background provider
+// observation without serializing operations, idempotency keys or other state.
+func (s *Store) RuntimeBoxRecords() ([]boxRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failure != nil {
+		return nil, s.failure
+	}
+	out := make([]boxRecord, 0, len(s.state.Boxes))
+	for _, record := range s.state.Boxes {
+		if record.Handle.ID == "" || record.Box.Phase == "deleted" {
+			continue
+		}
+		copy, err := cloneBoxRecord(record)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, copy)
+	}
+	return out, nil
+}
+
+type boxAdmissionSnapshot struct {
+	Box                   boxRecord
+	Key                   keyRecord
+	KeyExists             bool
+	KeyOperation          Operation
+	KeyOperationExists    bool
+	ActiveOperation       Operation
+	ActiveOperationExists bool
+}
+
+// BoxAdmission reads one Box and only the operations referenced by its current
+// operation ID or the caller's idempotency key. It avoids cloning unrelated
+// history on lifecycle request paths.
+func (s *Store) BoxAdmission(client, id, key string) (boxAdmissionSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failure != nil {
+		return boxAdmissionSnapshot{}, s.failure
+	}
+	box, ok := s.state.Boxes[id]
+	if !ok || box.ClientID != client {
+		return boxAdmissionSnapshot{}, apiError("NOT_FOUND", "Box not found")
+	}
+	boxCopy, err := cloneBoxRecord(box)
+	if err != nil {
+		return boxAdmissionSnapshot{}, err
+	}
+	out := boxAdmissionSnapshot{Box: boxCopy}
+	cloneOperation := func(id string) (Operation, bool, error) {
+		if id == "" {
+			return Operation{}, false, nil
+		}
+		record, ok := s.state.Operations[id]
+		if !ok || record.ClientID != client {
+			return Operation{}, false, nil
+		}
+		data, err := json.Marshal(record.Operation)
+		if err != nil {
+			return Operation{}, false, err
+		}
+		var copy Operation
+		if err = json.Unmarshal(data, &copy); err != nil {
+			return Operation{}, false, err
+		}
+		return copy, true, nil
+	}
+	if box.Box.OperationID != "" {
+		out.ActiveOperation, out.ActiveOperationExists, err = cloneOperation(box.Box.OperationID)
+		if err != nil {
+			return boxAdmissionSnapshot{}, err
+		}
+	}
+	if key != "" {
+		out.Key, out.KeyExists = s.state.Keys[key]
+		if out.KeyExists {
+			out.KeyOperation, out.KeyOperationExists, err = cloneOperation(out.Key.OperationID)
+			if err != nil {
+				return boxAdmissionSnapshot{}, err
+			}
+		}
+	}
+	return out, nil
+}
+
 func (s *Store) BoxRecord(id string) (boxRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -179,7 +267,11 @@ func (s *Store) Operation(client, id string) (Operation, error) {
 func sameObservationBase(a, b boxRecord) bool {
 	return a.Box.Version == b.Box.Version && a.Box.Generation == b.Box.Generation &&
 		a.Box.Phase == b.Box.Phase && a.Box.OperationID == b.Box.OperationID &&
-		a.Handle == b.Handle && a.ExecutionID == b.ExecutionID &&
+		a.Handle == b.Handle && a.ExecutionID == b.ExecutionID && a.TransitionID == b.TransitionID &&
+		a.ObservedTransitionID == b.ObservedTransitionID &&
+		a.ResumePending == b.ResumePending && a.ResumeNeedsGuest == b.ResumeNeedsGuest &&
+		a.ResumeIntentID == b.ResumeIntentID && a.ResumeExecutionID == b.ResumeExecutionID &&
+		a.ResumeTransitionID == b.ResumeTransitionID && a.ResumeObservedTransitionID == b.ResumeObservedTransitionID &&
 		a.Staged == b.Staged && a.RestoreArchiveID == b.RestoreArchiveID &&
 		a.RestoreComplete == b.RestoreComplete && a.AcceptImageChange == b.AcceptImageChange
 }
@@ -231,10 +323,20 @@ func (s *Store) UpdateObservedBox(base boxRecord, update func(*boxRecord) (bool,
 	return cloneBoxRecord(next)
 }
 func (s *Store) Close() error {
-	if s.lock == nil {
-		return nil
+	var closeErr error
+	if s.objectsCloser != nil {
+		closeErr = s.objectsCloser.Close()
+		s.objectsCloser = nil
 	}
-	return s.lock.Close()
+	if s.lock == nil {
+		return closeErr
+	}
+	err := s.lock.Close()
+	s.lock = nil
+	if closeErr != nil {
+		return closeErr
+	}
+	return err
 }
 func (s *Store) View(fn func(State) error) error {
 	s.mu.Lock()

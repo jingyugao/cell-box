@@ -308,7 +308,7 @@ func TestBoxQueriesObserveLifecycleWithoutGuestAndFilterOwnedIDs(t *testing.T) {
 	wantStatus(t, status, 404, body)
 }
 
-func TestBoxQueryProviderFailureDoesNotChangeSavedLifecycle(t *testing.T) {
+func TestBoxQueryDoesNotDependOnProviderAvailability(t *testing.T) {
 	f := newCoreFixture(t)
 	_, box := f.createBox(t, "query-inspect-error")
 	before, err := f.service.rawBox(box.ID)
@@ -319,7 +319,11 @@ func TestBoxQueryProviderFailureDoesNotChangeSavedLifecycle(t *testing.T) {
 	f.provider.inspectErr = errors.New("provider unavailable")
 	f.provider.mu.Unlock()
 	status, body := f.call(t, "GET", "/v1/boxes/"+box.ID, testClientToken, "", nil)
-	wantStatus(t, status, 502, body)
+	wantStatus(t, status, 200, body)
+	got := decodeResponse[Box](t, body)
+	if got.Phase != before.Box.Phase {
+		t.Fatalf("GET returned a phase outside the saved projection: before=%+v got=%+v", before.Box, got)
+	}
 	after, err := f.service.rawBox(box.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -553,6 +557,13 @@ func TestRESTRejectsStaleGenerationBeforeGuestExec(t *testing.T) {
 	f := newCoreFixture(t)
 	_, box := f.createBox(t, "create-generation")
 	f.provider.setExecutionID("fake-container/start-two")
+	base, err := f.service.rawBox(box.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.service.observe(context.Background(), base); err != nil {
+		t.Fatal(err)
+	}
 	status, body := f.call(t, "GET", "/v1/boxes/"+box.ID, testClientToken, "", nil)
 	wantStatus(t, status, 200, body)
 	latest := decodeResponse[Box](t, body)

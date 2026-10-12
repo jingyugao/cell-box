@@ -134,11 +134,18 @@ func (s *Service) commitDiskUpgrade(ctx context.Context, b boxRecord) (boxRecord
 	if b.Upgrade == nil {
 		return b, nil
 	}
+	if b.Upgrade.RuntimeCommitted {
+		return b, nil
+	}
+	if b.Box.OperationID == "" || b.Box.OperationID != b.Upgrade.Nonce {
+		return b, boxprovider.ErrStaleTransition
+	}
+	nonce := b.Upgrade.Nonce
 	provider, ok := s.providers[b.Profile.Provider].(boxprovider.HomeUpgradeProvider)
 	if !ok {
 		return b, boxprovider.ErrUnsupported
 	}
-	handle, err := provider.Upgrade(ctx, b.Handle, runtimeSpec(b), b.Upgrade.Nonce)
+	handle, err := provider.Upgrade(ctx, b.Handle, runtimeSpec(b), nonce)
 	if err != nil {
 		return b, err
 	}
@@ -147,14 +154,53 @@ func (s *Service) commitDiskUpgrade(ctx context.Context, b boxRecord) (boxRecord
 		if !ok {
 			return apiError("NOT_FOUND", "Box not found")
 		}
-		if current.Upgrade != nil && current.Upgrade.Nonce == b.Upgrade.Nonce {
-			current.Handle = handle
-			current.Upgrade = nil
-			current.Box.Version++
-			st.Boxes[b.Box.ID] = current
+		if current.Box.OperationID != nonce || current.Upgrade == nil || current.Upgrade.Nonce != nonce {
+			return boxprovider.ErrStaleTransition
 		}
+		current.Handle = handle
+		current.Upgrade.RuntimeCommitted = true
+		current.Box.Version++
+		st.Boxes[b.Box.ID] = current
 		b = current
 		return nil
 	})
 	return b, err
+}
+
+// recoverUpgradeOperations replays only a persisted, Box-owned disk upgrade
+// intent. Earlier interrupted preparation phases are never guessed or rerun.
+func (s *Service) recoverUpgradeOperations() {
+	var pending []Operation
+	_ = s.store.View(func(st State) error {
+		for _, record := range st.Operations {
+			op := record.Operation
+			if op.Kind != "upgrade" || (op.Status != "running" && op.Status != "queued") {
+				continue
+			}
+			b, ok := st.Boxes[op.TargetID]
+			if ok && b.ClientID == record.ClientID && b.Box.OperationID == op.ID && b.Upgrade != nil && b.Upgrade.Nonce == op.ID {
+				pending = append(pending, op)
+			}
+		}
+		return nil
+	})
+	for _, op := range pending {
+		s.launchWithCompletion(s.ctx, op, func(ctx context.Context) (map[string]string, error) {
+			b, err := s.rawBox(op.TargetID)
+			if err != nil {
+				return nil, err
+			}
+			if _, err = s.commitDiskUpgrade(ctx, b); err != nil {
+				return nil, err
+			}
+			if _, err = s.waitState(ctx, op.TargetID, "staged", true); err != nil {
+				return nil, err
+			}
+			b, err = s.rawBox(op.TargetID)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]string{"boxId": op.TargetID, "image": b.Box.Image, "importedImageId": b.Box.ImportedImageID}, nil
+		}, nil, nil)
+	}
 }

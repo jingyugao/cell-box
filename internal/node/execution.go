@@ -7,6 +7,11 @@ import (
 	"time"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
+	"cellbox.local/cellbox/internal/telemetry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	core "k8s.io/api/core/v1"
 	cri "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
@@ -14,7 +19,18 @@ import (
 // WaitWarmStarted reads the local CRI socket, avoiding kubelet's asynchronous
 // Pod-status publication. Only actively restoring slots are polled, bounded
 // to one second; slower restores are retried by normal reconciliation.
-func (b *Backend) WaitWarmStarted(ctx context.Context, w *api.ResumablePod, p *core.Pod) (*api.Execution, error) {
+func (b *Backend) WaitWarmStarted(ctx context.Context, w *api.ResumablePod, p *core.Pod) (execution *api.Execution, resultErr error) {
+	ctx, span := telemetry.Start(ctx, "node.warm.wait_started")
+	var polls, slowPolls int64
+	var maxPoll time.Duration
+	defer func() {
+		span.SetAttributes(
+			attribute.Int64("warm.poll_count", polls),
+			attribute.Int64("warm.slow_poll_count", slowPolls),
+			attribute.Int64("warm.max_poll_ms", maxPoll.Milliseconds()),
+		)
+		telemetry.End(span, resultErr)
+	}()
 	lease, err := b.WarmStatus(ctx, p)
 	if err != nil {
 		return nil, err
@@ -27,7 +43,26 @@ func (b *Backend) WaitWarmStarted(ctx context.Context, w *api.ResumablePod, p *c
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	for {
+		pollStart := time.Now()
 		e, err := b.warmExecution(waitCtx, w, p, lease.SID)
+		pollDuration := time.Since(pollStart)
+		polls++
+		if pollDuration > maxPoll {
+			maxPoll = pollDuration
+		}
+		// Keep normal 20ms readiness probes inside one aggregate span. Create a
+		// retrospective span only when an RPC sequence itself took at least 50ms.
+		if pollDuration >= 50*time.Millisecond {
+			slowPolls++
+			_, slowSpan := otel.Tracer("cellbox.runtime").Start(ctx, "node.warm.cri_poll",
+				trace.WithTimestamp(pollStart),
+				trace.WithAttributes(attribute.Int64("duration_ms", pollDuration.Milliseconds())),
+			)
+			if err != nil {
+				slowSpan.SetStatus(codes.Error, "")
+			}
+			slowSpan.End(trace.WithTimestamp(pollStart.Add(pollDuration)))
+		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -35,6 +70,9 @@ func (b *Backend) WaitWarmStarted(ctx context.Context, w *api.ResumablePod, p *c
 			return nil, nil
 		}
 		if err != nil || e != nil {
+			if err == nil && e != nil {
+				b.recordRuntimeTrace(ctx, lease.SID)
+			}
 			return e, err
 		}
 		select {

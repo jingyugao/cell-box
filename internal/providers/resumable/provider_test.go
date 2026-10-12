@@ -149,7 +149,7 @@ func fixture(t *testing.T) (*Provider, boxprovider.Spec, context.Context) {
 	if err := api.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	c := uidClient{fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&api.ResumablePod{}, &core.Pod{}).Build()}
+	c := uidClient{fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&api.ResumablePod{}, &core.Pod{}).WithIndex(&api.ResumablePod{}, "metadata.name", func(obj client.Object) []string { return []string{obj.GetName()} }).Build()}
 	p := New(c)
 	s := boxprovider.Spec{BoxID: "box-1", Namespace: "boxes", NodeName: "node-a", Image: "registry.example.invalid/prepared@sha256:" + strings.Repeat("a", 64), Config: guestapi.DefaultConfig(), CPU: 0.5, MemoryMiB: 256, Staged: true}
 	return p, s, context.Background()

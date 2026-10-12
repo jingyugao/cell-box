@@ -18,6 +18,8 @@ import (
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/homevolume"
 	"cellbox.local/cellbox/internal/runtime"
+	"cellbox.local/cellbox/internal/telemetry"
+	"go.opentelemetry.io/otel/trace"
 	core "k8s.io/api/core/v1"
 	errors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -45,6 +47,10 @@ type executionRuntime interface {
 	WaitWarmStarted(context.Context, *api.ResumablePod, *core.Pod) (*api.Execution, error)
 }
 
+type guestResumeRuntime interface {
+	ResumeGuest(context.Context, *api.ResumablePod, *core.Pod) error
+}
+
 type homeRebuilder interface {
 	Rebuild(context.Context, *api.ResumablePod) error
 }
@@ -65,7 +71,7 @@ type workspaceArchiveRuntime interface {
 	CaptureWorkspaceArchive(context.Context, *api.ResumablePod, api.ArchiveCaptureRequest) (api.ArchiveCaptureResult, error)
 }
 
-func (r *Reconciler) syncInventoryPhase(ctx context.Context, w *api.ResumablePod, phase string) error {
+func (r *Reconciler) syncInventoryPhase(ctx context.Context, w *api.ResumablePod, phase string) (retErr error) {
 	syncer, ok := r.Runtime.(inventoryRuntime)
 	if !ok {
 		return nil
@@ -79,7 +85,7 @@ var again = ctrl.Result{RequeueAfter: time.Second}
 var errServiceCollision = stderrors.New("Service name is already owned by another workload")
 var pullableImage = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}$`)
 
-func (r *Reconciler) phase(ctx context.Context, w *api.ResumablePod, phase, message string, podReady ...bool) (ctrl.Result, error) {
+func (r *Reconciler) phase(ctx context.Context, w *api.ResumablePod, phase, message string, podReady ...bool) (traceResult ctrl.Result, retErr error) {
 	w.Status.Message = message
 	if err := r.syncInventoryPhase(ctx, w, phase); err != nil {
 		return again, err
@@ -90,6 +96,7 @@ func (r *Reconciler) phase(ctx context.Context, w *api.ResumablePod, phase, mess
 	w.Status.Phase = phase
 	w.Status.Message = message
 	w.Status.ObservedGeneration = w.Generation
+	w.Status.ObservedTransitionID = w.Spec.TransitionID
 	ready := meta.ConditionFalse
 	if phase == "Running" {
 		if len(podReady) == 0 {
@@ -192,7 +199,14 @@ func admittedDebugMount(w *api.ResumablePod, p *core.Pod) bool {
 	if len(p.Spec.Containers) != 1 {
 		return false
 	}
-	wantVolumes, wantMounts := hostVolumes(w), hostMounts(w)
+	template := w
+	if p.Labels[warmLabel] == "true" {
+		// Pooled Pods must not expose a template Box's HOME. The authorized
+		// child OCI create binds HOME after this Pod has been claimed.
+		template = w.DeepCopy()
+		template.Spec.PersistentHome = false
+	}
+	wantVolumes, wantMounts := hostVolumes(template), hostMounts(template)
 	if len(p.Spec.Volumes) != len(wantVolumes) || len(p.Spec.Containers[0].VolumeMounts) != len(wantMounts) {
 		return false
 	}
@@ -261,7 +275,7 @@ func owned(w *api.ResumablePod, o client.Object) bool {
 	ref := meta.GetControllerOf(o)
 	return ref != nil && ref.UID == w.UID && ref.Kind == api.Kind && ref.APIVersion == api.GroupVersion.String()
 }
-func (r *Reconciler) pod(ctx context.Context, w *api.ResumablePod) (*core.Pod, error) {
+func (r *Reconciler) pod(ctx context.Context, w *api.ResumablePod) (traceResult *core.Pod, retErr error) {
 	if w.Status.PodName == "" {
 		return nil, nil
 	}
@@ -319,7 +333,7 @@ func (r *Reconciler) startupFailure(ctx context.Context, p *core.Pod) string {
 	}
 	return message
 }
-func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (ctrl.Result, error) {
+func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (traceResult ctrl.Result, retErr error) {
 	started := time.Now()
 	defer func() {
 		ctrl.LoggerFrom(ctx).Info("execution preparation finished", "podUID", w.Status.PodUID, "durationMs", time.Since(started).Milliseconds())
@@ -329,7 +343,7 @@ func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (ctrl.Resul
 	w.Status.PodName = fmt.Sprintf("cb-%s-%d", string(w.UID)[:8], w.Status.Cycle)
 	w.Status.PodUID = ""
 	w.Status.Execution = nil
-	if w.Status.Snapshot != "" && r.WarmPool != nil && !w.Spec.PersistentHome {
+	if w.Status.Snapshot != "" && r.WarmPool != nil {
 		p, err := r.WarmPool.acquire(ctx, w)
 		if err != nil {
 			return again, err
@@ -377,7 +391,7 @@ func (r *Reconciler) waitWarmStarted(ctx context.Context, w *api.ResumablePod, p
 	return r.started(ctx, w, p)
 }
 
-func (r *Reconciler) started(ctx context.Context, w *api.ResumablePod, p *core.Pod) (ctrl.Result, error) {
+func (r *Reconciler) started(ctx context.Context, w *api.ResumablePod, p *core.Pod) (traceResult ctrl.Result, retErr error) {
 	if backend, ok := r.Runtime.(snapshotInvalidator); ok && w.Status.Snapshot != "" {
 		if err := backend.InvalidateSnapshot(ctx, w); err != nil {
 			return again, err
@@ -386,6 +400,9 @@ func (r *Reconciler) started(ctx context.Context, w *api.ResumablePod, p *core.P
 	// Replay eligibility is removed durably before either the Service or the
 	// API may connect. Publish Running last so its notification is actionable.
 	w.Status.Snapshot = ""
+	if err := r.resumeGuest(ctx, w, p); err != nil {
+		return again, err
+	}
 	if _, ok := r.Runtime.(snapshotInvalidator); ok {
 		if err := r.serving(ctx, p, true); err != nil {
 			return again, err
@@ -395,7 +412,24 @@ func (r *Reconciler) started(ctx context.Context, w *api.ResumablePod, p *core.P
 	ctrl.LoggerFrom(ctx).Info("execution started", "podUID", w.Status.PodUID, "podReady", ready(p))
 	return result, err
 }
-func (r *Reconciler) service(ctx context.Context, w *api.ResumablePod) error {
+
+// Reopen Guest admission before publishing an actionable Running result. The
+// runtime validates the locally known execution; no API-side Pod lookup follows.
+func (r *Reconciler) resumeGuest(ctx context.Context, w *api.ResumablePod, p *core.Pod) error {
+	if w.Spec.TransitionID == "" || w.Status.ResumeReadyTransitionID == w.Spec.TransitionID {
+		return nil
+	}
+	backend, ok := r.Runtime.(guestResumeRuntime)
+	if !ok {
+		return nil // Legacy runtimes leave Guest reopening to the API.
+	}
+	if err := backend.ResumeGuest(ctx, w, p); err != nil {
+		return err
+	}
+	w.Status.ResumeReadyTransitionID = w.Spec.TransitionID
+	return nil
+}
+func (r *Reconciler) service(ctx context.Context, w *api.ResumablePod) (retErr error) {
 	if len(w.Spec.ServicePorts) == 0 {
 		return nil
 	}
@@ -423,7 +457,7 @@ func (r *Reconciler) service(ctx context.Context, w *api.ResumablePod) error {
 	s.Spec.Ports = w.Spec.ServicePorts
 	return r.Patch(ctx, s, client.MergeFrom(old))
 }
-func (r *Reconciler) serving(ctx context.Context, p *core.Pod, on bool) error {
+func (r *Reconciler) serving(ctx context.Context, p *core.Pod, on bool) (retErr error) {
 	value := "false"
 	if on {
 		value = "true"
@@ -471,13 +505,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	return result, nil
 }
-func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (traceResult ctrl.Result, retErr error) {
+	readStart := time.Now()
 	w := &api.ResumablePod{}
 	if err := r.Get(ctx, req.NamespacedName, w); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if w.Spec.NodeName != r.NodeName {
 		return ctrl.Result{}, nil
+	}
+	ctx = telemetry.ExtractOperation(ctx, w)
+	if trace.SpanContextFromContext(ctx).IsValid() {
+		var span trace.Span
+		ctx, span = telemetry.StartAt(ctx, "cellbox.controller.reconcile", readStart, telemetry.String("phase", w.Status.Phase), telemetry.String("pod.uid", w.Status.PodUID))
+		defer func() { telemetry.End(span, retErr) }()
 	}
 	if result, handled, err := r.captureWorkspaceArchive(ctx, w); handled || err != nil {
 		return result, err
@@ -731,6 +772,14 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			w.Status.Snapshot = fmt.Sprintf("checkpoint-%d", w.Status.Cycle)
 			return r.phase(ctx, w, "Checkpointing", "Service endpoint withdrawn; saving sandbox")
 		}
+		if w.Spec.TransitionID != "" && w.Status.ResumeReadyTransitionID != w.Spec.TransitionID {
+			if _, ok := r.Runtime.(guestResumeRuntime); ok {
+				if err = r.resumeGuest(ctx, w, p); err != nil {
+					return again, err
+				}
+				return r.phase(ctx, w, "Running", "Guest admission reopened for the current execution", ready(p))
+			}
+		}
 		if err = r.serving(ctx, p, api.AvailableExecution(w, p)); err != nil {
 			return again, err
 		}
@@ -739,8 +788,9 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			condition = meta.ConditionTrue
 		}
 		previous := apimeta.FindStatusCondition(w.Status.Conditions, "Ready")
-		if previous == nil || previous.Status != condition || w.Status.ObservedGeneration != w.Generation {
+		if previous == nil || previous.Status != condition || w.Status.ObservedGeneration != w.Generation || w.Status.ObservedTransitionID != w.Spec.TransitionID {
 			w.Status.ObservedGeneration = w.Generation
+			w.Status.ObservedTransitionID = w.Spec.TransitionID
 			apimeta.SetStatusCondition(&w.Status.Conditions, meta.Condition{Type: "Ready", Status: condition, Reason: "Running", Message: "Readiness follows the active Pod", ObservedGeneration: w.Generation})
 			return again, r.Status().Update(ctx, w)
 		}

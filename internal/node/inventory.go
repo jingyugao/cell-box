@@ -150,23 +150,23 @@ func (b *Backend) verifyDurableSnapshot(ctx context.Context, owner, snapshot str
 	return nil
 }
 
-func readInventoryObject(ctx context.Context, objects objectstorage.Objects, key string) ([]byte, string, error) {
-	body, size, etag, err := objects.Get(ctx, key)
+func readInventoryObject(ctx context.Context, objects objectstorage.Objects, key string) (data []byte, etag string, resultErr error) {
+	body, size, objectETag, err := objects.Get(ctx, key)
 	if err != nil {
 		return nil, "", err
 	}
 	defer body.Close()
-	if size < 1 || size > maxInventoryRecordBytes || etag == "" {
+	if size < 1 || size > maxInventoryRecordBytes || objectETag == "" {
 		return nil, "", errors.New("invalid sandbox inventory object")
 	}
-	data, err := io.ReadAll(io.LimitReader(body, size+1))
+	data, err = io.ReadAll(io.LimitReader(body, size+1))
 	if err != nil {
 		return nil, "", err
 	}
 	if int64(len(data)) != size {
 		return nil, "", errors.New("sandbox inventory object size mismatch")
 	}
-	return data, etag, nil
+	return data, objectETag, nil
 }
 
 func (b *Backend) clearInventoryState(owner string) {

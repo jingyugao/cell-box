@@ -160,7 +160,7 @@ func OpenObjectStore(ctx context.Context, objects objectstorage.Objects) (*Store
 		// A missing head is a fresh installation only when there is no existing
 		// metadata. Never adopt orphaned resources or an old pending ledger.
 		for _, prefix := range []string{"metadata", "images"} {
-			keys, err := objects.List(ctx, prefix)
+			keys, err := objectstorage.ListMetadata(ctx, objects, prefix)
 			if err != nil {
 				return nil, err
 			}
@@ -193,7 +193,7 @@ func OpenObjectStore(ctx context.Context, objects objectstorage.Objects) (*Store
 		return nil, err
 	}
 	s.records.initialized = true
-	keys, err := objects.List(ctx, recordPrefix)
+	keys, err := objectstorage.ListMetadata(ctx, objects, recordPrefix)
 	if err != nil {
 		return nil, err
 	}

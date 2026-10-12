@@ -2,7 +2,6 @@ package service
 
 import (
 	"bytes"
-	"cellbox.local/cellbox/internal/telemetry"
 	"context"
 	"encoding/json"
 	"errors"
@@ -105,9 +104,7 @@ func (s *Store) UpdateBoxContext(requestContext context.Context, id string, fn f
 	if s.records == nil {
 		return s.Update(fn)
 	}
-	_, lockSpan := telemetry.Start(requestContext, "cellbox.persist.wait_writer")
 	unlock := s.lockBoxWriter(id)
-	lockSpan.End()
 	defer unlock()
 	s.mu.Lock()
 	if s.failure != nil {
@@ -147,9 +144,7 @@ func (s *Store) UpdateBoxContext(requestContext context.Context, id string, fn f
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(requestContext), 30*time.Second)
 	defer cancel()
-	projectCtx, projectSpan := telemetry.Start(ctx, "cellbox.persist.project_records")
-	projected, err := s.projectRecords(projectCtx, &next)
-	telemetry.End(projectSpan, err)
+	projected, err := s.projectRecords(ctx, &next)
 	if err != nil {
 		return err
 	}

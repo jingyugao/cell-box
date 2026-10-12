@@ -47,14 +47,22 @@ func (*poolRuntime) ActivateWarm(context.Context, *api.ResumablePod, *core.Pod) 
 func (*poolRuntime) ReapWarm(context.Context, string, map[string]bool) error { return nil }
 
 func TestWarmPoolConcurrentAdoptionRestartAndTemplateMiss(t *testing.T) {
+	for _, persistent := range []bool{false, true} {
+		t.Run(fmt.Sprintf("persistentHome=%v", persistent), func(t *testing.T) { testWarmPoolConcurrentAdoption(t, persistent) })
+	}
+}
+
+func testWarmPoolConcurrentAdoption(t *testing.T, persistent bool) {
 	ctx := context.Background()
 	r, f, w := fixture(t)
+	w.Spec.PersistentHome = persistent
+	w.Status.SpecHash = fingerprint(w)
 	backend := &poolRuntime{fakeRuntime: f, deadlines: map[string]time.Time{}}
 	r.Runtime = backend
 	pool := &WarmPool{Reconciler: r, Namespace: w.Namespace, Size: 2}
 	r.WarmPool = pool
 	for i := 0; i < 2; i++ {
-		pod := executionPod(w, fmt.Sprintf("warm-%d", i))
+		pod := warmExecutionPod(w, fmt.Sprintf("warm-%d", i))
 		pod.UID = types.UID(fmt.Sprintf("slot-%d", i))
 		pod.Spec.SchedulingGates = nil
 		pod.Labels = map[string]string{warmLabel: "true"}

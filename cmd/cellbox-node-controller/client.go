@@ -8,5 +8,9 @@ import (
 )
 
 func clientNew(m manager.Manager) (client.Client, error) {
-	return client.New(m.GetConfig(), client.Options{Scheme: m.GetScheme()})
+	c, err := client.New(m.GetConfig(), client.Options{Scheme: m.GetScheme()})
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
 }

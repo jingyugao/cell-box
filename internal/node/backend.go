@@ -16,6 +16,8 @@ import (
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/homevolume"
 	"cellbox.local/cellbox/internal/objectstorage"
+	"cellbox.local/cellbox/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	core "k8s.io/api/core/v1"
@@ -56,6 +58,13 @@ func New(socket string) (*Backend, error) {
 	return &Backend{Base: DefaultBase, Runsc: DefaultRunsc, Root: DefaultRoot, Socket: socket, Runtime: cri.NewRuntimeServiceClient(conn), Images: cri.NewImageServiceClient(conn)}, nil
 }
 func (b *Backend) command(ctx context.Context, args ...string) error {
+	commandName := "unknown"
+	if len(args) > 0 {
+		commandName = args[0]
+	}
+	ctx, span := telemetry.Start(ctx, "node.runsc", attribute.String("runsc.command", commandName))
+	var resultErr error
+	defer func() { telemetry.End(span, resultErr) }()
 	timeout := 45 * time.Second
 	if len(args) > 0 && args[0] == "checkpoint" {
 		// Saving several GiB of pages can outlast the ordinary runtime command
@@ -70,7 +79,8 @@ func (b *Backend) command(ctx context.Context, args ...string) error {
 	if len(args) > 1 && len(args[len(args)-1]) == 64 && ValidID(args[len(args)-1]) {
 		dir := filepath.Join(b.Base, "logs", args[len(args)-1])
 		if err := os.MkdirAll(dir, 0700); err != nil {
-			return fmt.Errorf("create controller runtime logs: %w", err)
+			resultErr = fmt.Errorf("create controller runtime logs: %w", err)
+			return resultErr
 		}
 		commandArgs = append([]string{"--debug-log=" + filepath.Join(dir, "controller.%TIMESTAMP%.%COMMAND%.log"),
 			"--panic-log=" + filepath.Join(dir, "controller-panic.%TIMESTAMP%.%COMMAND%.log")}, commandArgs...)
@@ -83,7 +93,8 @@ func (b *Backend) command(ctx context.Context, args ...string) error {
 	c.WaitDelay = 2 * time.Second
 	output, err := c.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("runsc %s: %w: %.2000s", args[0], err, output)
+		resultErr = fmt.Errorf("runsc %s: %w: %.2000s", commandName, err, output)
+		return resultErr
 	}
 	return nil
 }
@@ -135,7 +146,9 @@ func runningImageMatches(actual string, image *cri.Image) bool {
 	}
 	return false
 }
-func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.Pod) error {
+func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.Pod) (resultErr error) {
+	ctx, span := telemetry.Start(ctx, "node.checkpoint")
+	defer func() { telemetry.End(span, resultErr) }()
 	homeID, err := b.persistentHome(r, false)
 	if err != nil {
 		return err
@@ -295,7 +308,7 @@ func (b *Backend) prepareSnapshot(ctx context.Context, r *api.ResumablePod) erro
 	return nil
 }
 
-func (b *Backend) Prepare(ctx context.Context, r *api.ResumablePod, p *core.Pod) error {
+func (b *Backend) Prepare(ctx context.Context, r *api.ResumablePod, p *core.Pod) (resultErr error) {
 	homeID, err := b.persistentHome(r, r.Status.Cycle == 1 && r.Status.Snapshot == "")
 	if err != nil {
 		return err
@@ -380,7 +393,7 @@ func (b *Backend) Cleanup(ctx context.Context, p *core.Pod) error {
 		if err != nil {
 			return err
 		}
-		for _, suffix := range []string{".json", ".json.started"} {
+		for _, suffix := range []string{".json", ".json.started", ".json.child"} {
 			if err = os.Remove(filepath.Join(b.Base, "requests", id+suffix)); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return err
 			}

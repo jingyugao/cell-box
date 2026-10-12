@@ -35,6 +35,8 @@ type Config struct {
 	// ClientID is a data/idempotency namespace, not an authenticated identity.
 	ClientID                  string               `json:"clientId,omitempty"`
 	ObjectStorage             objectstorage.Config `json:"objectStorage,omitempty"`
+	LocalMetadataDir          string               `json:"localMetadataDir,omitempty"`
+	InitializeLocalMetadata   bool                 `json:"initializeLocalMetadata,omitempty"`
 	Listen                    string               `json:"listen"`
 	DataDir                   string               `json:"dataDir"`
 	PublicURL                 string               `json:"publicUrl,omitempty"`
@@ -85,6 +87,8 @@ type Box struct {
 	ProfileID       string       `json:"profileId"`
 	Phase           string       `json:"phase"`
 	Generation      uint64       `json:"generation"`
+	ExecutionID     string       `json:"executionId,omitempty"`
+	ObservedAt      *time.Time   `json:"observedAt,omitempty"`
 	Version         uint64       `json:"resourceVersion"`
 	Image           string       `json:"image"`
 	ImageID         string       `json:"imageId,omitempty"`
@@ -98,19 +102,28 @@ type Box struct {
 type upgradeIntent struct {
 	Nonce                   string `json:"nonce"`
 	PreviousImportedImageID string `json:"previousImportedImageId,omitempty"`
+	RuntimeCommitted        bool   `json:"runtimeCommitted,omitempty"`
 }
 type boxRecord struct {
-	UpgradeImageID    string             `json:"upgradeImageId,omitempty"`
-	Upgrade           *upgradeIntent     `json:"upgrade,omitempty"`
-	Box               Box                `json:"box"`
-	ClientID          string             `json:"clientId"`
-	Profile           Profile            `json:"profile"`
-	Handle            boxprovider.Handle `json:"handle"`
-	ExecutionID       string             `json:"executionId,omitempty"`
-	Staged            bool               `json:"staged,omitempty"`
-	RestoreArchiveID  string             `json:"restoreArchiveId,omitempty"`
-	RestoreComplete   bool               `json:"restoreComplete,omitempty"`
-	AcceptImageChange bool               `json:"acceptImageChange,omitempty"`
+	UpgradeImageID             string             `json:"upgradeImageId,omitempty"`
+	Upgrade                    *upgradeIntent     `json:"upgrade,omitempty"`
+	Box                        Box                `json:"box"`
+	ClientID                   string             `json:"clientId"`
+	Profile                    Profile            `json:"profile"`
+	Handle                     boxprovider.Handle `json:"handle"`
+	ExecutionID                string             `json:"executionId,omitempty"`
+	TransitionID               string             `json:"transitionId,omitempty"`
+	ObservedTransitionID       string             `json:"observedTransitionId,omitempty"`
+	ResumePending              bool               `json:"resumePending,omitempty"`
+	ResumeNeedsGuest           bool               `json:"resumeNeedsGuest,omitempty"`
+	ResumeIntentID             string             `json:"resumeIntentId,omitempty"`
+	ResumeExecutionID          string             `json:"resumeExecutionId,omitempty"`
+	ResumeTransitionID         string             `json:"resumeTransitionId,omitempty"`
+	ResumeObservedTransitionID string             `json:"resumeObservedTransitionId,omitempty"`
+	Staged                     bool               `json:"staged,omitempty"`
+	RestoreArchiveID           string             `json:"restoreArchiveId,omitempty"`
+	RestoreComplete            bool               `json:"restoreComplete,omitempty"`
+	AcceptImageChange          bool               `json:"acceptImageChange,omitempty"`
 }
 type Operation struct {
 	ID         string            `json:"id"`
@@ -121,6 +134,7 @@ type Operation struct {
 	CreatedAt  time.Time         `json:"createdAt"`
 	FinishedAt *time.Time        `json:"finishedAt,omitempty"`
 	Result     map[string]string `json:"result,omitempty"`
+	Box        *Box              `json:"box,omitempty"`
 	Error      *APIError         `json:"error,omitempty"`
 }
 type operationRecord struct {

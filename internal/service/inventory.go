@@ -26,7 +26,7 @@ func (s *Store) ListImages(ctx context.Context) ([]importedImageRecord, error) {
 		})
 		return out, err
 	}
-	keys, err := s.objects.List(ctx, "images")
+	keys, err := objectstorage.ListMetadata(ctx, s.objects, "images")
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +148,7 @@ func (s *Service) listCheckpoints(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	keys, err := s.objects.List(ctx, "checkpoints")
+	keys, err := objectstorage.ListMetadata(ctx, s.objects, "checkpoints")
 	if err != nil {
 		fail(w, err)
 		return
