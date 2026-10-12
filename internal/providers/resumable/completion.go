@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go.opentelemetry.io/otel/trace"
+	"os"
 	"strings"
 	"time"
 
@@ -265,6 +267,9 @@ func (p *Provider) RequestResume(ctx context.Context, h boxprovider.Handle, expe
 		return fmt.Errorf("encode resume patch: %w", err)
 	}
 	obj := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{Name: h.Name, Namespace: h.Namespace}}
+	if os.Getenv("CELLBOX_KUBE_LATENCY_DIAGNOSTICS") == "1" {
+		trace.SpanFromContext(ctx).AddEvent("kubernetes.patch.begin")
+	}
 	patchErr := p.Client.Patch(ctx, obj, client.RawPatch(types.JSONPatchType, encoded))
 	if patchErr == nil {
 		return nil

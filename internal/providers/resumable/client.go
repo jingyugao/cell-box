@@ -32,6 +32,7 @@ func NewForConfig(cfg *rest.Config) (*Provider, error) {
 	if err := api.AddToScheme(scheme); err != nil {
 		return nil, err
 	}
+	configureLatencyDiagnostics(cfg)
 	c, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
 	if err != nil {
 		return nil, err
