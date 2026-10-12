@@ -23,10 +23,10 @@ import (
 
 const observationBuffer = 8
 
-// WatchObservations establishes a watch at the resourceVersion of a validated
-// initial read. Each event is mapped directly from its CR payload; event
-// processing never reads the CR or Pod again. Reconnects take one fresh CR
-// snapshot and resume watching from that version.
+// WatchObservations establishes a watch at a current collection resourceVersion.
+// An unchanged object's own version may have expired from the watch history.
+// Events carry their complete CR state, with no follow-up CR or Pod read.
+// Reconnects take one fresh filtered LIST snapshot and watch from its version.
 func (p *Provider) WatchObservations(ctx context.Context, h boxprovider.Handle) (<-chan boxprovider.Observation, error) {
 	c, ok := p.Client.(client.WithWatch)
 	if !ok {
@@ -42,12 +42,22 @@ func (p *Provider) WatchObservations(ctx context.Context, h boxprovider.Handle) 
 }
 
 func (p *Provider) openObservationWatch(ctx context.Context, c client.WithWatch, h boxprovider.Handle) (boxprovider.Observation, watch.Interface, error) {
-	w, err := p.get(ctx, h)
-	if err != nil {
+	if err := validateHandle(h); err != nil {
 		return boxprovider.Observation{}, nil, err
 	}
+	snapshot := &api.ResumablePodList{}
+	if err := c.List(ctx, snapshot, client.InNamespace(h.Namespace), client.MatchingFields{"metadata.name": h.Name}); err != nil {
+		return boxprovider.Observation{}, nil, err
+	}
+	if len(snapshot.Items) != 1 || !validObservationIdentity(&snapshot.Items[0], h) {
+		return boxprovider.Observation{}, nil, boxprovider.ErrNotFound
+	}
+	if snapshot.ResourceVersion == "" {
+		return boxprovider.Observation{}, nil, errors.New("watch snapshot has no collection resourceVersion")
+	}
+	w := &snapshot.Items[0]
 	stream, err := c.Watch(ctx, &api.ResumablePodList{}, &client.ListOptions{Namespace: h.Namespace,
-		Raw: &meta.ListOptions{ResourceVersion: w.ResourceVersion, FieldSelector: fields.OneTermEqualSelector("metadata.name", h.Name).String()}})
+		Raw: &meta.ListOptions{ResourceVersion: snapshot.ResourceVersion, FieldSelector: fields.OneTermEqualSelector("metadata.name", h.Name).String()}})
 	if err != nil {
 		return boxprovider.Observation{}, nil, err
 	}
@@ -89,7 +99,6 @@ func (p *Provider) runObservationWatch(ctx context.Context, c client.WithWatch, 
 				}
 				continue
 			}
-			reconnectDelay = 100 * time.Millisecond
 			if !emit(initial) {
 				return
 			}
@@ -105,6 +114,7 @@ func (p *Provider) runObservationWatch(ctx context.Context, c client.WithWatch, 
 				continue
 			}
 			if event.Type == watch.Bookmark {
+				reconnectDelay = 100 * time.Millisecond
 				continue
 			}
 			resource, ok := event.Object.(*api.ResumablePod)
@@ -125,6 +135,7 @@ func (p *Provider) runObservationWatch(ctx context.Context, c client.WithWatch, 
 			if event.Type != watch.Added && event.Type != watch.Modified {
 				continue
 			}
+			reconnectDelay = 100 * time.Millisecond
 			if !emit(observationFromResource(resource, false)) {
 				return
 			}

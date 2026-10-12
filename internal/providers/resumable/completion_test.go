@@ -18,9 +18,11 @@ import (
 
 type observedClient struct {
 	client.Client
-	gets    atomic.Int32
-	patches atomic.Int32
-	watcher *watch.FakeWatcher
+	gets           atomic.Int32
+	lists          atomic.Int32
+	watchedVersion atomic.Value
+	patches        atomic.Int32
+	watcher        *watch.FakeWatcher
 }
 
 func (c *observedClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -30,6 +32,17 @@ func (c *observedClient) Get(ctx context.Context, key client.ObjectKey, obj clie
 	return c.Client.Get(ctx, key, obj, opts...)
 }
 
+func (c *observedClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*api.ResumablePodList); ok {
+		c.lists.Add(1)
+	}
+	if err := c.Client.List(ctx, list, opts...); err != nil {
+		return err
+	}
+	list.SetResourceVersion("current-collection-version")
+	return nil
+}
+
 func (c *observedClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 	if _, ok := obj.(*api.ResumablePod); ok {
 		c.patches.Add(1)
@@ -37,7 +50,10 @@ func (c *observedClient) Patch(ctx context.Context, obj client.Object, patch cli
 	return c.Client.Patch(ctx, obj, patch, opts...)
 }
 
-func (c *observedClient) Watch(_ context.Context, _ client.ObjectList, _ ...client.ListOption) (watch.Interface, error) {
+func (c *observedClient) Watch(_ context.Context, _ client.ObjectList, opts ...client.ListOption) (watch.Interface, error) {
+	options := &client.ListOptions{}
+	options.ApplyOptions(opts)
+	c.watchedVersion.Store(options.Raw.ResourceVersion)
 	return c.watcher, nil
 }
 
@@ -141,8 +157,11 @@ func TestWatchObservationsMapsEventsWithoutGETAndIgnoresBookmarks(t *testing.T) 
 	if initial.Phase != "running" || initial.Generation != 7 || initial.ExecutionID != "exec-1" || !initial.GuestReady {
 		t.Fatalf("unexpected initial observation: %#v", initial)
 	}
-	if got := c.gets.Load(); got != 1 {
-		t.Fatalf("initial GET count = %d, want exactly one", got)
+	if c.gets.Load() != 0 || c.lists.Load() != 1 {
+		t.Fatal("watch initialization must use one LIST and no GET")
+	}
+	if c.watchedVersion.Load() != "current-collection-version" {
+		t.Fatal("watch used object's old version instead of collection version")
 	}
 
 	fakeWatch.Action(watch.Bookmark, &api.ResumablePod{ObjectMeta: meta.ObjectMeta{ResourceVersion: "2"}})
@@ -164,8 +183,8 @@ func TestWatchObservationsMapsEventsWithoutGETAndIgnoresBookmarks(t *testing.T) 
 	if event.Generation != 8 || event.ExecutionID != "exec-2" || event.TransitionID != "transition-2" || !event.GuestReady {
 		t.Fatalf("unexpected watch observation: %#v", event)
 	}
-	if got := c.gets.Load(); got != 1 {
-		t.Fatalf("watch event caused extra GET: count=%d", got)
+	if c.gets.Load() != 0 || c.lists.Load() != 1 {
+		t.Fatal("watch event performed an extra read")
 	}
 
 	cancel()
@@ -308,5 +327,34 @@ func TestWatchReconnectPublishesDeletionMissedWhileDisconnected(t *testing.T) {
 	c.watcher.Stop()
 	if got := receiveObservation(t, observations); got.Phase != "deleted" {
 		t.Fatalf("missed deletion: %+v", got)
+	}
+}
+
+type expiredWatchClient struct {
+	*observedClient
+	calls atomic.Int32
+}
+
+func (c *expiredWatchClient) Watch(context.Context, client.ObjectList, ...client.ListOption) (watch.Interface, error) {
+	c.calls.Add(1)
+	w := watch.NewRaceFreeFake()
+	w.Error(&meta.Status{Code: 410, Reason: meta.StatusReasonExpired})
+	return w, nil
+}
+func TestRepeatedExpiredWatchUsesBackoffInsteadOfResettingOnHTTP200(t *testing.T) {
+	p, spec, ctx := fixture(t)
+	h := createSuspendedForResume(t, p, spec, ctx, "previous")
+	c := &expiredWatchClient{observedClient: &observedClient{Client: p.Client}}
+	p.Client = c
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	out, err := p.WatchObservations(ctx, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiveObservation(t, out)
+	time.Sleep(750 * time.Millisecond)
+	if c.calls.Load() > 4 {
+		t.Fatalf("expired watch hot loop: %d attempts", c.calls.Load())
 	}
 }
