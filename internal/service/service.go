@@ -26,21 +26,22 @@ import (
 )
 
 type Service struct {
-	objects    objectstorage.Objects
-	config     Config
-	store      *Store
-	providers  map[string]boxprovider.Provider
-	http       *http.Client
-	toolHTTP   *http.Client
-	ctx        context.Context
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
-	mu         sync.Mutex
-	admissions keyedLocks
-	observerMu sync.Mutex
-	observers  map[string]bool
-	gcMu       sync.Mutex
-	streams    map[string]activeStream
+	objects      objectstorage.Objects
+	config       Config
+	store        *Store
+	providers    map[string]boxprovider.Provider
+	http         *http.Client
+	toolHTTP     *http.Client
+	ctx          context.Context
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	mu           sync.Mutex
+	admissions   keyedLocks
+	observerMu   sync.Mutex
+	observers    map[string]bool
+	runtimeFeeds map[string]*runtimeFeed
+	gcMu         sync.Mutex
+	streams      map[string]activeStream
 }
 type activeStream struct {
 	boxID  string
@@ -553,99 +554,7 @@ func (s *Service) observe(ctx context.Context, b boxRecord) (result Box, retErr 
 		if missing {
 			ob.Phase = "deleted"
 		}
-		updated, err := s.store.UpdateObservedBox(b, func(current *boxRecord) (bool, error) {
-			if err := ctx.Err(); err != nil {
-				return false, err
-			}
-			previousError := current.Box.Error
-			phase := ob.Phase
-			if phase == "deleted" {
-				if current.Box.Phase == "deleting" || current.Box.Phase == "deleted" {
-					phase = "deleted"
-				} else {
-					phase = "failed"
-					current.Box.Error = &APIError{Code: "RUNTIME_LOST", Message: "Runtime disappeared; automatic cold restart is disabled"}
-				}
-			}
-			if current.Staged && phase == "running" {
-				if current.Box.Phase == "failed" {
-					phase = "failed"
-				} else if current.RestoreComplete {
-					phase = "staged"
-				} else {
-					phase = "restoring"
-				}
-			}
-			if current.Box.Phase == "deleting" && phase != "deleted" {
-				phase = "deleting"
-			}
-			target := map[string]string{"freezing": "frozen", "unfreezing": "running", "suspending": "suspended", "resuming": "running", "rebuilding": "running", "upgrading": "staged"}[current.Box.Phase]
-			if current.Box.OperationID != "" && target != "" && phase != target && phase != "failed" && phase != "deleted" {
-				phase = current.Box.Phase
-			}
-			versionChanged := false
-			if previousError != nil && current.Box.Error != nil {
-				versionChanged = versionChanged || *previousError != *current.Box.Error
-			} else {
-				versionChanged = versionChanged || previousError != current.Box.Error
-			}
-			// The provider generation is authoritative even when there is no
-			// current execution identity (for example, a suspended ResumablePod).
-			// Keep it monotonic so a stale observation cannot weaken generation
-			// fencing after a newer execution has already been observed.
-			if ob.Generation > current.Box.Generation {
-				current.Box.Generation = ob.Generation
-				versionChanged = true
-			}
-			if current.ExecutionID != ob.ExecutionID {
-				current.ExecutionID = ob.ExecutionID
-				if ob.ExecutionID != "" && ob.Generation == 0 {
-					current.Box.Generation++
-				}
-				versionChanged = true
-			}
-			current.Box.ExecutionID = current.ExecutionID
-			if current.TransitionID != ob.TransitionID {
-				current.TransitionID = ob.TransitionID
-				versionChanged = true
-			}
-			if current.ObservedTransitionID != ob.ObservedTransitionID {
-				current.ObservedTransitionID = ob.ObservedTransitionID
-				versionChanged = true
-			}
-			if current.ResumePending {
-				if ob.Phase == "running" {
-					if current.Box.OperationID == "" && !current.ResumeNeedsGuest &&
-						((current.ResumeIntentID != "" && ob.TransitionID == current.ResumeIntentID && ob.ObservedTransitionID == current.ResumeIntentID) || (ob.TransitionID == "" && ob.ObservedTransitionID == "")) {
-						// Once the Guest stage is confirmed, keep its execution fence.
-						// Observation must never retarget a failed repair to another Pod.
-						current.ResumeNeedsGuest = true
-						current.ResumeExecutionID = ob.ExecutionID
-						current.ResumeTransitionID = ob.TransitionID
-						current.ResumeObservedTransitionID = ob.ObservedTransitionID
-						versionChanged = true
-					}
-					if current.Box.OperationID == "" || current.ResumeNeedsGuest {
-						phase = "resuming"
-					}
-				} else if ob.Phase == "suspended" && current.ResumeNeedsGuest {
-					current.ResumeNeedsGuest = false
-					versionChanged = true
-				}
-			}
-			versionChanged = versionChanged || current.Box.Phase != phase
-			current.Box.Phase = phase
-			if versionChanged {
-				current.Box.Version++
-			}
-			persistChanged := versionChanged
-			if current.Box.ObservedAt == nil || time.Since(*current.Box.ObservedAt) >= 5*time.Second || versionChanged {
-				now := time.Now().UTC()
-				current.Box.ObservedAt = &now
-				persistChanged = true
-			}
-			return persistChanged, nil
-		})
+		updated, err := s.applyRuntimeObservation(ctx, b, ob, missing)
 		if errors.Is(err, errBoxObservationConflict) {
 			if ctx.Err() != nil {
 				return Box{}, ctx.Err()
@@ -659,9 +568,106 @@ func (s *Service) observe(ctx context.Context, b boxRecord) (result Box, retErr 
 		if err != nil {
 			return Box{}, err
 		}
-		return updated.Box, nil
+		return updated, nil
 	}
 	return Box{}, apiError("CONFLICT", "Box changed repeatedly while observing runtime")
+}
+
+func (s *Service) applyRuntimeObservation(ctx context.Context, b boxRecord, ob boxprovider.Observation, missing bool) (Box, error) {
+	updated, err := s.store.UpdateObservedBox(b, func(current *boxRecord) (bool, error) {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		previousError := current.Box.Error
+		phase := ob.Phase
+		if phase == "deleted" {
+			if current.Box.Phase == "deleting" || current.Box.Phase == "deleted" {
+				phase = "deleted"
+			} else {
+				phase = "failed"
+				current.Box.Error = &APIError{Code: "RUNTIME_LOST", Message: "Runtime disappeared; automatic cold restart is disabled"}
+			}
+		}
+		if current.Staged && phase == "running" {
+			if current.Box.Phase == "failed" {
+				phase = "failed"
+			} else if current.RestoreComplete {
+				phase = "staged"
+			} else {
+				phase = "restoring"
+			}
+		}
+		if current.Box.Phase == "deleting" && phase != "deleted" {
+			phase = "deleting"
+		}
+		target := map[string]string{"freezing": "frozen", "unfreezing": "running", "suspending": "suspended", "resuming": "running", "rebuilding": "running", "upgrading": "staged"}[current.Box.Phase]
+		if current.Box.OperationID != "" && target != "" && phase != target && phase != "failed" && phase != "deleted" {
+			phase = current.Box.Phase
+		}
+		versionChanged := false
+		if previousError != nil && current.Box.Error != nil {
+			versionChanged = versionChanged || *previousError != *current.Box.Error
+		} else {
+			versionChanged = versionChanged || previousError != current.Box.Error
+		}
+		// The provider generation is authoritative even when there is no
+		// current execution identity (for example, a suspended ResumablePod).
+		// Keep it monotonic so a stale observation cannot weaken generation
+		// fencing after a newer execution has already been observed.
+		if ob.Generation > current.Box.Generation {
+			current.Box.Generation = ob.Generation
+			versionChanged = true
+		}
+		if current.ExecutionID != ob.ExecutionID {
+			current.ExecutionID = ob.ExecutionID
+			if ob.ExecutionID != "" && ob.Generation == 0 {
+				current.Box.Generation++
+			}
+			versionChanged = true
+		}
+		current.Box.ExecutionID = current.ExecutionID
+		if current.TransitionID != ob.TransitionID {
+			current.TransitionID = ob.TransitionID
+			versionChanged = true
+		}
+		if current.ObservedTransitionID != ob.ObservedTransitionID {
+			current.ObservedTransitionID = ob.ObservedTransitionID
+			versionChanged = true
+		}
+		if current.ResumePending {
+			if ob.Phase == "running" {
+				if current.Box.OperationID == "" && !current.ResumeNeedsGuest &&
+					((current.ResumeIntentID != "" && ob.TransitionID == current.ResumeIntentID && ob.ObservedTransitionID == current.ResumeIntentID) || (ob.TransitionID == "" && ob.ObservedTransitionID == "")) {
+					// Once the Guest stage is confirmed, keep its execution fence.
+					// Observation must never retarget a failed repair to another Pod.
+					current.ResumeNeedsGuest = true
+					current.ResumeExecutionID = ob.ExecutionID
+					current.ResumeTransitionID = ob.TransitionID
+					current.ResumeObservedTransitionID = ob.ObservedTransitionID
+					versionChanged = true
+				}
+				if current.Box.OperationID == "" || current.ResumeNeedsGuest {
+					phase = "resuming"
+				}
+			} else if ob.Phase == "suspended" && current.ResumeNeedsGuest {
+				current.ResumeNeedsGuest = false
+				versionChanged = true
+			}
+		}
+		versionChanged = versionChanged || current.Box.Phase != phase
+		current.Box.Phase = phase
+		if versionChanged {
+			current.Box.Version++
+		}
+		persistChanged := versionChanged
+		if current.Box.ObservedAt == nil || time.Since(*current.Box.ObservedAt) >= 5*time.Second || versionChanged {
+			now := time.Now().UTC()
+			current.Box.ObservedAt = &now
+			persistChanged = true
+		}
+		return persistChanged, nil
+	})
+	return updated.Box, err
 }
 func (s *Service) connection(ctx context.Context, b boxRecord) (boxprovider.Connection, error) {
 	p := s.providers[b.Profile.Provider]

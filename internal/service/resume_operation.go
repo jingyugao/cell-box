@@ -9,6 +9,12 @@ import (
 )
 
 func (s *Service) launchResumeOperation(request context.Context, op Operation, b boxRecord, repairOnly bool, completed func(error)) {
+	if provider, ok := s.providers[b.Profile.Provider].(boxprovider.ResumeRequestProvider); ok {
+		if _, ok := s.providers[b.Profile.Provider].(boxprovider.CompletionObservationProvider); ok {
+			s.launchNodeResume(request, op, b, repairOnly, provider, completed)
+			return
+		}
+	}
 	work := func(ctx context.Context) (map[string]string, error) {
 		p := s.providers[b.Profile.Provider]
 		transitionID := ""

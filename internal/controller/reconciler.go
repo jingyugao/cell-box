@@ -47,6 +47,10 @@ type executionRuntime interface {
 	WaitWarmStarted(context.Context, *api.ResumablePod, *core.Pod) (*api.Execution, error)
 }
 
+type guestResumeRuntime interface {
+	ResumeGuest(context.Context, *api.ResumablePod, *core.Pod) error
+}
+
 type homeRebuilder interface {
 	Rebuild(context.Context, *api.ResumablePod) error
 }
@@ -396,6 +400,9 @@ func (r *Reconciler) started(ctx context.Context, w *api.ResumablePod, p *core.P
 	// Replay eligibility is removed durably before either the Service or the
 	// API may connect. Publish Running last so its notification is actionable.
 	w.Status.Snapshot = ""
+	if err := r.resumeGuest(ctx, w, p); err != nil {
+		return again, err
+	}
 	if _, ok := r.Runtime.(snapshotInvalidator); ok {
 		if err := r.serving(ctx, p, true); err != nil {
 			return again, err
@@ -404,6 +411,23 @@ func (r *Reconciler) started(ctx context.Context, w *api.ResumablePod, p *core.P
 	result, err := r.phase(ctx, w, "Running", "Container started; previous snapshot cannot be replayed", ready(p))
 	ctrl.LoggerFrom(ctx).Info("execution started", "podUID", w.Status.PodUID, "podReady", ready(p))
 	return result, err
+}
+
+// Reopen Guest admission before publishing an actionable Running result. The
+// runtime validates the locally known execution; no API-side Pod lookup follows.
+func (r *Reconciler) resumeGuest(ctx context.Context, w *api.ResumablePod, p *core.Pod) error {
+	if w.Spec.TransitionID == "" || w.Status.ResumeReadyTransitionID == w.Spec.TransitionID {
+		return nil
+	}
+	backend, ok := r.Runtime.(guestResumeRuntime)
+	if !ok {
+		return nil // Legacy runtimes leave Guest reopening to the API.
+	}
+	if err := backend.ResumeGuest(ctx, w, p); err != nil {
+		return err
+	}
+	w.Status.ResumeReadyTransitionID = w.Spec.TransitionID
+	return nil
 }
 func (r *Reconciler) service(ctx context.Context, w *api.ResumablePod) (retErr error) {
 	if len(w.Spec.ServicePorts) == 0 {
@@ -747,6 +771,14 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (traceResu
 			}
 			w.Status.Snapshot = fmt.Sprintf("checkpoint-%d", w.Status.Cycle)
 			return r.phase(ctx, w, "Checkpointing", "Service endpoint withdrawn; saving sandbox")
+		}
+		if w.Spec.TransitionID != "" && w.Status.ResumeReadyTransitionID != w.Spec.TransitionID {
+			if _, ok := r.Runtime.(guestResumeRuntime); ok {
+				if err = r.resumeGuest(ctx, w, p); err != nil {
+					return again, err
+				}
+				return r.phase(ctx, w, "Running", "Guest admission reopened for the current execution", ready(p))
+			}
 		}
 		if err = r.serving(ctx, p, api.AvailableExecution(w, p)); err != nil {
 			return again, err

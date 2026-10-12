@@ -43,6 +43,7 @@ type Handle struct {
 type Observation struct {
 	Generation           uint64 // Provider-owned durable execution cycle, when available.
 	Phase                string // creating, running, freezing, frozen, unfreezing, checkpointing, suspending, suspended, resuming, restoring, staged, deleting, deleted, failed
+	GuestReady           bool   // A guest readiness proof for the current lifecycle transition, when available.
 	ExecutionID          string // immutable runtime identity; changes after Pod replacement
 	TransitionID         string // provider lifecycle transition associated with this observation
 	ObservedTransitionID string // transition token last committed by the runtime controller
@@ -88,6 +89,18 @@ type ChangeProvider interface {
 // transition observed by Cellbox. Legacy providers continue to use Action.
 type TransitionProvider interface {
 	ActionTransition(context.Context, Handle, string, string, string) error // action, expected previous ID, new ID
+}
+
+// ResumeRequestProvider commits a resume with a conditional transition token.
+// The request is fenced by the prior observed transition and the CR identity.
+type ResumeRequestProvider interface {
+	RequestResume(context.Context, Handle, string, string) error // expected previous ID, new ID
+}
+
+// CompletionObservationProvider streams complete lifecycle snapshots. Unlike
+// ChangeProvider, updates carry the observed state and need no follow-up Inspect.
+type CompletionObservationProvider interface {
+	WatchObservations(context.Context, Handle) (<-chan Observation, error)
 }
 
 // InventoryProvider enumerates workloads from the runtime, without the service ledger.

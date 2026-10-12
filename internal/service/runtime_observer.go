@@ -40,6 +40,10 @@ func (s *Service) ensureRuntimeObservers() {
 		return
 	}
 	for _, b := range boxes {
+		if _, ok := s.providers[b.Profile.Provider].(boxprovider.CompletionObservationProvider); ok && (b.Upgrade == nil || b.Upgrade.RuntimeCommitted) {
+			s.ensureRuntimeFeed(b)
+			continue
+		}
 		s.observerMu.Lock()
 		if s.observers[b.Box.ID] || s.ctx.Err() != nil {
 			s.observerMu.Unlock()
@@ -74,6 +78,10 @@ func (s *Service) observeBoxLoop(id string) {
 	for s.ctx.Err() == nil {
 		b, err := s.rawBox(id)
 		if err != nil || b.Handle.ID == "" || b.Box.Phase == "deleted" {
+			return
+		}
+		if _, ok := s.providers[b.Profile.Provider].(boxprovider.CompletionObservationProvider); ok && (b.Upgrade == nil || b.Upgrade.RuntimeCommitted) {
+			s.ensureRuntimeFeed(b)
 			return
 		}
 		if b.Upgrade != nil && !b.Upgrade.RuntimeCommitted {

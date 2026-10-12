@@ -1,0 +1,125 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package node
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	api "cellbox.local/cellbox/api/v1alpha1"
+	"cellbox.local/cellbox/internal/guestapi"
+	"cellbox.local/cellbox/internal/telemetry"
+	core "k8s.io/api/core/v1"
+)
+
+const resumeGuestTimeout = 3 * time.Second
+
+// ResumeGuest unquiesces the guest belonging to the current local CRI
+// execution. It does not look up Kubernetes state: callers pass their current
+// Pod observation and the node independently fences the request against CRI.
+func (b *Backend) ResumeGuest(ctx context.Context, w *api.ResumablePod, p *core.Pod) (resultErr error) {
+	ctx, span := telemetry.Start(ctx, "node.resume_guest")
+	defer func() { telemetry.End(span, resultErr) }()
+
+	if w == nil || p == nil || b == nil || b.Runtime == nil {
+		return fmt.Errorf("resume guest requires workload, Pod, and CRI runtime")
+	}
+	expected, err := resumeGuestExpectedExecution(w, p)
+	if err != nil {
+		return err
+	}
+
+	// Reconfirm the supplied execution using only the node's CRI. A persisted
+	// warm execution is useful as a fence, but never authorizes a replaced
+	// container by itself.
+	criCtx, cancelCRI := context.WithTimeout(ctx, 2*time.Second)
+	defer cancelCRI()
+	sandboxes, err := b.sandboxes(criCtx, p)
+	if err != nil {
+		return fmt.Errorf("inspect local guest execution")
+	}
+	if len(sandboxes) != 1 || sandboxes[0] == nil || sandboxes[0].Id == "" {
+		return fmt.Errorf("local guest execution is missing or ambiguous")
+	}
+	actual, err := b.warmExecution(criCtx, w, p, sandboxes[0].Id)
+	if err != nil {
+		return fmt.Errorf("inspect local guest execution")
+	}
+	if actual == nil || actual.PodUID != expected.PodUID || actual.ContainerID != expected.ContainerID || actual.PodIP != expected.PodIP {
+		return fmt.Errorf("local guest execution identity changed")
+	}
+
+	// The guest endpoint is addressed through the exact Pod IP just confirmed
+	// by CRI. Disable proxy discovery and redirects so credentials or commands
+	// can never be routed to another endpoint.
+	endpoint, err := resumeGuestURL(actual.PodIP)
+	if err != nil {
+		return err
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, resumeGuestTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("create guest resume request")
+	}
+	transport := &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: resumeGuestTimeout, KeepAlive: 30 * time.Second}).DialContext}
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   resumeGuestTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	defer transport.CloseIdleConnections()
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("guest resume request failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("guest resume request returned HTTP %d", resp.StatusCode)
+	}
+	w.Status.Execution = actual
+	return nil
+}
+
+func resumeGuestExpectedExecution(w *api.ResumablePod, p *core.Pod) (*api.Execution, error) {
+	if w.Status.PodUID == "" || w.Status.PodUID != string(p.UID) {
+		return nil, fmt.Errorf("workload Pod identity changed")
+	}
+	if w.Status.Execution != nil {
+		if !api.ConfirmedExecution(w, p) {
+			return nil, fmt.Errorf("confirmed guest execution identity changed")
+		}
+		return w.Status.Execution, nil
+	}
+	if !api.ExecutionStarted(p, w.Spec.Container.Name) {
+		return nil, fmt.Errorf("guest container is not running")
+	}
+	for i := range p.Status.ContainerStatuses {
+		status := &p.Status.ContainerStatuses[i]
+		if status.Name == w.Spec.Container.Name {
+			return &api.Execution{
+				PodUID:      string(p.UID),
+				ContainerID: strings.TrimPrefix(status.ContainerID, "containerd://"),
+				PodIP:       p.Status.PodIP,
+			}, nil
+		}
+	}
+	return nil, fmt.Errorf("guest container status is missing")
+}
+
+// Keep URL construction local and strict if this endpoint is ever moved to a
+// separately configured guest port.
+func resumeGuestURL(ip string) (string, error) {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return "", fmt.Errorf("guest IP is invalid")
+	}
+	return "http://" + net.JoinHostPort(parsed.String(), strconv.Itoa(guestapi.Port)) + "/v1/unquiesce", nil
+}

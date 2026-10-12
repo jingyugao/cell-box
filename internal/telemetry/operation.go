@@ -14,9 +14,10 @@ import (
 const operationAnnotation = "cellbox.local/operation-trace"
 
 type operationContext struct {
-	Parent     string    `json:"parent"`
-	Generation int64     `json:"generation"`
-	Expires    time.Time `json:"expires"`
+	Parent       string    `json:"parent"`
+	Generation   int64     `json:"generation"`
+	TransitionID string    `json:"transitionId,omitempty"`
+	Expires      time.Time `json:"expires"`
 }
 
 // InjectOperation accompanies the same optimistic spec patch that requests work.
@@ -39,7 +40,7 @@ func InjectOperation(ctx context.Context, w *api.ResumablePod) {
 func ExtractOperation(ctx context.Context, w *api.ResumablePod) context.Context {
 	var op operationContext
 	raw := w.Annotations[operationAnnotation]
-	if len(raw) > 512 || json.Unmarshal([]byte(raw), &op) != nil || op.Generation != w.Generation || time.Now().After(op.Expires) {
+	if len(raw) > 512 || json.Unmarshal([]byte(raw), &op) != nil || (op.TransitionID == "" && op.Generation != w.Generation || op.TransitionID != "" && op.TransitionID != w.Spec.TransitionID) || time.Now().After(op.Expires) {
 		return ctx
 	}
 	// Steady-state readiness refreshes must not keep appending to a finished resume.
@@ -51,4 +52,16 @@ func ExtractOperation(ctx context.Context, w *api.ResumablePod) context.Context 
 
 func StartAt(ctx context.Context, name string, started time.Time, attributes ...attribute.KeyValue) (context.Context, trace.Span) {
 	return otel.Tracer("cellbox.runtime").Start(ctx, name, trace.WithTimestamp(started), trace.WithAttributes(attributes...))
+}
+
+// ResumeOperationAnnotation binds a one-patch command to its fenced token,
+// avoiding an extra resource read solely to obtain the next generation.
+func ResumeOperationAnnotation(ctx context.Context, transitionID string) string {
+	if !trace.SpanContextFromContext(ctx).IsValid() {
+		return ""
+	}
+	carrier := propagation.MapCarrier{}
+	propagation.TraceContext{}.Inject(ctx, carrier)
+	data, _ := json.Marshal(operationContext{Parent: carrier.Get("traceparent"), TransitionID: transitionID, Expires: time.Now().Add(30 * time.Minute)})
+	return string(data)
 }

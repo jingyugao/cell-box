@@ -1,7 +1,9 @@
 package service
 
 import (
+	"cellbox.local/cellbox/internal/boxprovider"
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -48,7 +50,27 @@ func (s *Service) ensureRunning(request context.Context, client, key, id string,
 		return s.bindEnsureKey(client, key, digest, id, current.Box.Generation, active)
 	}
 
-	observed, err := s.observe(request, current)
+	_, nodeResume := s.providers[current.Profile.Provider].(boxprovider.ResumeRequestProvider)
+	var observed Box
+	if _, ok := s.providers[current.Profile.Provider].(boxprovider.CompletionObservationProvider); nodeResume && ok {
+		observation, readErr := s.cachedRuntimeObservation(request, current)
+		if readErr != nil {
+			return Operation{}, readErr
+		}
+		for attempt := 0; attempt < 3; attempt++ {
+			observed, err = s.applyRuntimeObservation(request, current, observation, observation.Phase == "deleted")
+			if !errors.Is(err, errBoxObservationConflict) {
+				break
+			}
+			current, err = s.rawBox(id)
+			if err != nil {
+				break
+			}
+		}
+	} else {
+		nodeResume = false
+		observed, err = s.observe(request, current)
+	}
 	if err != nil {
 		return Operation{}, err
 	}
@@ -117,7 +139,10 @@ func (s *Service) ensureRunning(request context.Context, client, key, id string,
 				return streamErr
 			}
 			if repair {
-				if !b.ResumePending || !b.ResumeNeedsGuest || b.ResumeExecutionID != b.ExecutionID ||
+				if nodeResume && b.ResumePending && b.ResumeIntentID != "" && !b.ResumeNeedsGuest {
+					// The node owns partial restoration. Retry the same transition;
+					// never replace it with a second runsc restore intent.
+				} else if !b.ResumePending || !b.ResumeNeedsGuest || b.ResumeExecutionID != b.ExecutionID ||
 					b.ResumeTransitionID != b.TransitionID || b.ResumeObservedTransitionID != b.ObservedTransitionID {
 					return apiError("STALE_TRANSITION", "Guest resume intent no longer matches the observed runtime")
 				}
@@ -159,7 +184,7 @@ func (s *Service) ensureRunning(request context.Context, client, key, id string,
 			operation.Result = map[string]string{"boxId": id}
 			operation.Box = &box
 		case "resuming":
-			if !b.ResumePending || !b.ResumeNeedsGuest {
+			if !b.ResumePending || (!b.ResumeNeedsGuest && !nodeResume) {
 				return apiError("CONFLICT", "Box has an unconfirmed resume transition")
 			}
 			if err := admitTransition(true); err != nil {

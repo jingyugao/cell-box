@@ -76,18 +76,21 @@ type Status struct {
 	ObservedGeneration int64  `json:"observedGeneration,omitempty"`
 	// ObservedTransitionID is set with lifecycle phase updates and identifies
 	// the transition whose requested state the controller has observed.
-	ObservedTransitionID string           `json:"observedTransitionID,omitempty"`
-	SpecHash             string           `json:"specHash,omitempty"`
-	Cycle                int64            `json:"cycle,omitempty"`
-	PodName              string           `json:"podName,omitempty"`
-	PodUID               string           `json:"podUID,omitempty"`
-	Execution            *Execution       `json:"execution,omitempty"`
-	Snapshot             string           `json:"snapshot,omitempty"`
-	RebuildNonce         string           `json:"rebuildNonce,omitempty"`
-	UpgradeNonce         string           `json:"upgradeNonce,omitempty"`
-	RetryNonce           string           `json:"retryNonce,omitempty"`
-	Since                meta.Time        `json:"since,omitempty"`
-	Conditions           []meta.Condition `json:"conditions,omitempty"`
+	ObservedTransitionID string `json:"observedTransitionID,omitempty"`
+	// ResumeReadyTransitionID is published only after the node has reopened
+	// Guest admission for this exact transition and execution.
+	ResumeReadyTransitionID string           `json:"resumeReadyTransitionID,omitempty"`
+	SpecHash                string           `json:"specHash,omitempty"`
+	Cycle                   int64            `json:"cycle,omitempty"`
+	PodName                 string           `json:"podName,omitempty"`
+	PodUID                  string           `json:"podUID,omitempty"`
+	Execution               *Execution       `json:"execution,omitempty"`
+	Snapshot                string           `json:"snapshot,omitempty"`
+	RebuildNonce            string           `json:"rebuildNonce,omitempty"`
+	UpgradeNonce            string           `json:"upgradeNonce,omitempty"`
+	RetryNonce              string           `json:"retryNonce,omitempty"`
+	Since                   meta.Time        `json:"since,omitempty"`
+	Conditions              []meta.Condition `json:"conditions,omitempty"`
 }
 type ResumablePod struct {
 	meta.TypeMeta   `json:",inline"`

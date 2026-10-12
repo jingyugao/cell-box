@@ -45,3 +45,20 @@ func TestOperationPropagationRejectsStaleAndSettledWork(t *testing.T) {
 		})
 	}
 }
+
+func TestResumeTraceIsBoundToTransition(t *testing.T) {
+	sc := trace.NewSpanContext(trace.SpanContextConfig{TraceID: trace.TraceID{1}, SpanID: trace.SpanID{2}, TraceFlags: trace.FlagsSampled})
+	ctx := trace.ContextWithSpanContext(context.Background(), sc)
+	w := &api.ResumablePod{}
+	w.Spec.TransitionID = "resume-one"
+	w.Spec.DesiredState = "Running"
+	w.Status.Phase = "Restoring"
+	w.Annotations = map[string]string{operationAnnotation: ResumeOperationAnnotation(ctx, "resume-one")}
+	if trace.SpanContextFromContext(ExtractOperation(context.Background(), w)).TraceID() != sc.TraceID() {
+		t.Fatal("lost resume parent")
+	}
+	w.Spec.TransitionID = "resume-two"
+	if trace.SpanContextFromContext(ExtractOperation(context.Background(), w)).IsValid() {
+		t.Fatal("attached trace to different transition")
+	}
+}
