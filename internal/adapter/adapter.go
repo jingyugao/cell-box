@@ -194,7 +194,9 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 			if err = a.claimHome(t); err != nil {
 				return nil, err
 			}
-			return append(append([]string{}, args[:idx]...), "restore", "--detach", "--image-path="+path, id), nil
+			// Resume execution as soon as kernel state is restored. Memory pages
+			// load in the background; callers must check application readiness.
+			return append(append([]string{}, args[:idx]...), "restore", "--background", "--detach", "--image-path="+path, id), nil
 		}
 		if err = a.claimHome(t); err != nil {
 			return nil, err

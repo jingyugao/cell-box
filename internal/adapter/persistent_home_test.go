@@ -3,6 +3,7 @@ package adapter
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -62,8 +63,9 @@ func TestPersistentHomeIsConsumedBeforeRestoreStarts(t *testing.T) {
 	if err = create("new-pod", sid); err != nil {
 		t.Fatal(err)
 	}
-	args, err := a.Rewrite([]string{"start", sid})
-	if err != nil || len(args) == 0 || args[0] != "restore" {
+	args, err := a.Rewrite([]string{"--root=/run/test", "start", sid})
+	want := []string{"--root=/run/test", "restore", "--background", "--detach", "--image-path=" + snapshot, sid}
+	if err != nil || !reflect.DeepEqual(args, want) {
 		t.Fatalf("restore rewrite: %v %v", args, err)
 	}
 	if err = homevolume.ValidateCheckpoint(base, "owner", home.ID, "snapshot"); err == nil {
