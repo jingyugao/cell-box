@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"cellbox.local/cellbox/internal/archivelimits"
 	"cellbox.local/cellbox/internal/guestapi"
 )
 
@@ -322,13 +323,13 @@ func TestArchiveRoundTripsEntryLargerThanFileTransferLimit(t *testing.T) {
 	}
 }
 
-func TestArchiveRejectsEntryOverOneGiB(t *testing.T) {
+func TestArchiveRejectsEntryOverConfiguredLimit(t *testing.T) {
 	c := testConfig(t)
 	f, err := os.Create(filepath.Join(c.Workspace, "oversized.bin"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.Truncate((1 << 30) + 1); err != nil {
+	if err := f.Truncate(archivelimits.MaxEntryBytes + 1); err != nil {
 		f.Close()
 		t.Fatal(err)
 	}
@@ -348,7 +349,7 @@ func TestArchiveRejectsEntryOverOneGiB(t *testing.T) {
 	var body bytes.Buffer
 	gz := gzip.NewWriter(&body)
 	tw := tar.NewWriter(gz)
-	if err := tw.WriteHeader(&tar.Header{Name: "oversized.bin", Mode: 0640, Typeflag: tar.TypeReg, Size: (1 << 30) + 1}); err != nil {
+	if err := tw.WriteHeader(&tar.Header{Name: "oversized.bin", Mode: 0640, Typeflag: tar.TypeReg, Size: archivelimits.MaxEntryBytes + 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := gz.Close(); err != nil {
