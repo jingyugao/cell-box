@@ -32,8 +32,8 @@ type Backend struct {
 	HostMountNamespace bool
 	Runtime            cri.RuntimeServiceClient
 	Images             cri.ImageServiceClient
-	// Objects is optional for local-only installations. When configured, sealed
-	// snapshots are durable in object storage and Base is only a node cache.
+	// Objects stores workspace archives and inventory metadata. Memory checkpoints
+	// remain on their assigned node under Base.
 	Objects           objectstorage.Objects
 	forgetMu          sync.Mutex
 	forgetSuccess     map[forgetKey]struct{}
@@ -41,8 +41,6 @@ type Backend struct {
 	inventoryLocks    sync.Map
 	inventoryState    map[string]string
 	inventoryVersions map[string]string
-	durableMu         sync.Mutex
-	durableSnapshots  map[string]bool
 }
 
 type forgetKey struct {
@@ -165,23 +163,10 @@ func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.P
 		if err = b.verifySnapshotHome(r, m); err != nil {
 			return err
 		}
-		return b.uploadSnapshot(ctx, r, path)
+		b.clearForgetSuccess(r)
+		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
-	}
-	// The controller may have restarted after the object upload committed but
-	// before its status transition. Adopt the durable snapshot before considering
-	// another destructive runsc checkpoint.
-	if b.Objects != nil {
-		if err = b.downloadSnapshot(ctx, r, path); err == nil {
-			if _, err = b.verifySnapshotImage(ctx, r, path); err != nil {
-				return err
-			}
-			b.clearForgetSuccess(r)
-			return nil
-		} else if !errors.Is(err, objectstorage.ErrNotFound) {
-			return err
-		}
 	}
 	pending := path + ".pending"
 	// Never repeat a destructive checkpoint after an ambiguous process crash.
@@ -245,7 +230,8 @@ func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.P
 	if _, err = VerifyCached(path, string(r.UID), r.Status.SpecHash, b.Runsc); err != nil {
 		return err
 	}
-	return b.uploadSnapshot(ctx, r, path)
+	b.clearForgetSuccess(r)
+	return nil
 }
 
 func (b *Backend) verifySnapshotImage(ctx context.Context, r *api.ResumablePod, path string) (*Manifest, error) {
@@ -289,19 +275,10 @@ func (b *Backend) prepareSnapshot(ctx context.Context, r *api.ResumablePod) erro
 		if err != nil {
 			return err
 		}
-		if _, err = os.Stat(path); errors.Is(err, os.ErrNotExist) && b.Objects != nil {
-			if err = b.downloadSnapshot(ctx, r, path); err != nil {
-				return err
-			}
-		} else if err != nil {
-			return err
+		if _, err = os.Stat(path); err != nil {
+			return fmt.Errorf("node-local checkpoint unavailable: %w", err)
 		}
 		if _, err = b.verifySnapshotImage(ctx, r, path); err != nil {
-			return err
-		}
-		// The cache may be the only surviving copy after an interrupted upload.
-		// Do not authorize restore until the remote durable copy is committed.
-		if err = b.uploadSnapshot(ctx, r, path); err != nil {
 			return err
 		}
 	}
@@ -421,18 +398,11 @@ func (b *Backend) Forget(ctx context.Context, r *api.ResumablePod) error {
 	}
 	b.forgetMu.Unlock()
 	if b.Objects != nil && !alreadyCleaned {
-		if err := b.Objects.DeletePrefix(ctx, "checkpoints/"+string(r.UID)); err != nil {
+		if err := b.Objects.Delete(ctx, "checkpoints/"+string(r.UID)+"/metadata.json"); err != nil && !errors.Is(err, objectstorage.ErrNotFound) {
 			return err
 		}
 		b.clearInventoryState(key.owner)
 	}
-	b.durableMu.Lock()
-	for k := range b.durableSnapshots {
-		if strings.HasPrefix(k, string(r.UID)+"/") {
-			delete(b.durableSnapshots, k)
-		}
-	}
-	b.durableMu.Unlock()
 	if err := os.RemoveAll(filepath.Join(b.Base, "workloads", string(r.UID))); err != nil {
 		return err
 	}

@@ -2,7 +2,9 @@
 package archivelimits
 
 const (
-	MaxEntryBytes   int64 = 1 << 30
-	MaxContentBytes int64 = 1 << 30
-	MaxWireBytes    int64 = 2 << 30
+	// Keep archives bounded while leaving enough room for large workspaces and
+	// for compressed archives whose contents do not compress well.
+	MaxEntryBytes   int64 = 8 << 30
+	MaxContentBytes int64 = 16 << 30
+	MaxWireBytes    int64 = 18 << 30
 )

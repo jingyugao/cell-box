@@ -18,7 +18,6 @@ import (
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/inventory"
 	"cellbox.local/cellbox/internal/objectstorage"
-	runtimebackend "cellbox.local/cellbox/internal/runtime"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -176,304 +175,6 @@ func testWorkload(owner, snapshot, spec, image string) *api.ResumablePod {
 	return &api.ResumablePod{ObjectMeta: meta.ObjectMeta{UID: typesUID(owner)}, Spec: api.Spec{Container: core.Container{Image: image}}, Status: api.Status{SpecHash: spec, Snapshot: snapshot}}
 }
 
-func TestCheckpointUploadRetryDoesNotRepeatRunscCheckpoint(t *testing.T) {
-	base := t.TempDir()
-	runsc := filepath.Join(base, "runsc")
-	if err := os.WriteFile(runsc, []byte("runsc"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	objects := &memoryObjects{putFailures: 1}
-	workload := testWorkload("owner", "snapshot", "spec", "image")
-	path := testCheckpoint(t, base, "owner", "snapshot", "spec", "image-id", runsc)
-	b := &Backend{Base: base, Runsc: runsc, Objects: objects}
-	if err := b.Checkpoint(context.Background(), workload, nil); err == nil {
-		t.Fatal("expected upload failure")
-	}
-	if _, err := os.Stat(filepath.Join(path, "checkpoint.img")); err != nil {
-		t.Fatal("local sealed checkpoint must remain after upload failure:", err)
-	}
-	if err := b.Checkpoint(context.Background(), workload, nil); err != nil {
-		t.Fatal("retry must upload the sealed checkpoint without CRI/runsc access:", err)
-	}
-	if len(objects.objects) != 1 {
-		t.Fatalf("expected one uploaded archive, got %d", len(objects.objects))
-	}
-}
-
-func TestPrepareDownloadsAndVerifiesColdCacheSnapshot(t *testing.T) {
-	base := t.TempDir()
-	runsc := filepath.Join(base, "runsc")
-	if err := os.WriteFile(runsc, []byte("runsc"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	objects := &memoryObjects{objects: map[string][]byte{}}
-	sourceBase := t.TempDir()
-	sourcePath := testCheckpoint(t, sourceBase, "owner", "snapshot", "spec", "image-id", runsc)
-	workload := testWorkload("owner", "snapshot", "spec", "image")
-	source := &Backend{Base: sourceBase, Runsc: runsc, Objects: objects}
-	if err := source.uploadSnapshot(context.Background(), workload, sourcePath); err != nil {
-		t.Fatal(err)
-	}
-	b := &Backend{Base: base, Runsc: runsc, Objects: objects, Images: imageClient{id: "image-id"}}
-	pod := &core.Pod{ObjectMeta: meta.ObjectMeta{UID: "pod-uid", Namespace: "ns", Name: "pod"}}
-	if err := b.Prepare(context.Background(), workload, pod); err != nil {
-		t.Fatal("cold cache restore should download and verify:", err)
-	}
-	if objects.putCalls != 1 {
-		t.Fatalf("restore should not re-upload an already committed snapshot, puts=%d", objects.putCalls)
-	}
-	path, _ := SnapshotPath(base, "owner", "snapshot")
-	if _, err := Verify(path, "owner", "spec", runsc); err != nil {
-		t.Fatal("downloaded checkpoint did not verify:", err)
-	}
-	if _, err := os.Stat(filepath.Join(base, "tickets", "pod-uid.json")); err != nil {
-		t.Fatal("ticket missing after validated restore:", err)
-	}
-}
-
-func TestCheckpointAdoptsRemoteCommitWithoutRepeatingRunscSave(t *testing.T) {
-	base := t.TempDir()
-	runsc := filepath.Join(base, "runsc")
-	if err := os.WriteFile(runsc, []byte("runsc"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	objects := &memoryObjects{objects: map[string][]byte{}}
-	sourceBase := t.TempDir()
-	path := testCheckpoint(t, sourceBase, "owner", "snapshot", "spec", "image-id", runsc)
-	workload := testWorkload("owner", "snapshot", "spec", "image")
-	if err := (&Backend{Base: sourceBase, Runsc: runsc, Objects: objects}).uploadSnapshot(context.Background(), workload, path); err != nil {
-		t.Fatal(err)
-	}
-	// A nil CRI client makes any attempt to run a new checkpoint fail. The
-	// committed remote archive must be adopted and cached instead.
-	b := &Backend{Base: base, Runsc: runsc, Objects: objects, Images: imageClient{id: "image-id"}}
-	if err := b.Checkpoint(context.Background(), workload, nil); err != nil {
-		t.Fatal("remote committed snapshot should be adopted:", err)
-	}
-	local, _ := SnapshotPath(base, "owner", "snapshot")
-	if _, err := Verify(local, "owner", "spec", runsc); err != nil {
-		t.Fatal("adopted checkpoint did not verify:", err)
-	}
-}
-
-func TestPrepareRejectsCorruptRemoteSnapshot(t *testing.T) {
-	base := t.TempDir()
-	runsc := filepath.Join(base, "runsc")
-	if err := os.WriteFile(runsc, []byte("runsc"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	objects := &memoryObjects{objects: map[string][]byte{}}
-	sourceBase := t.TempDir()
-	path := testCheckpoint(t, sourceBase, "owner", "snapshot", "spec", "image-id", runsc)
-	workload := testWorkload("owner", "snapshot", "spec", "image")
-	if err := (&Backend{Base: sourceBase, Runsc: runsc, Objects: objects}).uploadSnapshot(context.Background(), workload, path); err != nil {
-		t.Fatal(err)
-	}
-	archive := objects.objects["checkpoints/owner/snapshot.tar"]
-	corruptContent := []byte("checkpoint contents")
-	position := bytes.Index(archive, corruptContent)
-	if position < 0 {
-		t.Fatal("could not find checkpoint payload in archive")
-	}
-	archive[position+len(corruptContent)-1] = 'x'
-	objects.objects["checkpoints/owner/snapshot.tar"] = archive
-	b := &Backend{Base: base, Runsc: runsc, Objects: objects, Images: imageClient{id: "image-id"}}
-	pod := &core.Pod{ObjectMeta: meta.ObjectMeta{UID: "pod-uid", Namespace: "ns", Name: "pod"}}
-	if err := b.Prepare(context.Background(), workload, pod); err == nil {
-		t.Fatal("corrupt remote snapshot was accepted")
-	}
-	if _, err := os.Stat(filepath.Join(base, "tickets", "pod-uid.json")); !os.IsNotExist(err) {
-		t.Fatal("ticket created for corrupt remote snapshot")
-	}
-}
-
-func TestPrepareRetriesInterruptedRemoteReadWithoutTicketOrCache(t *testing.T) {
-	base := t.TempDir()
-	runsc := filepath.Join(base, "runsc")
-	if err := os.WriteFile(runsc, []byte("runsc"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	objects := &memoryObjects{objects: map[string][]byte{}}
-	sourceBase := t.TempDir()
-	path := testCheckpoint(t, sourceBase, "owner", "snapshot", "spec", "image-id", runsc)
-	workload := testWorkload("owner", "snapshot", "spec", "image")
-	if err := (&Backend{Base: sourceBase, Runsc: runsc, Objects: objects}).uploadSnapshot(context.Background(), workload, path); err != nil {
-		t.Fatal(err)
-	}
-	objects.interruptedReads = 1
-	b := &Backend{Base: base, Runsc: runsc, Objects: objects, Images: imageClient{id: "image-id"}}
-	pod := &core.Pod{ObjectMeta: meta.ObjectMeta{UID: "pod-uid", Namespace: "ns", Name: "pod"}}
-	err := b.Prepare(context.Background(), workload, pod)
-	if !errors.Is(err, runtimebackend.ErrRetryableStorage) {
-		t.Fatalf("truncated transport read should be retryable, got %v", err)
-	}
-	local, _ := SnapshotPath(base, "owner", "snapshot")
-	if _, err = os.Lstat(local); !os.IsNotExist(err) {
-		t.Fatal("partial download became a final cache directory")
-	}
-	if _, err = os.Stat(filepath.Join(base, "tickets", "pod-uid.json")); !os.IsNotExist(err) {
-		t.Fatal("ticket created before complete snapshot verification")
-	}
-	if err = b.Prepare(context.Background(), workload, pod); err != nil {
-		t.Fatal("complete retry did not restore snapshot:", err)
-	}
-	if _, err = Verify(local, "owner", "spec", runsc); err != nil {
-		t.Fatal("retried snapshot did not verify:", err)
-	}
-}
-
-func TestForgetRetriesScopedRemoteDelete(t *testing.T) {
-	base := t.TempDir()
-	objects := &memoryObjects{objects: map[string][]byte{"checkpoints/owner/snapshot.tar": []byte("archive"), "checkpoints/other/snapshot.tar": []byte("other")}, deleteFailures: 1}
-	b := &Backend{Base: base, Objects: objects}
-	workload := testWorkload("owner", "snapshot", "spec", "image")
-	ownerPath := filepath.Join(base, "workloads", "owner")
-	if err := os.MkdirAll(ownerPath, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(ownerPath, "local"), []byte("cache"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.Forget(context.Background(), workload); err == nil {
-		t.Fatal("expected remote delete failure")
-	}
-	if _, err := os.Stat(ownerPath); err != nil {
-		t.Fatal("local cache must remain while remote deletion is unresolved:", err)
-	}
-	if err := b.Forget(context.Background(), workload); err != nil {
-		t.Fatal("delete retry failed:", err)
-	}
-	if objects.deletedPrefix != "checkpoints/owner" {
-		t.Fatalf("unexpected delete prefix %q", objects.deletedPrefix)
-	}
-	if _, ok := objects.objects["checkpoints/other/snapshot.tar"]; !ok {
-		t.Fatal("delete escaped owner prefix")
-	}
-	if _, err := os.Stat(ownerPath); !os.IsNotExist(err) {
-		t.Fatal("local cache was not cleared after remote deletion")
-	}
-}
-
-func TestForgetRemovesAbandonedCheckpointTransfersForOnlyTheirOwner(t *testing.T) {
-	base := t.TempDir()
-	runsc := filepath.Join(base, "runsc")
-	if err := os.WriteFile(runsc, []byte("runsc"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	objects := &memoryObjects{}
-	b := &Backend{Base: base, Runsc: runsc, Objects: objects}
-	abandoned := map[string][]string{}
-	for _, owner := range []string{"owner", "other"} {
-		ownerPath := filepath.Join(base, "workloads", owner)
-		leaveAbandoned := func(path string) {
-			t.Helper()
-			if filepath.Dir(path) != ownerPath {
-				t.Fatalf("checkpoint transfer escaped owner directory: %s", path)
-			}
-			// Preserve a transfer file as if the process died before deferred cleanup.
-			leftover := path + ".abandoned"
-			if err := os.WriteFile(leftover, []byte("partial transfer"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			abandoned[owner] = append(abandoned[owner], leftover)
-		}
-		objects.onPut = func(body io.ReadSeeker) { leaveAbandoned(body.(*os.File).Name()) }
-		objects.onRead = func() {
-			paths, err := filepath.Glob(filepath.Join(ownerPath, ".checkpoint-download-*.tar"))
-			if err != nil || len(paths) != 1 {
-				t.Fatalf("missing owner-specific download transfer: paths=%v err=%v", paths, err)
-			}
-			leaveAbandoned(paths[0])
-		}
-		workload := testWorkload(owner, "snapshot", "spec", "image")
-		path := testCheckpoint(t, base, owner, "snapshot", "spec", "image-id", runsc)
-		if err := b.uploadSnapshot(context.Background(), workload, path); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.RemoveAll(path); err != nil {
-			t.Fatal(err)
-		}
-		if err := b.downloadSnapshot(context.Background(), workload, path); err != nil {
-			t.Fatal(err)
-		}
-	}
-	shared := filepath.Join(base, ".checkpoint-upload-legacy.tar")
-	if err := os.WriteFile(shared, []byte("unknown owner"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.Forget(context.Background(), testWorkload("owner", "snapshot", "spec", "image")); err != nil {
-		t.Fatal(err)
-	}
-	for _, path := range abandoned["owner"] {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("abandoned owner transfer survived Forget: %s, err=%v", path, err)
-		}
-	}
-	for _, path := range append(abandoned["other"], shared) {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("Forget removed another owner's or shared file: %s, err=%v", path, err)
-		}
-	}
-}
-
-func TestForgetSkipsRepeatedRemoteCleanupButCheckpointInvalidatesCache(t *testing.T) {
-	base := t.TempDir()
-	runsc := filepath.Join(base, "runsc")
-	if err := os.WriteFile(runsc, []byte("runsc"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	objects := &memoryObjects{objects: map[string][]byte{"checkpoints/owner/old.tar": []byte("old"), "checkpoints/other/keep.tar": []byte("keep")}}
-	b := &Backend{Base: base, Runsc: runsc, Objects: objects}
-	workload := testWorkload("owner", "snapshot", "spec", "image")
-	workload.Status.Cycle = 4
-	if err := b.Forget(context.Background(), workload); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.Forget(context.Background(), workload); err != nil {
-		t.Fatal(err)
-	}
-	if objects.deleteCalls != 1 {
-		t.Fatalf("repeated running cleanup should perform one remote delete, got %d", objects.deleteCalls)
-	}
-
-	// A checkpoint can begin in the same lifecycle cycle. Its successful upload
-	// clears the prior cleanup cache so finalizer cleanup still deletes it.
-	workload.Status.Snapshot = "checkpoint-4"
-	sourceBase := t.TempDir()
-	sourcePath := testCheckpoint(t, sourceBase, "owner", workload.Status.Snapshot, "spec", "image-id", runsc)
-	archiveStore := &memoryObjects{objects: map[string][]byte{}}
-	if err := (&Backend{Base: sourceBase, Runsc: runsc, Objects: archiveStore}).uploadSnapshot(context.Background(), workload, sourcePath); err != nil {
-		t.Fatal(err)
-	}
-	objects.objects["checkpoints/owner/checkpoint-4.tar"] = archiveStore.objects["checkpoints/owner/checkpoint-4.tar"]
-	b.Images = imageClient{id: "image-id"}
-	if err := b.Checkpoint(context.Background(), workload, nil); err != nil {
-		t.Fatal("same-cycle remote checkpoint adoption failed:", err)
-	}
-	if err := b.Forget(context.Background(), workload); err != nil {
-		t.Fatal("same-cycle cleanup should delete the newly adopted checkpoint:", err)
-	}
-	if objects.deleteCalls != 2 {
-		t.Fatalf("checkpoint adoption did not invalidate cleanup cache, calls=%d", objects.deleteCalls)
-	}
-	if _, exists := objects.objects["checkpoints/owner/checkpoint-4.tar"]; exists {
-		t.Fatal("newly adopted checkpoint survived cleanup")
-	}
-	workload.DeletionTimestamp = &meta.Time{Time: time.Now()}
-	if err := b.Forget(context.Background(), workload); err != nil {
-		t.Fatal("deleting CR must perform remote cleanup:", err)
-	}
-	if objects.deleteCalls != 3 {
-		t.Fatalf("CR deletion skipped remote cleanup, calls=%d", objects.deleteCalls)
-	}
-	if _, exists := objects.objects["checkpoints/owner/checkpoint-4.tar"]; exists {
-		t.Fatal("checkpoint object survived deleting CR cleanup")
-	}
-	if _, exists := objects.objects["checkpoints/other/keep.tar"]; !exists {
-		t.Fatal("cleanup escaped owner prefix")
-	}
-}
-
 func TestSuspendedInventoryPublishesAfterSnapshotAndRepairsAfterRestart(t *testing.T) {
 	owner, snapshot := "owner-123", "checkpoint-4"
 	box, err := json.Marshal(map[string]any{"id": "box-123", "phase": "running", "generation": 3, "image": "prepared@sha256:abc"})
@@ -488,8 +189,15 @@ func TestSuspendedInventoryPublishesAfterSnapshotAndRepairsAfterRestart(t *testi
 		"cellbox.local/box-id": "box-123", inventory.ClientLabel: inventory.ClientValue("client-one"),
 	}, Annotations: map[string]string{inventory.Annotation: string(annotation)}},
 		Spec: api.Spec{DesiredState: "Suspended"}, Status: api.Status{Phase: "Suspended", Snapshot: snapshot, Cycle: 4}}
-	objects := &memoryObjects{objects: map[string][]byte{"checkpoints/" + owner + "/" + snapshot + ".tar": []byte("archive")}}
-	backend := &Backend{Objects: objects}
+	base := t.TempDir()
+	runsc := filepath.Join(base, "runsc")
+	if err := os.WriteFile(runsc, []byte("runsc"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	workload.Status.SpecHash = "spec"
+	testCheckpoint(t, base, owner, snapshot, "spec", "image-id", runsc)
+	objects := &memoryObjects{}
+	backend := &Backend{Base: base, Runsc: runsc, Objects: objects}
 	if err = backend.SyncInventory(context.Background(), workload); err != nil {
 		t.Fatal("publish suspended inventory:", err)
 	}
@@ -518,7 +226,7 @@ func TestSuspendedInventoryPublishesAfterSnapshotAndRepairsAfterRestart(t *testi
 
 	// A process restart has an empty cache and must reconstruct a missing index.
 	delete(objects.objects, indexKey)
-	restarted := &Backend{Objects: objects}
+	restarted := &Backend{Base: base, Runsc: runsc, Objects: objects}
 	if err = restarted.SyncInventory(context.Background(), workload); err != nil {
 		t.Fatal("restart did not repair index:", err)
 	}
@@ -619,29 +327,9 @@ func TestCheckpointingInventoryPublishesBeforeArchiveUpload(t *testing.T) {
 	}
 }
 
-func TestSuspendedInventoryRequiresDurableSnapshot(t *testing.T) {
-	owner := "owner-456"
-	box := json.RawMessage(`{"id":"box-456"}`)
-	annotation, err := json.Marshal(inventory.Record{ClientID: "client-two", Box: box})
-	if err != nil {
-		t.Fatal(err)
-	}
-	workload := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{UID: typesUID(owner), Labels: map[string]string{
-		"cellbox.local/box-id": "box-456", inventory.ClientLabel: inventory.ClientValue("client-two"),
-	}, Annotations: map[string]string{inventory.Annotation: string(annotation)}},
-		Spec: api.Spec{DesiredState: "Suspended"}, Status: api.Status{Phase: "Suspended", Snapshot: "checkpoint-1"}}
-	backend := &Backend{Objects: &memoryObjects{objects: map[string][]byte{}}}
-	if err = backend.SyncInventory(context.Background(), workload); err == nil {
-		t.Fatal("published inventory without a durable snapshot")
-	}
-	if len(backend.Objects.(*memoryObjects).objects) != 0 {
-		t.Fatal("missing snapshot produced an inventory object")
-	}
-}
-
 func typesUID(s string) types.UID { return types.UID(s) }
 
-func TestWarmPrepareUsesLocalCacheAndRestartRechecksDurability(t *testing.T) {
+func TestCheckpointAndPrepareRemainLocalAcrossRestart(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()
 	bin := filepath.Join(base, "runsc")
@@ -657,6 +345,9 @@ func TestWarmPrepareUsesLocalCacheAndRestartRechecksDurability(t *testing.T) {
 		t.Fatal(err)
 	}
 	gets, puts := objects.getCalls, objects.putCalls
+	if gets != 0 || puts != 0 {
+		t.Fatal("checkpoint accessed object storage")
+	}
 	if err := b.Prepare(ctx, w, p); err != nil {
 		t.Fatal(err)
 	}
@@ -670,13 +361,13 @@ func TestWarmPrepareUsesLocalCacheAndRestartRechecksDurability(t *testing.T) {
 	if err := restarted.Prepare(ctx, w, p); err != nil {
 		t.Fatal(err)
 	}
-	if objects.getCalls != gets+1 || objects.putCalls != puts {
-		t.Fatal("restart must reestablish remote durability once")
+	if objects.getCalls != gets || objects.putCalls != puts {
+		t.Fatal("restart accessed object storage for a local checkpoint")
 	}
 	if err := restarted.Prepare(ctx, w, p); err != nil {
 		t.Fatal(err)
 	}
-	if objects.getCalls != gets+1 {
+	if objects.getCalls != gets {
 		t.Fatal("repeated prepare re-read OSS")
 	}
 	for _, change := range []string{"file", "runtime"} {
@@ -704,5 +395,43 @@ func TestWarmPrepareUsesLocalCacheAndRestartRechecksDurability(t *testing.T) {
 		if _, err := VerifyCached(path, "owner", "spec", bin); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestPrepareMissingLocalCheckpointNeverDownloadsRemoteCopy(t *testing.T) {
+	base := t.TempDir()
+	objects := &memoryObjects{objects: map[string][]byte{"checkpoints/owner/snapshot.tar": []byte("legacy remote snapshot")}}
+	b := &Backend{Base: base, Objects: objects}
+	if err := b.prepareSnapshot(context.Background(), testWorkload("owner", "snapshot", "spec", "image")); err == nil {
+		t.Fatal("missing local checkpoint accepted")
+	}
+	if objects.getCalls != 0 || objects.putCalls != 0 {
+		t.Fatal("restore accessed object storage")
+	}
+}
+
+func TestForgetOnlyDeletesInventoryAndLocalOwnerFiles(t *testing.T) {
+	base := t.TempDir()
+	objects := &memoryObjects{objects: map[string][]byte{
+		"checkpoints/owner/metadata.json": []byte("index"),
+		"checkpoints/owner/snapshot.tar":  []byte("legacy"),
+		"checkpoints/other/metadata.json": []byte("other"),
+	}}
+	path := filepath.Join(base, "workloads", "owner")
+	if err := os.MkdirAll(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	b := &Backend{Base: base, Objects: objects}
+	if err := b.Forget(context.Background(), testWorkload("owner", "snapshot", "spec", "image")); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := objects.objects["checkpoints/owner/metadata.json"]; ok {
+		t.Fatal("inventory remains")
+	}
+	if len(objects.objects) != 2 || objects.deleteCalls != 0 {
+		t.Fatal("cleanup scanned or deleted remote checkpoint content")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("local checkpoint remains", err)
 	}
 }

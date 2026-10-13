@@ -135,12 +135,6 @@ func (b *Backend) CollectGarbage(ctx context.Context) error {
 				if !ValidID(job.Owner) || !ValidID(job.Snapshot) || job.Owner != owner.Name() || entry.Name() != job.Snapshot+".json" {
 					return fmt.Errorf("invalid snapshot cleanup record")
 				}
-				if b.Objects != nil {
-					key, _ := checkpointObjectKey(job.Owner, job.Snapshot)
-					if err := b.Objects.Delete(ctx, key); err != nil && !errors.Is(err, objectstorage.ErrNotFound) {
-						return err
-					}
-				}
 				cache, err := SnapshotPath(b.Base, job.Owner, job.Snapshot)
 				if err != nil {
 					return err
@@ -151,9 +145,6 @@ func (b *Backend) CollectGarbage(ctx context.Context) error {
 				if err = os.Remove(cache + ".verified.json"); err != nil && !os.IsNotExist(err) {
 					return err
 				}
-				b.durableMu.Lock()
-				delete(b.durableSnapshots, job.Owner+"/"+job.Snapshot)
-				b.durableMu.Unlock()
 				if err = os.Rename(path, strings.TrimSuffix(path, ".json")+".done"); err != nil {
 					if os.IsNotExist(err) {
 						return nil

@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"cellbox.local/cellbox/internal/archivelimits"
 	"cellbox.local/cellbox/internal/boxprovider"
 	"cellbox.local/cellbox/internal/guestapi"
 )
@@ -87,8 +88,10 @@ func (archiveZeroReader) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func TestValidateArchiveOneGiBEntryBoundary(t *testing.T) {
-	for _, size := range []int64{1 << 30, (1 << 30) + 1} {
+func TestValidateArchiveLargeEntryBoundary(t *testing.T) {
+	// Exercise a payload just over the former 1 GiB limit without buffering it
+	// in memory; a streamed all-zero payload compresses to a small fixture.
+	for _, size := range []int64{(1 << 30) + 1, archivelimits.MaxEntryBytes + 1} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			var body bytes.Buffer
 			gz := gzip.NewWriter(&body)
@@ -96,7 +99,7 @@ func TestValidateArchiveOneGiBEntryBoundary(t *testing.T) {
 			if err := tw.WriteHeader(&tar.Header{Name: "large.bin", Typeflag: tar.TypeReg, Mode: 0640, Size: size}); err != nil {
 				t.Fatal(err)
 			}
-			if size == 1<<30 {
+			if size == (1<<30)+1 {
 				if _, err := io.CopyN(tw, archiveZeroReader{}, size); err != nil {
 					t.Fatal(err)
 				}
@@ -108,10 +111,10 @@ func TestValidateArchiveOneGiBEntryBoundary(t *testing.T) {
 				t.Fatal(err)
 			}
 			err := validateArchive(bytes.NewReader(body.Bytes()))
-			if size == 1<<30 && err != nil {
-				t.Fatalf("1 GiB must be accepted: %v", err)
+			if size == (1<<30)+1 && err != nil {
+				t.Fatalf("entry just over 1 GiB must be accepted: %v", err)
 			}
-			if size > 1<<30 && (err == nil || !strings.Contains(err.Error(), "content limit")) {
+			if size > archivelimits.MaxEntryBytes && (err == nil || !strings.Contains(err.Error(), "content limit")) {
 				t.Fatalf("oversized header must be rejected before reading its body: %v", err)
 			}
 		})

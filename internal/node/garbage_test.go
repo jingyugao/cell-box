@@ -36,8 +36,8 @@ func TestSnapshotCleanupSurvivesRestartAndPreservesNextCheckpoint(t *testing.T) 
 	if err := b.CollectGarbage(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := objects.objects["checkpoints/owner/checkpoint-1.tar"]; ok {
-		t.Fatal("old snapshot not cleaned")
+	if _, ok := objects.objects["checkpoints/owner/checkpoint-1.tar"]; !ok {
+		t.Fatal("local garbage collection touched a legacy remote snapshot")
 	}
 	if err := b.InvalidateSnapshot(ctx, w); err != nil {
 		t.Fatal(err)
