@@ -105,7 +105,7 @@ func (b *Backend) SyncInventory(ctx context.Context, w *api.ResumablePod) error 
 		return nil
 	}
 	if phase == "Suspended" {
-		if err := b.verifyDurableSnapshot(ctx, owner, w.Status.Snapshot); err != nil {
+		if err := b.verifyLocalSnapshot(w); err != nil {
 			return err
 		}
 	}
@@ -128,26 +128,19 @@ func (b *Backend) SyncInventory(ctx context.Context, w *api.ResumablePod) error 
 	return nil
 }
 
-func (b *Backend) verifyDurableSnapshot(ctx context.Context, owner, snapshot string) error {
-	snapshotKey, err := checkpointObjectKey(owner, snapshot)
+func (b *Backend) verifyLocalSnapshot(w *api.ResumablePod) error {
+	if b.Base == "" || b.Runsc == "" {
+		return errors.New("cannot publish suspended inventory without local checkpoint storage configuration")
+	}
+	path, err := SnapshotPath(b.Base, string(w.UID), w.Status.Snapshot)
 	if err != nil {
 		return err
 	}
-	body, size, _, err := b.Objects.Get(ctx, snapshotKey)
+	m, err := VerifyCached(path, string(w.UID), w.Status.SpecHash, b.Runsc)
 	if err != nil {
-		if errors.Is(err, objectstorage.ErrNotFound) {
-			return fmt.Errorf("cannot publish suspended inventory before its snapshot is durable")
-		}
-		return retryableStorage(err)
+		return fmt.Errorf("cannot publish suspended inventory without a valid local snapshot: %w", err)
 	}
-	closeErr := body.Close()
-	if closeErr != nil {
-		return retryableStorage(closeErr)
-	}
-	if size < 1 {
-		return errors.New("cannot publish an empty suspended snapshot")
-	}
-	return nil
+	return b.verifySnapshotHome(w, m)
 }
 
 func readInventoryObject(ctx context.Context, objects objectstorage.Objects, key string) (data []byte, etag string, resultErr error) {
