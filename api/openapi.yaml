@@ -208,6 +208,9 @@ components:
           type: string
         websocket:
           type: boolean
+        diskArchives:
+          type: boolean
+          description: Supports stopping execution and archiving persistent workspace without a process checkpoint.
       required:
       - exec
       - files
@@ -931,9 +934,22 @@ paths:
       summary: Inspect owned box and refresh provider lifecycle phase
   /v1/boxes/{id}/archives:
     post:
-      description: result.archiveId identifies the capture; source runtime is not
-        destroyed or suspended. Excludes debug credentials and files outside workspace.
+      description: result.archiveId identifies the capture. By default the source
+        runtime is not destroyed or suspended. diskOnly stops execution without a
+        process checkpoint and captures persistent workspace files even from a failed
+        runtime; its disk is retained on failure. Excludes credentials outside workspace.
       operationId: captureArchive
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                diskOnly:
+                  type: boolean
+                  default: false
       parameters:
       - in: path
         name: id

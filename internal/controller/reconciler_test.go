@@ -73,6 +73,7 @@ func TestSharedDirectoryMountAdmissionAndFingerprint(t *testing.T) {
 type fakeRuntime struct {
 	checkpoints, prepares, cleanups int
 	archiveCaptures                 int
+	archiveHook                     func(context.Context, *api.ResumablePod, api.ArchiveCaptureRequest)
 	prepareError, cleanupError      error
 	checkpointError                 error
 	checkpointFailures              int
@@ -107,9 +108,12 @@ func (f *fakeRuntime) SyncInventory(_ context.Context, w *api.ResumablePod) erro
 	f.inventoryPhases = append(f.inventoryPhases, w.Status.Phase)
 	return f.inventoryError
 }
-func (f *fakeRuntime) CaptureWorkspaceArchive(_ context.Context, _ *api.ResumablePod, request api.ArchiveCaptureRequest) (api.ArchiveCaptureResult, error) {
+func (f *fakeRuntime) CaptureWorkspaceArchive(ctx context.Context, w *api.ResumablePod, request api.ArchiveCaptureRequest) (api.ArchiveCaptureResult, error) {
 	f.archiveCaptures++
-	return api.ArchiveCaptureResult{ID: request.ID, Snapshot: request.Snapshot, Size: 12, SHA256: strings.Repeat("a", 64)}, nil
+	if f.archiveHook != nil {
+		f.archiveHook(ctx, w, request)
+	}
+	return api.ArchiveCaptureResult{ID: request.ID, Snapshot: request.Snapshot, DiskOnly: request.DiskOnly, Size: 12, SHA256: strings.Repeat("a", 64)}, nil
 }
 
 func TestSuspendedWorkspaceArchiveDispatchAndStaleRequestProgress(t *testing.T) {
@@ -177,6 +181,126 @@ func TestSuspendedWorkspaceArchiveDispatchAndStaleRequestProgress(t *testing.T) 
 		}
 	})
 }
+
+func TestDiskOnlyArchiveStopsFailedExecutionBeforeCapturingHome(t *testing.T) {
+	r, runtime, w := fixture(t)
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(w), w); err != nil {
+		t.Fatal(err)
+	}
+	// Broken execution settings must not prevent reading an already-owned disk.
+	w.Spec.Container.ImagePullPolicy = core.PullAlways
+	w.Spec.PersistentHome = true
+	w.Spec.DesiredState = "Suspended"
+	w.Annotations = map[string]string{api.ArchiveRequestAnnotation: `{"id":"arc-0123456789abcdef0123456789abcdef","snapshot":"","expiresAt":"2099-01-01T00:00:00Z","diskOnly":true}`}
+	if err := r.Update(context.Background(), w); err != nil {
+		t.Fatal(err)
+	}
+	w.Status.SpecHash = fingerprint(w)
+	w.Status.Phase = "Failed"
+	w.Status.Snapshot = ""
+	w.Status.PodName, w.Status.PodUID = "old", "old-uid"
+	if err := r.Status().Update(context.Background(), w); err != nil {
+		t.Fatal(err)
+	}
+	runtime.archiveHook = func(ctx context.Context, source *api.ResumablePod, _ api.ArchiveCaptureRequest) {
+		pods := &core.PodList{}
+		if err := r.List(ctx, pods, client.InNamespace(source.Namespace)); err != nil {
+			t.Fatal(err)
+		}
+		for i := range pods.Items {
+			if owned(source, &pods.Items[i]) || pods.Items[i].Labels[api.OwnerLabel] == string(source.UID) {
+				t.Fatal("disk archive started before the execution Pod was absent")
+			}
+		}
+		if runtime.cleanups == 0 {
+			t.Fatal("disk archive started before runtime cleanup")
+		}
+	}
+	for i := 0; i < 4; i++ {
+		step(t, r, w)
+		if runtime.archiveCaptures == 1 {
+			break
+		}
+	}
+	if runtime.archiveCaptures != 1 || runtime.checkpoints != 0 || runtime.prepares != 0 || runtime.cleanups < 1 {
+		t.Fatalf("disk archive lifecycle: captures=%d checkpoints=%d prepares=%d cleanups=%d", runtime.archiveCaptures, runtime.checkpoints, runtime.prepares, runtime.cleanups)
+	}
+	if w.Status.Phase != "Failed" || w.Status.Snapshot != "" || w.Status.PodName != "" || w.Status.PodUID != "" ||
+		w.Status.Message != diskArchiveStoppedMessage || w.Status.RetryNonce != w.Spec.RetryNonce {
+		t.Fatalf("execution was not left stopped from persistent HOME: %+v", w.Status)
+	}
+	var result api.ArchiveCaptureResult
+	if err := json.Unmarshal([]byte(w.Annotations[api.ArchiveResultAnnotation]), &result); err != nil || result.Error != "" {
+		t.Fatalf("disk-only archive result=%+v err=%v", result, err)
+	}
+}
+
+func TestDiskOnlyArchiveDoesNotPublishAfterLifecycleChanges(t *testing.T) {
+	r, runtime, w := fixture(t)
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(w), w); err != nil {
+		t.Fatal(err)
+	}
+	w.Spec.PersistentHome = true
+	w.Spec.DesiredState = "Suspended"
+	w.Annotations = map[string]string{api.ArchiveRequestAnnotation: `{"id":"arc-0123456789abcdef0123456789abcdef","expiresAt":"2099-01-01T00:00:00Z","diskOnly":true}`}
+	if err := r.Update(context.Background(), w); err != nil {
+		t.Fatal(err)
+	}
+	w.Status.SpecHash = fingerprint(w)
+	w.Status.Phase = "Failed"
+	w.Status.PodName, w.Status.PodUID = "", ""
+	if err := r.Status().Update(context.Background(), w); err != nil {
+		t.Fatal(err)
+	}
+	runtime.archiveHook = func(ctx context.Context, source *api.ResumablePod, _ api.ArchiveCaptureRequest) {
+		changed := &api.ResumablePod{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(source), changed); err != nil {
+			t.Fatal(err)
+		}
+		changed.Spec.DesiredState = "Running"
+		if err := r.Update(ctx, changed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 4 && runtime.archiveCaptures == 0; i++ {
+		step(t, r, w)
+	}
+	if runtime.archiveCaptures != 1 {
+		t.Fatalf("expected one capture, got %d", runtime.archiveCaptures)
+	}
+	if _, ok := w.Annotations[api.ArchiveResultAnnotation]; ok {
+		t.Fatal("published archive result after lifecycle changed")
+	}
+}
+
+func TestDiskOnlyArchivePreservesAlreadySuspendedCheckpoint(t *testing.T) {
+	r, runtime, w := fixture(t)
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(w), w); err != nil {
+		t.Fatal(err)
+	}
+	pod := &core.Pod{ObjectMeta: meta.ObjectMeta{Name: "old", Namespace: w.Namespace}}
+	if err := r.Delete(context.Background(), pod); err != nil {
+		t.Fatal(err)
+	}
+	w.Spec.PersistentHome = true
+	w.Spec.DesiredState = "Suspended"
+	w.Annotations = map[string]string{api.ArchiveRequestAnnotation: `{"id":"arc-0123456789abcdef0123456789abcdef","expiresAt":"2099-01-01T00:00:00Z","diskOnly":true}`}
+	if err := r.Update(context.Background(), w); err != nil {
+		t.Fatal(err)
+	}
+	w.Status.SpecHash = fingerprint(w)
+	w.Status.Phase = "Suspended"
+	w.Status.Snapshot = "checkpoint-1"
+	w.Status.PodName, w.Status.PodUID = "", ""
+	if err := r.Status().Update(context.Background(), w); err != nil {
+		t.Fatal(err)
+	}
+	step(t, r, w)
+	if runtime.archiveCaptures != 1 || runtime.checkpoints != 0 || w.Status.Phase != "Suspended" || w.Status.Snapshot != "checkpoint-1" {
+		t.Fatalf("suspended disk archive changed checkpoint state: captures=%d checkpoints=%d status=%+v", runtime.archiveCaptures, runtime.checkpoints, w.Status)
+	}
+}
+
 func fixture(t *testing.T) (*Reconciler, *fakeRuntime, *api.ResumablePod) {
 	t.Helper()
 	s := runtime.NewScheme()

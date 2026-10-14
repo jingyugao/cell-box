@@ -130,3 +130,9 @@ type ResourceInventoryProvider interface {
 type WorkspaceArchiveProvider interface {
 	CaptureWorkspaceArchive(context.Context, Handle, string) (int64, string, error)
 }
+
+// DiskWorkspaceArchiveProvider stops execution without a process checkpoint and
+// captures the owned persistent workspace. Failure never destroys the disk.
+type DiskWorkspaceArchiveProvider interface {
+	CaptureDiskWorkspaceArchive(context.Context, Handle, string) (int64, string, error)
+}

@@ -66,6 +66,7 @@ func (e *APIError) Error() string         { return e.Message }
 func apiError(code, message string) error { return &APIError{Code: code, Message: message} }
 
 type Capabilities struct {
+	DiskArchives       bool   `json:"diskArchives,omitempty"`
 	Exec               bool   `json:"exec"`
 	Files              bool   `json:"files"`
 	HTTP               bool   `json:"http"`

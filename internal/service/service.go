@@ -281,6 +281,7 @@ func cloneError(err error) *APIError {
 }
 func profileCapabilities(p Profile) Capabilities {
 	capabilities := Capabilities{Exec: true, Files: true, HTTP: true, WebSocket: true, Freeze: p.Provider == "docker", Suspend: map[bool]string{true: "same-node-checkpoint", false: "none"}[p.Provider == "resumable-k8s-pod"], Archives: "workspace-best-effort", ProtectedTools: len(p.Guest.Tools) > 0, CredentialBatch: true, InternalServices: true, RootDebug: p.Guest.Debug.UID == 0 && p.Guest.Debug.GID == 0, SharedDirectory: p.SharedReadOnlyHostPath != "", PersistentHome: p.PersistentHome}
+	capabilities.DiskArchives = p.Provider == "resumable-k8s-pod" && p.PersistentHome
 	capabilities.MountedToolRuntime = capabilities.SharedDirectory && capabilities.ProtectedTools && capabilities.RootDebug && slices.Contains(p.MountedToolRuntimeImages, p.Image)
 	capabilities.MountedDebugHome = capabilities.MountedToolRuntime && p.DebugReadWriteHostPath == path.Join(p.SharedReadOnlyHostPath, "runtime/debug-homes") && slices.Contains(p.DebugHomeImages, p.Image)
 	return capabilities
@@ -297,6 +298,9 @@ func (s *Service) box(client, id string) (boxRecord, error) {
 	if err != nil {
 		return boxRecord{}, err
 	}
+	// Read the current API capability from the Box's captured storage layout,
+	// including metadata written before disk-only archives were supported.
+	records[0].Box.Capabilities.DiskArchives = profileCapabilities(records[0].Profile).DiskArchives
 	return records[0], nil
 }
 func (s *Service) profile(client, id string) (Profile, error) {

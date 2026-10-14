@@ -189,9 +189,21 @@ func verifyArchive(f *os.File, a Archive) error {
 }
 
 func (s *Service) captureArchive(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		DiskOnly bool `json:"diskOnly"`
+	}
+	if err := decodeOptionalLimit(w, r, &input, 1024); err != nil {
+		fail(w, err)
+		return
+	}
+	// Preserve the original idempotency fingerprint for captures without a body.
+	var parameters any
+	if input.DiskOnly {
+		parameters = input
+	}
 	client, id := clientID(r), r.PathValue("id")
 	var box boxRecord
-	op, fresh, err := s.prepareOperation(client, r.Header.Get("Idempotency-Key"), "archive", id, nil, func(st *State, op *Operation) error {
+	op, fresh, err := s.prepareOperation(client, r.Header.Get("Idempotency-Key"), "archive", id, parameters, func(st *State, op *Operation) error {
 		var err error
 		box, err = owned(st, client, id)
 		if err != nil {
@@ -203,10 +215,20 @@ func (s *Service) captureArchive(w http.ResponseWriter, r *http.Request) {
 		if activeExec(st, id) {
 			return apiError("BUSY", "Box has an active execution")
 		}
-		if box.Box.Phase != "running" && box.Box.Phase != "staged" && box.Box.Phase != "suspended" {
+		if input.DiskOnly {
+			if box.Profile.Provider != "resumable-k8s-pod" || !box.Profile.PersistentHome || !workspaceUnderPersistentHome(box.Profile.Guest.Workspace) || s.objects == nil {
+				return apiError("UNSUPPORTED_CAPABILITY", "Disk archives require persistent HOME and object storage")
+			}
+			if _, ok := s.providers[box.Profile.Provider].(boxprovider.DiskWorkspaceArchiveProvider); !ok {
+				return apiError("UNSUPPORTED_CAPABILITY", "Provider does not support disk archives")
+			}
+			if box.Box.Phase != "running" && box.Box.Phase != "staged" && box.Box.Phase != "suspended" && box.Box.Phase != "failed" {
+				return apiError("CONFLICT", "Disk archive requires a stable source lifecycle")
+			}
+		} else if box.Box.Phase != "running" && box.Box.Phase != "staged" && box.Box.Phase != "suspended" {
 			return apiError("CONFLICT", "Archive requires an accessible box")
 		}
-		if box.Box.Phase == "suspended" {
+		if !input.DiskOnly && box.Box.Phase == "suspended" {
 			if box.Profile.Provider != "resumable-k8s-pod" || !workspaceUnderPersistentHome(box.Profile.Guest.Workspace) {
 				return apiError("UNSUPPORTED_CAPABILITY", "Suspended workspace archives require a workspace inside persistent HOME")
 			}
@@ -230,7 +252,9 @@ func (s *Service) captureArchive(w http.ResponseWriter, r *http.Request) {
 		s.launch(op, func(ctx context.Context) (map[string]string, error) {
 			var a Archive
 			var err error
-			if box.Box.Phase == "suspended" {
+			if input.DiskOnly {
+				a, err = s.captureStoredWorkspaceArchive(ctx, box, true)
+			} else if box.Box.Phase == "suspended" {
 				a, err = s.captureSuspendedArchive(ctx, box)
 			} else {
 				a, err = s.captureArchiveHTTP(ctx, box)
@@ -245,14 +269,27 @@ func (s *Service) captureArchive(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) captureSuspendedArchive(ctx context.Context, b boxRecord) (Archive, error) {
-	provider, ok := s.providers[b.Profile.Provider].(boxprovider.WorkspaceArchiveProvider)
-	if !ok || s.objects == nil || !workspaceUnderPersistentHome(b.Profile.Guest.Workspace) {
+	return s.captureStoredWorkspaceArchive(ctx, b, false)
+}
+
+func (s *Service) captureStoredWorkspaceArchive(ctx context.Context, b boxRecord, diskOnly bool) (Archive, error) {
+	var capture func(context.Context, boxprovider.Handle, string) (int64, string, error)
+	if diskOnly {
+		if provider, ok := s.providers[b.Profile.Provider].(boxprovider.DiskWorkspaceArchiveProvider); ok {
+			capture = provider.CaptureDiskWorkspaceArchive
+		}
+	} else {
+		if provider, ok := s.providers[b.Profile.Provider].(boxprovider.WorkspaceArchiveProvider); ok {
+			capture = provider.CaptureWorkspaceArchive
+		}
+	}
+	if capture == nil || s.objects == nil || !workspaceUnderPersistentHome(b.Profile.Guest.Workspace) {
 		return Archive{}, apiError("UNSUPPORTED_CAPABILITY", "Suspended workspace archives are unavailable")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 14*time.Minute)
 	defer cancel()
 	id := randomID("arc-")
-	size, digest, err := provider.CaptureWorkspaceArchive(ctx, b.Handle, id)
+	size, digest, err := capture(ctx, b.Handle, id)
 	if err != nil {
 		return Archive{}, err
 	}

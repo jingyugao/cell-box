@@ -844,8 +844,14 @@ func (r *Reconciler) captureWorkspaceArchive(ctx context.Context, w *api.Resumab
 	if resultRaw := w.Annotations[api.ArchiveResultAnnotation]; resultRaw != "" {
 		var prior api.ArchiveCaptureResult
 		if json.Unmarshal([]byte(resultRaw), &prior) == nil && prior.ID == request.ID {
+			if request.DiskOnly {
+				return ctrl.Result{}, true, nil
+			}
 			return ctrl.Result{}, false, nil
 		}
+	}
+	if request.DiskOnly {
+		return r.captureDiskOnlyWorkspaceArchive(ctx, w, raw, request)
 	}
 	var result api.ArchiveCaptureResult
 	var captureErr error
@@ -867,7 +873,7 @@ func (r *Reconciler) captureWorkspaceArchive(ctx context.Context, w *api.Resumab
 			if captureErr != nil {
 				ctrl.LoggerFrom(ctx).Error(captureErr, "workspace archive capture failed", "namespace", w.Namespace, "name", w.Name, "requestID", request.ID, "snapshot", request.Snapshot)
 				result = api.ArchiveCaptureResult{ID: request.ID, Snapshot: request.Snapshot, Error: "archive capture failed"}
-			} else if result.ID != request.ID || result.Snapshot != request.Snapshot || result.Size < 1 || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(result.SHA256) {
+			} else if result.ID != request.ID || result.Snapshot != request.Snapshot || result.DiskOnly != request.DiskOnly || result.Size < 1 || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(result.SHA256) {
 				captureErr = stderrors.New("archive capture returned invalid metadata")
 				result = api.ArchiveCaptureResult{ID: request.ID, Snapshot: request.Snapshot, Error: "archive capture returned invalid metadata"}
 			}
@@ -885,7 +891,7 @@ func (r *Reconciler) captureWorkspaceArchive(ctx context.Context, w *api.Resumab
 		return again, true, err
 	}
 	var liveRequest api.ArchiveCaptureRequest
-	if json.Unmarshal([]byte(current.Annotations[api.ArchiveRequestAnnotation]), &liveRequest) != nil || liveRequest.ID != request.ID || liveRequest.Snapshot != request.Snapshot {
+	if json.Unmarshal([]byte(current.Annotations[api.ArchiveRequestAnnotation]), &liveRequest) != nil || current.Annotations[api.ArchiveRequestAnnotation] != raw {
 		return ctrl.Result{}, false, nil
 	}
 	lifecycleChanged := current.DeletionTimestamp != nil || !current.Spec.PersistentHome || current.Spec.DesiredState != "Suspended" ||
@@ -906,5 +912,168 @@ func (r *Reconciler) captureWorkspaceArchive(ctx context.Context, w *api.Resumab
 	}
 	// The result write changed resourceVersion. Requeue the lifecycle from a
 	// fresh object so a concurrent request cannot make this pass use stale state.
+	return again, true, nil
+}
+
+const diskArchiveStoppedMessage = "Execution stopped for disk archive; rebuild from persistent HOME to run again"
+const diskArchiveStoppingMessage = "Stopping execution before capturing persistent HOME"
+
+func (r *Reconciler) captureDiskOnlyWorkspaceArchive(ctx context.Context, w *api.ResumablePod, raw string, request api.ArchiveCaptureRequest) (ctrl.Result, bool, error) {
+	if !request.ExpiresAt.IsZero() && !time.Now().Before(request.ExpiresAt) {
+		return r.publishArchiveResult(ctx, w, raw, request, api.ArchiveCaptureResult{ID: request.ID, DiskOnly: true, Error: "archive request expired"})
+	}
+	if err := validateDiskOnlyArchiveSource(w); err != nil {
+		return r.publishArchiveResult(ctx, w, raw, request, api.ArchiveCaptureResult{ID: request.ID, DiskOnly: true, Error: err.Error()})
+	}
+	// Re-read immediately before lifecycle side effects. An API update that
+	// replaced the request or changed the execution while this reconcile was
+	// queued must fence the old request.
+	current := &api.ResumablePod{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(w), current); err != nil {
+		if errors.IsNotFound(err) {
+			return ctrl.Result{}, false, nil
+		}
+		return again, true, err
+	}
+	if !sameDiskArchiveSource(w, current, raw) {
+		return ctrl.Result{}, false, nil
+	}
+	pods := &core.PodList{}
+	if err := r.List(ctx, pods, client.InNamespace(w.Namespace)); err != nil {
+		return again, true, err
+	}
+	ownedPods := make([]*core.Pod, 0, len(pods.Items))
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		isOwned := owned(w, p)
+		if p.Name == w.Status.PodName && !isOwned {
+			return again, true, fmt.Errorf("Pod identity collision: refusing to archive using %s", p.Name)
+		}
+		if isOwned && p.Name == w.Status.PodName && w.Status.PodUID != "" && string(p.UID) != w.Status.PodUID {
+			return again, true, fmt.Errorf("Pod identity collision: refusing to archive replacement Pod %s", p.Name)
+		}
+		if p.Labels[api.OwnerLabel] == string(w.UID) && !isOwned {
+			return again, true, fmt.Errorf("Pod owner label collision: refusing to archive using %s", p.Name)
+		}
+		if isOwned || p.Labels[api.OwnerLabel] == string(w.UID) {
+			ownedPods = append(ownedPods, p)
+		}
+	}
+	// A status identity may outlive a Pod object. Cleanup by that identity as
+	// well, so a node runtime cannot retain tasks after the API object vanished.
+	if len(ownedPods) > 0 {
+		for _, p := range ownedPods {
+			if !request.ExpiresAt.IsZero() && !time.Now().Before(request.ExpiresAt) {
+				return r.publishArchiveResult(ctx, w, raw, request, api.ArchiveCaptureResult{ID: request.ID, Snapshot: request.Snapshot, DiskOnly: true, Error: "archive request expired"})
+			}
+			if _, err := r.removePod(ctx, w, p); err != nil {
+				return again, true, err
+			}
+		}
+		if w.Status.Message != diskArchiveStoppingMessage {
+			w.Status.Message = diskArchiveStoppingMessage
+			if err := r.Status().Update(ctx, w); err != nil {
+				return again, true, err
+			}
+		}
+		return again, true, nil
+	}
+	if w.Status.PodUID != "" || w.Status.PodName != "" {
+		if _, err := r.removePod(ctx, w, nil); err != nil {
+			return again, true, err
+		}
+	}
+	// Re-read after cleanup and require the exact request, generation and
+	// immutable execution spec before changing status or capturing files.
+	current = &api.ResumablePod{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(w), current); err != nil {
+		if errors.IsNotFound(err) {
+			return ctrl.Result{}, false, nil
+		}
+		return again, true, err
+	}
+	if !sameDiskArchiveSource(w, current, raw) || current.Status.PodUID != w.Status.PodUID || current.Status.PodName != w.Status.PodName {
+		return ctrl.Result{}, false, nil
+	}
+	preserveCheckpoint := w.Status.Phase == "Suspended" && w.Status.Snapshot != "" && w.Status.PodUID == "" && w.Status.PodName == "" && w.Status.Message != diskArchiveStoppingMessage
+	needsStoppedStatus := !preserveCheckpoint && (current.Status.Phase != "Failed" || current.Status.Message != diskArchiveStoppedMessage ||
+		current.Status.Snapshot != "" || current.Status.PodUID != "" || current.Status.PodName != "")
+	if needsStoppedStatus {
+		current.Status.PodUID = ""
+		current.Status.PodName = ""
+		current.Status.Snapshot = ""
+		current.Status.RetryNonce = current.Spec.RetryNonce
+		result, err := r.phase(ctx, current, "Failed", diskArchiveStoppedMessage)
+		return result, true, err
+	}
+	archiver, ok := r.Runtime.(workspaceArchiveRuntime)
+	if !ok {
+		return r.publishArchiveResult(ctx, current, raw, request, api.ArchiveCaptureResult{ID: request.ID, Snapshot: request.Snapshot, DiskOnly: true, Error: "node runtime does not support workspace archives"})
+	}
+	captureCtx, cancel := context.WithTimeout(ctx, 12*time.Minute)
+	result, captureErr := archiver.CaptureWorkspaceArchive(captureCtx, current, request)
+	cancel()
+	if captureErr != nil {
+		if stderrors.Is(captureErr, runtime.ErrRetryableStorage) {
+			return again, true, captureErr
+		}
+		ctrl.LoggerFrom(ctx).Error(captureErr, "disk-only workspace archive capture failed", "namespace", w.Namespace, "name", w.Name, "requestID", request.ID)
+		result = api.ArchiveCaptureResult{ID: request.ID, Snapshot: request.Snapshot, DiskOnly: true, Error: "disk-only archive capture failed"}
+	} else if result.ID != request.ID || result.Snapshot != request.Snapshot || result.DiskOnly != request.DiskOnly || result.Size < 1 || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(result.SHA256) {
+		result = api.ArchiveCaptureResult{ID: request.ID, Snapshot: request.Snapshot, DiskOnly: true, Error: "archive capture returned invalid metadata"}
+	}
+	return r.publishArchiveResult(ctx, w, raw, request, result)
+}
+
+func validateDiskOnlyArchiveSource(w *api.ResumablePod) error {
+	if w.DeletionTimestamp != nil || !w.Spec.PersistentHome || w.Spec.DesiredState != "Suspended" {
+		return stderrors.New("disk archive requires a non-deleting suspended persistent HOME")
+	}
+	if w.Status.SpecHash == "" || w.Status.SpecHash != fingerprint(w) {
+		return stderrors.New("disk archive execution spec changed")
+	}
+	return nil
+}
+
+func sameDiskArchiveSource(before, current *api.ResumablePod, raw string) bool {
+	return current.UID == before.UID && current.Generation == before.Generation && current.DeletionTimestamp == nil &&
+		current.Spec.PersistentHome && current.Spec.DesiredState == "Suspended" && current.Spec.TransitionID == before.Spec.TransitionID &&
+		fingerprint(current) == fingerprint(before) && current.Status.SpecHash == before.Status.SpecHash &&
+		current.Annotations[api.ArchiveRequestAnnotation] == raw
+}
+
+func (r *Reconciler) publishArchiveResult(ctx context.Context, w *api.ResumablePod, raw string, request api.ArchiveCaptureRequest, result api.ArchiveCaptureResult) (ctrl.Result, bool, error) {
+	current := &api.ResumablePod{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(w), current); err != nil {
+		if errors.IsNotFound(err) {
+			return ctrl.Result{}, false, nil
+		}
+		return again, true, err
+	}
+	if current.Annotations[api.ArchiveRequestAnnotation] != raw || current.UID != w.UID || current.Generation != w.Generation ||
+		current.DeletionTimestamp != nil || !current.Spec.PersistentHome || current.Spec.DesiredState != "Suspended" ||
+		current.Spec.TransitionID != w.Spec.TransitionID || fingerprint(current) != fingerprint(w) || current.Status.SpecHash != w.Status.SpecHash {
+		return ctrl.Result{}, false, nil
+	}
+	if request.DiskOnly && result.Error == "" && (current.Status.PodUID != "" || current.Status.PodName != "" ||
+		(current.Status.Phase != "Failed" && current.Status.Phase != "Suspended")) {
+		return ctrl.Result{}, false, nil
+	}
+	if !request.ExpiresAt.IsZero() && !time.Now().Before(request.ExpiresAt) {
+		result = api.ArchiveCaptureResult{ID: request.ID, Snapshot: request.Snapshot, DiskOnly: request.DiskOnly, Error: "archive request expired"}
+	}
+	result.DiskOnly = request.DiskOnly
+	if request.DiskOnly {
+		result.SourceUID = string(current.UID)
+		result.SourceGeneration = current.Generation
+	}
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	encoded, _ := json.Marshal(result)
+	current.Annotations[api.ArchiveResultAnnotation] = string(encoded)
+	if err := r.Update(ctx, current); err != nil {
+		return again, true, fmt.Errorf("publish workspace archive result: %w", err)
+	}
 	return again, true, nil
 }

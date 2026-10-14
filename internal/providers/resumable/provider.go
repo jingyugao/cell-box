@@ -397,6 +397,21 @@ func validSuspendedArchiveTarget(w *api.ResumablePod, h boxprovider.Handle) erro
 // configured workspace from the already-suspended persistent HOME. It never
 // changes DesiredState or creates a Pod.
 func (p *Provider) CaptureWorkspaceArchive(ctx context.Context, h boxprovider.Handle, id string) (int64, string, error) {
+	return p.captureWorkspaceArchive(ctx, h, id, false)
+}
+
+func (p *Provider) CaptureDiskWorkspaceArchive(ctx context.Context, h boxprovider.Handle, id string) (int64, string, error) {
+	return p.captureWorkspaceArchive(ctx, h, id, true)
+}
+
+func validDiskArchiveTarget(w *api.ResumablePod, h boxprovider.Handle) error {
+	if w.DeletionTimestamp != nil || !w.Spec.PersistentHome || w.Spec.NodeName != h.NodeName {
+		return errors.New("disk archive requires an owned persistent HOME")
+	}
+	return nil
+}
+
+func (p *Provider) captureWorkspaceArchive(ctx context.Context, h boxprovider.Handle, id string, diskOnly bool) (int64, string, error) {
 	if !archiveIDPattern.MatchString(id) {
 		return 0, "", errors.New("invalid archive identifier")
 	}
@@ -407,18 +422,29 @@ func (p *Provider) CaptureWorkspaceArchive(ctx context.Context, h boxprovider.Ha
 	if err != nil {
 		return 0, "", err
 	}
-	if err = validSuspendedArchiveTarget(w, h); err != nil {
+	validate := validSuspendedArchiveTarget
+	if diskOnly {
+		validate = validDiskArchiveTarget
+	}
+	if err = validate(w, h); err != nil {
 		return 0, "", err
 	}
 	expectedSnapshot := w.Status.Snapshot
+	if diskOnly {
+		expectedSnapshot = ""
+	}
 	if raw := w.Annotations[api.ArchiveResultAnnotation]; raw != "" {
 		var prior api.ArchiveCaptureResult
 		if json.Unmarshal([]byte(raw), &prior) == nil && prior.ID == id {
-			if prior.Snapshot != expectedSnapshot {
+			if prior.Snapshot != expectedSnapshot || prior.DiskOnly != diskOnly {
 				return 0, "", errors.New("workspace checkpoint changed since this archive request")
 			}
 			if prior.Error != "" || prior.Size < 1 || !archiveSHA256Pattern.MatchString(prior.SHA256) {
 				return 0, "", errors.New("prior workspace archive request did not complete successfully")
+			}
+			if diskOnly && (w.Spec.DesiredState != "Suspended" || w.Status.PodUID != "" || w.Status.PodName != "" ||
+				(w.Status.Phase != "Failed" && w.Status.Phase != "Suspended") || prior.SourceUID != string(w.UID) || prior.SourceGeneration != w.Generation) {
+				return 0, "", errors.New("disk archive source changed since capture")
 			}
 			p.clearArchiveCapture(h, id, true)
 			return prior.Size, prior.SHA256, nil
@@ -426,7 +452,7 @@ func (p *Provider) CaptureWorkspaceArchive(ctx context.Context, h boxprovider.Ha
 	}
 	if raw := w.Annotations[api.ArchiveRequestAnnotation]; raw != "" {
 		var request api.ArchiveCaptureRequest
-		if err = json.Unmarshal([]byte(raw), &request); err != nil || (request.ID != id && time.Now().Before(request.ExpiresAt)) || (request.ID == id && request.Snapshot != expectedSnapshot) {
+		if err = json.Unmarshal([]byte(raw), &request); err != nil || (request.ID != id && time.Now().Before(request.ExpiresAt)) || (request.ID == id && (request.Snapshot != expectedSnapshot || request.DiskOnly != diskOnly)) {
 			return 0, "", errors.New("another workspace archive request is pending")
 		}
 		if request.ID == id && time.Now().Before(request.ExpiresAt) {
@@ -436,7 +462,10 @@ func (p *Provider) CaptureWorkspaceArchive(ctx context.Context, h boxprovider.Ha
 			if w.Annotations == nil {
 				w.Annotations = map[string]string{}
 			}
-			request, _ := json.Marshal(api.ArchiveCaptureRequest{ID: id, Snapshot: expectedSnapshot, ExpiresAt: time.Now().UTC().Add(14 * time.Minute)})
+			request, _ := json.Marshal(api.ArchiveCaptureRequest{ID: id, Snapshot: expectedSnapshot, DiskOnly: diskOnly, ExpiresAt: time.Now().UTC().Add(14 * time.Minute)})
+			if diskOnly {
+				w.Spec.DesiredState = "Suspended"
+			}
 			w.Annotations[api.ArchiveRequestAnnotation] = string(request)
 			delete(w.Annotations, api.ArchiveResultAnnotation)
 			if err = p.Client.Patch(ctx, w, client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{})); err != nil {
@@ -448,7 +477,10 @@ func (p *Provider) CaptureWorkspaceArchive(ctx context.Context, h boxprovider.Ha
 		if w.Annotations == nil {
 			w.Annotations = map[string]string{}
 		}
-		request, _ := json.Marshal(api.ArchiveCaptureRequest{ID: id, Snapshot: expectedSnapshot, ExpiresAt: time.Now().UTC().Add(14 * time.Minute)})
+		request, _ := json.Marshal(api.ArchiveCaptureRequest{ID: id, Snapshot: expectedSnapshot, DiskOnly: diskOnly, ExpiresAt: time.Now().UTC().Add(14 * time.Minute)})
+		if diskOnly {
+			w.Spec.DesiredState = "Suspended"
+		}
 		w.Annotations[api.ArchiveRequestAnnotation] = string(request)
 		delete(w.Annotations, api.ArchiveResultAnnotation)
 		if err = p.Client.Patch(ctx, w, client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{})); err != nil {
@@ -471,10 +503,13 @@ func (p *Provider) CaptureWorkspaceArchive(ctx context.Context, h boxprovider.Ha
 		if err != nil {
 			return 0, "", err
 		}
-		if err = validSuspendedArchiveTarget(w, h); err != nil {
+		if err = validate(w, h); err != nil {
 			return 0, "", err
 		}
-		if w.Status.Snapshot != expectedSnapshot {
+		if diskOnly && w.Spec.DesiredState != "Suspended" {
+			return 0, "", errors.New("disk archive was cancelled by a lifecycle change")
+		}
+		if !diskOnly && w.Status.Snapshot != expectedSnapshot {
 			return 0, "", errors.New("workspace checkpoint changed during archive capture")
 		}
 		if raw := w.Annotations[api.ArchiveResultAnnotation]; raw != "" {
@@ -483,10 +518,17 @@ func (p *Provider) CaptureWorkspaceArchive(ctx context.Context, h boxprovider.Ha
 				return 0, "", errors.New("invalid workspace archive result")
 			}
 			if result.ID == id && result.Snapshot == expectedSnapshot {
+				if result.DiskOnly != diskOnly {
+					return 0, "", errors.New("workspace archive result mode changed")
+				}
 				if result.Error != "" {
 					p.clearArchiveCapture(h, id, false)
 					completed = true
 					return 0, "", errors.New("node workspace archive capture failed")
+				}
+				if diskOnly && (w.Status.PodUID != "" || w.Status.PodName != "" || (w.Status.Phase != "Failed" && w.Status.Phase != "Suspended") ||
+					result.SourceUID != string(w.UID) || result.SourceGeneration != w.Generation) {
+					return 0, "", errors.New("disk archive result does not have a stopped source")
 				}
 				if result.Size < 1 || !archiveSHA256Pattern.MatchString(result.SHA256) {
 					return 0, "", errors.New("node returned invalid workspace archive metadata")
@@ -497,7 +539,7 @@ func (p *Provider) CaptureWorkspaceArchive(ctx context.Context, h boxprovider.Ha
 			}
 		}
 		var request api.ArchiveCaptureRequest
-		if raw := w.Annotations[api.ArchiveRequestAnnotation]; raw == "" || json.Unmarshal([]byte(raw), &request) != nil || request.ID != id || request.Snapshot != expectedSnapshot {
+		if raw := w.Annotations[api.ArchiveRequestAnnotation]; raw == "" || json.Unmarshal([]byte(raw), &request) != nil || request.ID != id || request.Snapshot != expectedSnapshot || request.DiskOnly != diskOnly {
 			return 0, "", errors.New("workspace archive request was replaced")
 		}
 		if !request.ExpiresAt.IsZero() && !time.Now().Before(request.ExpiresAt) {

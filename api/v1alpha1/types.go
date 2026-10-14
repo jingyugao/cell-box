@@ -30,20 +30,25 @@ const (
 )
 
 // ArchiveCaptureRequest asks the node controller to export a workspace from a
-// suspended persistent HOME. ID is also the object-store archive identifier.
+// persistent HOME. DiskOnly stops writers without requiring a process checkpoint.
+// ID is also the object-store archive identifier.
 type ArchiveCaptureRequest struct {
 	ID        string    `json:"id"`
 	Snapshot  string    `json:"snapshot"`
 	ExpiresAt time.Time `json:"expiresAt"`
+	DiskOnly  bool      `json:"diskOnly,omitempty"`
 }
 
 // ArchiveCaptureResult is written only after archive content is durable.
 type ArchiveCaptureResult struct {
-	ID       string `json:"id"`
-	Snapshot string `json:"snapshot"`
-	Size     int64  `json:"size,omitempty"`
-	SHA256   string `json:"sha256,omitempty"`
-	Error    string `json:"error,omitempty"`
+	SourceUID        string `json:"sourceUid,omitempty"`
+	SourceGeneration int64  `json:"sourceGeneration,omitempty"`
+	ID               string `json:"id"`
+	Snapshot         string `json:"snapshot"`
+	DiskOnly         bool   `json:"diskOnly,omitempty"`
+	Size             int64  `json:"size,omitempty"`
+	SHA256           string `json:"sha256,omitempty"`
+	Error            string `json:"error,omitempty"`
 }
 
 type UpgradeRequest struct {
