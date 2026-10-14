@@ -74,6 +74,17 @@ type ImageCacheProvider interface {
 	CacheImage(context.Context, string, string, string) error // image, node, namespace
 }
 
+// WarmDefaultImage selects the only image eligible for a profile's warm pool.
+type WarmDefaultImage struct {
+	ProfileID string `json:"profileId"`
+	NodeName  string `json:"nodeName"`
+	Image     string `json:"image"`
+}
+type WarmDefaultImageProvider interface {
+	SetWarmDefaultImage(context.Context, string, WarmDefaultImage) error
+	GetWarmDefaultImages(context.Context, string) ([]WarmDefaultImage, error)
+}
+
 // FencedGuestProvider validates the execution while resolving its
 // connection, avoiding a second, independent lifecycle inspection.
 type FencedGuestProvider interface {
@@ -118,4 +129,10 @@ type ResourceInventoryProvider interface {
 // its sandbox is suspended. The implementation must not resume the sandbox.
 type WorkspaceArchiveProvider interface {
 	CaptureWorkspaceArchive(context.Context, Handle, string) (int64, string, error)
+}
+
+// DiskWorkspaceArchiveProvider stops execution without a process checkpoint and
+// captures the owned persistent workspace. Failure never destroys the disk.
+type DiskWorkspaceArchiveProvider interface {
+	CaptureDiskWorkspaceArchive(context.Context, Handle, string) (int64, string, error)
 }

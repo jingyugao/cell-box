@@ -208,6 +208,9 @@ components:
           type: string
         websocket:
           type: boolean
+        diskArchives:
+          type: boolean
+          description: Supports stopping execution and archiving persistent workspace without a process checkpoint.
       required:
       - exec
       - files
@@ -931,9 +934,22 @@ paths:
       summary: Inspect owned box and refresh provider lifecycle phase
   /v1/boxes/{id}/archives:
     post:
-      description: result.archiveId identifies the capture; source runtime is not
-        destroyed or suspended. Excludes debug credentials and files outside workspace.
+      description: result.archiveId identifies the capture. By default the source
+        runtime is not destroyed or suspended. diskOnly stops execution without a
+        process checkpoint and captures persistent workspace files even from a failed
+        runtime; its disk is retained on failure. Excludes credentials outside workspace.
       operationId: captureArchive
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                diskOnly:
+                  type: boolean
+                  default: false
       parameters:
       - in: path
         name: id
@@ -1671,6 +1687,41 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       summary: List configured profiles without authentication
+  /v1/profiles/{id}/warm-default:
+    put:
+      operationId: setWarmDefaultImage
+      summary: Select the profile image eligible for speculative warm slots
+      description: Uses a client-owned imported image, or the configured base image when omitted. Existing Boxes retain their pinned images.
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                importedImageId:
+                  type: string
+      responses:
+        "200":
+          description: Warm target persisted
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  image:
+                    type: string
+                required: [image]
+        default:
+          $ref: '#/components/responses/Error'
   /v1/routes:
     post:
       description: One route per box/port; duplicate registration returns the existing

@@ -125,4 +125,50 @@ func TestCaptureWorkspaceArchiveRejectsIntermediateSymlink(t *testing.T) {
 	if objects.putCalls != 0 {
 		t.Fatalf("intermediate symlink path uploaded %d objects", objects.putCalls)
 	}
+	w.Status.Phase = "Failed"
+	w.Status.Snapshot = ""
+	_, err = backend.CaptureWorkspaceArchive(context.Background(), w, api.ArchiveCaptureRequest{ID: "arc-2123456789abcdef0123456789abcdef", DiskOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("disk-only archive accepted intermediate symlink: %v", err)
+	}
+	if objects.putCalls != 0 {
+		t.Fatalf("disk-only symlink path uploaded %d objects", objects.putCalls)
+	}
+}
+
+func TestCaptureDiskOnlyArchiveFromFailedPersistentHomeWithoutCheckpoint(t *testing.T) {
+	base := t.TempDir()
+	_, err := homevolume.Prepare(base, "owner", "node-a", "spec", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err := homevolume.Path(base, "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(home, "workspace", "src")
+	if err = os.MkdirAll(workspace, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(workspace, "marker.txt"), []byte("saved without checkpoint"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := json.Marshal(guestapi.Config{Workspace: "/home/agent/workspace/src", Agent: guestapi.Identity{UID: 1000, GID: 1000}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects := &memoryObjects{objects: map[string][]byte{}}
+	backend := &Backend{Base: base, Objects: objects}
+	w := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{UID: "owner"}, Spec: api.Spec{NodeName: "node-a", DesiredState: "Suspended", PersistentHome: true, Container: core.Container{Args: []string{"serve", "--config-base64", base64.StdEncoding.EncodeToString(config)}}}, Status: api.Status{Phase: "Failed", SpecHash: "spec"}}
+	request := api.ArchiveCaptureRequest{ID: "arc-2123456789abcdef0123456789abcdef", DiskOnly: true, ExpiresAt: time.Now().Add(time.Minute)}
+	result, err := backend.CaptureWorkspaceArchive(context.Background(), w, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Size < 1 || len(result.SHA256) != 64 || result.Snapshot != "" {
+		t.Fatalf("invalid disk-only archive result: %+v", result)
+	}
+	if objects.putCalls != 1 {
+		t.Fatalf("disk-only archive uploaded %d objects", objects.putCalls)
+	}
 }

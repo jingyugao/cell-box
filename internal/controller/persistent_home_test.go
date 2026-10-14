@@ -148,6 +148,7 @@ func (r *persistentHomePoolRuntime) ActivateWarm(context.Context, *api.Resumable
 func TestPersistentHomeWarmPodHasNoTemplateHomeAndCanBeClaimed(t *testing.T) {
 	ctx := context.Background()
 	r, f, w := fixture(t)
+	setWarmDefault(t, r, w, "default")
 	oldTemplate := w.DeepCopy()
 	oldTemplate.UID = "normal-box"
 	oldTemplate.Status.SpecHash = fingerprint(oldTemplate)

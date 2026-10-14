@@ -451,6 +451,88 @@ type suspendedArchiveTestProvider struct {
 	calls     int
 }
 
+type diskArchiveServiceTestProvider struct {
+	*fakeCoreProvider
+	objects *ledgerObjects
+	payload []byte
+	calls   int
+}
+
+func (p *diskArchiveServiceTestProvider) CaptureDiskWorkspaceArchive(ctx context.Context, _ boxprovider.Handle, id string) (int64, string, error) {
+	p.calls++
+	if _, err := p.objects.Put(ctx, "archives/"+id+".tar.gz", bytes.NewReader(p.payload), int64(len(p.payload)), "*"); err != nil {
+		return 0, "", err
+	}
+	sum := sha256.Sum256(p.payload)
+	return int64(len(p.payload)), hex.EncodeToString(sum[:]), nil
+}
+
+func TestDiskOnlyArchiveAcceptsFailedPersistentHomeWithoutGuestRequest(t *testing.T) {
+	f := newCoreFixture(t)
+	_, source := f.createBox(t, "disk-archive-source")
+	objects := &ledgerObjects{data: map[string][]byte{}}
+	provider := &diskArchiveServiceTestProvider{fakeCoreProvider: f.provider, objects: objects,
+		payload: makeArchiveTestData(t, archiveTestEntry{"src/", tar.TypeDir, ""}, archiveTestEntry{"src/file.txt", tar.TypeReg, "persisted"})}
+	f.service.objects = objects
+	f.service.providers["resumable-k8s-pod"] = provider
+	if err := f.service.store.Update(func(st *State) error {
+		box := st.Boxes[source.ID]
+		box.Box.Phase = "failed"
+		box.Profile.Provider = "resumable-k8s-pod"
+		box.Profile.PersistentHome = true
+		box.Profile.Guest.Workspace = "/home/agent/workspace"
+		st.Boxes[source.ID] = box
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	guestCalls := f.provider.guestCount()
+	status, body := f.call(t, "POST", "/v1/boxes/"+source.ID+"/archives", testClientToken, "disk-mode", map[string]bool{"diskOnly": true})
+	wantStatus(t, status, 202, body)
+	op := decodeResponse[Operation](t, body)
+	done := f.waitOperation(t, op.ID, "succeeded")
+	archiveID := done.Result["archiveId"]
+	archive, err := f.service.archiveForClient("client-a", archiveID)
+	if err != nil || archive.ID != archiveID || !archive.Portable || archive.Consistency != "workspace-best-effort" {
+		t.Fatalf("failed-source disk archive was not stored: %+v err=%v", archive, err)
+	}
+	if provider.calls != 1 || f.provider.guestCount() != guestCalls {
+		t.Fatalf("disk capture calls=%d guest calls before/after=%d/%d", provider.calls, guestCalls, f.provider.guestCount())
+	}
+	status, body = f.call(t, "POST", "/v1/boxes/"+source.ID+"/archives", testClientToken, "disk-mode", nil)
+	wantStatus(t, status, 409, body)
+	status, body = f.call(t, "GET", "/v1/boxes/"+source.ID, testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	if !decodeResponse[Box](t, body).Capabilities.DiskArchives {
+		t.Fatal("disk archive capability not advertised")
+	}
+	status, body = f.call(t, "GET", "/v1/boxes/"+source.ID, otherClientToken, "", nil)
+	wantStatus(t, status, 404, body)
+}
+
+func TestDiskOnlyArchiveRejectsProviderWithoutCapability(t *testing.T) {
+	f := newCoreFixture(t)
+	_, source := f.createBox(t, "legacy-no-disk-archive")
+	f.service.objects = &ledgerObjects{data: map[string][]byte{}}
+	if err := f.service.store.Update(func(st *State) error {
+		box := st.Boxes[source.ID]
+		box.Box.Phase = "failed"
+		box.Profile.Provider = "resumable-k8s-pod"
+		box.Profile.PersistentHome = true
+		box.Profile.Guest.Workspace = "/home/agent/workspace"
+		st.Boxes[source.ID] = box
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	guestCalls := f.provider.guestCount()
+	status, body := f.call(t, "POST", "/v1/boxes/"+source.ID+"/archives", testClientToken, "unsupported-disk", map[string]bool{"diskOnly": true})
+	wantStatus(t, status, 422, body)
+	if f.provider.guestCount() != guestCalls {
+		t.Fatal("unsupported disk archive made a guest request")
+	}
+}
+
 func (p *suspendedArchiveTestProvider) CaptureWorkspaceArchive(ctx context.Context, _ boxprovider.Handle, id string) (int64, string, error) {
 	p.calls++
 	if _, err := p.objects.Put(ctx, "archives/"+id+".tar.gz", bytes.NewReader(p.payload), int64(len(p.payload)), "*"); err != nil {

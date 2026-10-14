@@ -8,6 +8,7 @@ import (
 	"time"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
+	"cellbox.local/cellbox/internal/warmdefaults"
 	core "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -88,6 +89,20 @@ func (p *WarmPool) pods(ctx context.Context, options ...client.ListOption) ([]co
 	return out, nil
 }
 
+func (p *WarmPool) defaultImages(ctx context.Context) (map[string]bool, error) {
+	images, err := warmdefaults.Read(ctx, p.Reconciler, p.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	targets := make(map[string]bool, len(images))
+	for _, image := range images {
+		if image.NodeName == p.Reconciler.NodeName {
+			targets[image.Image] = true
+		}
+	}
+	return targets, nil
+}
+
 func (p *WarmPool) remove(ctx context.Context, pod *core.Pod) error {
 	r := p.Reconciler
 	if pod.DeletionTimestamp == nil {
@@ -104,6 +119,10 @@ func (p *WarmPool) reconcile(ctx context.Context) error {
 	backend, ok := r.Runtime.(warmRuntime)
 	if !ok {
 		return fmt.Errorf("runtime does not support warm Pods")
+	}
+	defaultImages, err := p.defaultImages(ctx)
+	if err != nil {
+		return err
 	}
 	pods, err := p.pods(ctx)
 	if err != nil {
@@ -126,7 +145,7 @@ func (p *WarmPool) reconcile(ctx context.Context) error {
 	for i := range workloads.Items {
 		w := &workloads.Items[i]
 		eligible := w.Status.Phase == "Creating" || w.Status.Phase == "Running" || w.Status.Phase == "Checkpointing" || w.Status.Phase == "Suspending" || w.Status.Phase == "Suspended" || w.Status.Phase == "Restoring"
-		if w.Spec.NodeName == r.NodeName && w.DeletionTimestamp == nil && w.Status.SpecHash != "" && eligible && validate(w) == nil {
+		if w.Spec.NodeName == r.NodeName && defaultImages[w.Spec.Container.Image] && w.DeletionTimestamp == nil && w.Status.SpecHash != "" && eligible && validate(w) == nil {
 			if w.Status.Phase == "Restoring" && time.Since(w.Status.Since.Time) < 2*time.Second {
 				restoring = true
 			}
@@ -250,6 +269,13 @@ func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (result *co
 	}()
 	r := p.Reconciler
 	backend := r.Runtime.(warmRuntime)
+	defaultImages, err := p.defaultImages(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if w.Spec.NodeName != r.NodeName || !defaultImages[w.Spec.Container.Image] {
+		return nil, nil
+	}
 	// Candidate discovery needs no quorum read: the node lease and the
 	// optimistic adoption write are the authority. Keep maintenance/reaping
 	// on fresh lists so a stale omission can never retire a live slot.

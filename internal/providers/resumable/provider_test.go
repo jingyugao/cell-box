@@ -116,6 +116,120 @@ func TestCaptureWorkspaceArchiveRequiresSuspendedAndConsumesMatchingResult(t *te
 	}
 }
 
+type diskArchiveCompletingClient struct {
+	client.Client
+	atomicRequest bool
+}
+
+func (c *diskArchiveCompletingClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+	w, ok := obj.(*api.ResumablePod)
+	if ok {
+		var request api.ArchiveCaptureRequest
+		if json.Unmarshal([]byte(w.Annotations[api.ArchiveRequestAnnotation]), &request) == nil && request.DiskOnly {
+			if w.Spec.DesiredState != "Suspended" {
+				return errors.New("disk archive request was patched without suspending execution")
+			}
+			c.atomicRequest = true
+		}
+	}
+	if err := c.Client.Patch(ctx, obj, patch, opts...); err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	var request api.ArchiveCaptureRequest
+	if json.Unmarshal([]byte(w.Annotations[api.ArchiveRequestAnnotation]), &request) != nil || !request.DiskOnly {
+		return nil
+	}
+	stored := &api.ResumablePod{}
+	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(w), stored); err != nil {
+		return err
+	}
+	stored.Status.Phase = "Failed"
+	stored.Status.Snapshot = ""
+	stored.Status.PodUID, stored.Status.PodName = "", ""
+	if err := c.Client.Status().Update(ctx, stored); err != nil {
+		return err
+	}
+	result, _ := json.Marshal(api.ArchiveCaptureResult{ID: request.ID, DiskOnly: true, SourceUID: string(stored.UID), SourceGeneration: stored.Generation,
+		Size: 123, SHA256: strings.Repeat("a", 64)})
+	stored.Annotations[api.ArchiveResultAnnotation] = string(result)
+	return c.Client.Update(ctx, stored)
+}
+
+func TestCaptureDiskWorkspaceArchiveFromFailedHomeAndFencesReplay(t *testing.T) {
+	// Build the normal resource with the fake client, then wrap it so the
+	// controller result appears as soon as the atomic request patch lands.
+	p, createSpec, ctx := fixture(t)
+	createSpec.PersistentHome = true
+	createSpec.Config.Workspace = "/home/agent/workspace"
+	h, err := p.Create(ctx, createSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseClient := p.Client
+	w := &api.ResumablePod{}
+	if err = baseClient.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
+		t.Fatal(err)
+	}
+	w.Spec.DesiredState = "Suspended"
+	if err = baseClient.Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	w.Status.Phase = "Failed"
+	w.Status.Snapshot = ""
+	w.Status.PodUID, w.Status.PodName = "", ""
+	if err = baseClient.Status().Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	wrapper := &diskArchiveCompletingClient{Client: baseClient}
+	p.Client = wrapper
+	id := "arc-3123456789abcdef0123456789abcdef"
+	size, digest, err := p.CaptureDiskWorkspaceArchive(ctx, h, id)
+	if err != nil || size != 123 || digest != strings.Repeat("a", 64) {
+		t.Fatalf("disk archive capture = %d/%s/%v", size, digest, err)
+	}
+	if !wrapper.atomicRequest {
+		t.Fatal("DiskOnly request and DesiredState=Suspended were not patched atomically")
+	}
+	if err = baseClient.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
+		t.Fatal(err)
+	}
+	var captured api.ArchiveCaptureResult
+	if json.Unmarshal([]byte(w.Annotations[api.ArchiveResultAnnotation]), &captured) != nil || captured.SourceUID != string(w.UID) || captured.SourceGeneration != w.Generation {
+		t.Fatalf("result lacks its captured identity fence: %+v generation=%d", captured, w.Generation)
+	}
+	if w.Spec.DesiredState != "Suspended" || w.Status.Phase != "Failed" || w.Status.Snapshot != "" || w.Status.PodName != "" || w.Status.PodUID != "" || w.Annotations[api.ArchiveRequestAnnotation] != "" {
+		t.Fatalf("disk archive did not retain a stopped failed source: spec=%+v status=%+v annotations=%v", w.Spec, w.Status, w.Annotations)
+	}
+	if _, _, err = p.CaptureDiskWorkspaceArchive(ctx, h, id); err != nil {
+		t.Fatalf("same source generation should safely reuse prior archive: %v", err)
+	}
+	if err = baseClient.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
+		t.Fatal(err)
+	}
+	w.Spec.DesiredState = "Running"
+	w.Generation++
+	if err = baseClient.Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = p.CaptureDiskWorkspaceArchive(ctx, h, id); err == nil {
+		t.Fatal("replayed old archive after source resumed")
+	}
+	if err = baseClient.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
+		t.Fatal(err)
+	}
+	w.Spec.DesiredState = "Suspended"
+	w.Generation++
+	if err = baseClient.Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = p.CaptureDiskWorkspaceArchive(ctx, h, id); err == nil {
+		t.Fatal("replayed old archive after source generation changed")
+	}
+}
+
 type uidClient struct{ client.Client }
 
 func (c uidClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
