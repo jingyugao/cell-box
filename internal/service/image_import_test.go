@@ -263,6 +263,135 @@ func TestImageImportCreateIsolationAndRestart(t *testing.T) {
 	wantStatus(t, status, 404, raw)
 }
 
+func TestAutoTrustImportedImagesIsOwnedScopedAndCaptured(t *testing.T) {
+	f := newCoreFixture(t)
+	const ownedID = "img-11111111111111111111111111111111"
+	const secondOwnedID = "img-22222222222222222222222222222222"
+	const foreignID = "img-33333333333333333333333333333333"
+	prepared := "registry.example/prepared@sha256:" + strings.Repeat("c", 64)
+	secondPrepared := "registry.example/prepared@sha256:" + strings.Repeat("d", 64)
+	if err := f.service.store.Update(func(st *State) error {
+		st.ImportedImages[ownedID] = importedImageRecord{ClientID: "client-a", ImportedImage: ImportedImage{
+			ID: ownedID, Image: prepared, Command: []string{"/bin/sh", "-c", "echo imported"}, Env: map[string]string{"IMPORTED": "yes"}, WorkingDir: "/tmp",
+		}}
+		st.ImportedImages[secondOwnedID] = importedImageRecord{ClientID: "client-a", ImportedImage: ImportedImage{
+			ID: secondOwnedID, Image: secondPrepared, Command: []string{"/bin/sh"}, Env: map[string]string{}, WorkingDir: "/tmp",
+		}}
+		st.ImportedImages[foreignID] = importedImageRecord{ClientID: "client-b", ImportedImage: ImportedImage{ID: foreignID, Image: prepared}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := guestapi.Tool{ID: "cocell_mysql", Executable: "/opt/cellbox/tools/cocell-proxy", Args: []string{"mysql", "-"}, PassThroughArgs: true}
+	managed := Profile{
+		ID: "profile-a", Provider: "resumable-k8s-pod", Image: "registry.example/base@sha256:" + strings.Repeat("a", 64),
+		NodeName: "node-a", Namespace: "cellbox", AutoTrustImportedImages: true,
+		SharedReadOnlyHostPath: "/host/shared", DebugReadWriteHostPath: "/host/shared/runtime/debug-homes",
+		TrustedToolImages: []string{}, MountedToolRuntimeImages: []string{}, DebugHomeImages: []string{},
+		Guest: guestapi.DefaultConfig(),
+	}
+	managed.Guest.Debug = guestapi.Identity{UID: 0, GID: 0}
+	managed.Guest.Tools = []guestapi.Tool{tool}
+	managed.Guest.Env = map[string]string{
+		"SHARED_STARTUP_DIRECTORY": api.SharedMountPath,
+		"SHARED_CONFIG_PATH":       api.SharedMountPath + "/runtime/config.json",
+		"SAFE_PROFILE_ENV":         "preserved",
+	}
+	before, err := json.Marshal(managed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct{ id, image string }{{ownedID, prepared}, {secondOwnedID, secondPrepared}} {
+		approved, err := f.service.importedProfile("client-a", item.id, managed)
+		if err != nil {
+			t.Fatalf("auto-trust failed for owned image %s: %v", item.id, err)
+		}
+		for _, images := range [][]string{approved.TrustedToolImages, approved.MountedToolRuntimeImages, approved.DebugHomeImages} {
+			if !slices.Contains(images, item.image) {
+				t.Fatalf("imported digest was not captured in every admission list: %+v", approved)
+			}
+		}
+		if len(approved.Guest.Tools) != 1 || approved.SharedReadOnlyHostPath != "/host/shared" {
+			t.Fatalf("auto-trusted image lost tools or shared config mount: %+v", approved)
+		}
+		capabilities := profileCapabilities(approved)
+		if !capabilities.SharedDirectory || !capabilities.MountedToolRuntime || !capabilities.MountedDebugHome {
+			t.Fatalf("auto-trusted image did not receive mounted runtime capabilities: %+v", capabilities)
+		}
+		if approved.DebugReadWriteHostPath != "/host/shared/runtime/debug-homes" || approved.Guest.Env["SHARED_CONFIG_PATH"] != api.SharedMountPath+"/runtime/config.json" {
+			t.Fatalf("managed HOME or shared config mount was not preserved: %+v", approved)
+		}
+	}
+	after, err := json.Marshal(managed)
+	if err != nil || string(before) != string(after) {
+		t.Fatalf("import admission mutated the shared profile config: before=%s after=%s err=%v", before, after, err)
+	}
+
+	isolatedProfile := managed
+	isolatedProfile.AutoTrustImportedImages = false
+	isolatedProfile.TrustedToolImages = nil
+	isolatedProfile.MountedToolRuntimeImages = nil
+	isolatedProfile.DebugHomeImages = nil
+	isolated, err := f.service.importedProfile("client-a", ownedID, isolatedProfile)
+	if err != nil || len(isolated.Guest.Tools) != 0 || isolated.SharedReadOnlyHostPath != "" || isolated.DebugReadWriteHostPath != "" {
+		t.Fatalf("default/disabled profile retained imported-image trust: %+v %v", isolated, err)
+	}
+	for _, args := range []struct{ client, id string }{{"client-b", ownedID}, {"client-a", "unregistered-image"}, {"client-a", foreignID}} {
+		if _, err := f.service.importedProfile(args.client, args.id, managed); err == nil {
+			t.Fatalf("unowned or unregistered image %q was trusted for %q", args.id, args.client)
+		}
+	}
+	if err := f.service.store.Update(func(st *State) error {
+		record := st.ImportedImages[ownedID]
+		record.ImportedImage.Deleting = true
+		st.ImportedImages[ownedID] = record
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.service.importedProfile("client-a", ownedID, managed); err == nil {
+		t.Fatal("deleting imported image was trusted")
+	}
+	if err := f.service.store.Update(func(st *State) error {
+		record := st.ImportedImages[ownedID]
+		record.ImportedImage.Deleting = false
+		st.ImportedImages[ownedID] = record
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A real Box stores its own admission snapshot, so a restart retains trust
+	// even if shared profile lists remain empty.
+	boxProfile := f.config.Profiles[0]
+	boxProfile.AutoTrustImportedImages = true
+	boxProfile.Guest.Tools = []guestapi.Tool{tool}
+	f.config.Profiles[0] = boxProfile
+	f.reopen(t)
+	status, body := f.call(t, "POST", "/v1/boxes", testClientToken, "auto-trust-box", createRequest{
+		ProfileID: "profile-a", OwnerKey: "auto-trust", ImportedImageID: ownedID,
+	})
+	wantStatus(t, status, http.StatusAccepted, body)
+	op := decodeResponse[Operation](t, body)
+	f.waitOperation(t, op.ID, "succeeded")
+	box, err := f.service.rawBox(op.TargetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(box.Profile.TrustedToolImages, prepared) || len(box.Profile.Guest.Tools) != 1 || !box.Box.Capabilities.ProtectedTools {
+		t.Fatalf("Box did not capture auto-trusted image admission: %+v", box)
+	}
+	if len(f.config.Profiles[0].TrustedToolImages) != 0 || len(f.config.Profiles[0].MountedToolRuntimeImages) != 0 || len(f.config.Profiles[0].DebugHomeImages) != 0 {
+		t.Fatal("captured admission mutated shared config lists")
+	}
+	f.reopen(t)
+	box, err = f.service.rawBox(op.TargetID)
+	if err != nil || !slices.Contains(box.Profile.TrustedToolImages, prepared) || !box.Profile.AutoTrustImportedImages {
+		t.Fatalf("captured Box profile lost its image admission across restart: %+v %v", box, err)
+	}
+}
+
 func TestImportedImageUsageBlocksPausedAndHidesForeignOwnership(t *testing.T) {
 	f := newCoreFixture(t)
 	id := "img-11111111111111111111111111111111"

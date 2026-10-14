@@ -305,9 +305,19 @@ func (s *Service) importedProfile(client, id string, profile Profile) (Profile, 
 		if out.Guest.Env == nil {
 			out.Guest.Env = map[string]string{}
 		}
+		// Only imports already owned by this client reach this point. A private
+		// profile can admit their resolved digest in the captured Box profile,
+		// leaving the shared operator config unchanged.
+		if out.AutoTrustImportedImages {
+			for _, images := range []*[]string{&out.TrustedToolImages, &out.MountedToolRuntimeImages, &out.DebugHomeImages} {
+				if !slices.Contains(*images, imported.Image) {
+					*images = append(*images, imported.Image)
+				}
+			}
+		}
 		// Admitted CoCell images reuse the operator's read-only shared directory.
 		// Other imported workloads keep their isolated startup configuration.
-		if !slices.Contains(profile.TrustedToolImages, imported.Image) {
+		if !slices.Contains(out.TrustedToolImages, imported.Image) {
 			out.Guest.Tools = nil
 			out.SharedReadOnlyHostPath = ""
 		}

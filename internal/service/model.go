@@ -8,6 +8,9 @@ import (
 )
 
 type Profile struct {
+	// Private installations may let client-owned imported images inherit this
+	// profile's protected tools and managed HOME without per-digest admission.
+	AutoTrustImportedImages bool `json:"autoTrustImportedImages,omitempty"`
 	// Exact prepared images explicitly approved by the operator to run Guest.Tools.
 	TrustedToolImages []string `json:"trustedToolImages,omitempty"`
 	// Images whose protected runner can read a mounted tool-runtime descriptor.
