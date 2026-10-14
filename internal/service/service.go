@@ -26,22 +26,23 @@ import (
 )
 
 type Service struct {
-	objects      objectstorage.Objects
-	config       Config
-	store        *Store
-	providers    map[string]boxprovider.Provider
-	http         *http.Client
-	toolHTTP     *http.Client
-	ctx          context.Context
-	cancel       context.CancelFunc
-	wg           sync.WaitGroup
-	mu           sync.Mutex
-	admissions   keyedLocks
-	observerMu   sync.Mutex
-	observers    map[string]bool
-	runtimeFeeds map[string]*runtimeFeed
-	gcMu         sync.Mutex
-	streams      map[string]activeStream
+	objects       objectstorage.Objects
+	config        Config
+	store         *Store
+	providers     map[string]boxprovider.Provider
+	http          *http.Client
+	toolHTTP      *http.Client
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+	mu            sync.Mutex
+	warmDefaultMu sync.Mutex
+	admissions    keyedLocks
+	observerMu    sync.Mutex
+	observers     map[string]bool
+	runtimeFeeds  map[string]*runtimeFeed
+	gcMu          sync.Mutex
+	streams       map[string]activeStream
 }
 type activeStream struct {
 	boxID  string

@@ -1,16 +1,22 @@
 package controller
 
 import (
-	api "cellbox.local/cellbox/api/v1alpha1"
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	api "cellbox.local/cellbox/api/v1alpha1"
+	"cellbox.local/cellbox/internal/warmdefaults"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sync"
-	"testing"
-	"time"
 )
 
 type poolRuntime struct {
@@ -46,6 +52,26 @@ func (*poolRuntime) ActivateWarm(context.Context, *api.ResumablePod, *core.Pod) 
 }
 func (*poolRuntime) ReapWarm(context.Context, string, map[string]bool) error { return nil }
 
+func setWarmDefault(t *testing.T, r *Reconciler, w *api.ResumablePod, profileID string) {
+	t.Helper()
+	image := "registry.example.invalid/cellbox@sha256:" + strings.Repeat("a", 64)
+	w.Spec.Container.Image = image
+	if err := r.Update(context.Background(), w); err != nil {
+		t.Fatal(err)
+	}
+	w.Status.SpecHash = fingerprint(w)
+	if err := r.Status().Update(context.Background(), w); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(warmdefaults.Image{ProfileID: profileID, NodeName: r.NodeName, Image: image})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = r.Create(context.Background(), &core.ConfigMap{ObjectMeta: meta.ObjectMeta{Namespace: w.Namespace, Name: warmdefaults.ConfigMapName}, Data: map[string]string{profileID: string(encoded)}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWarmPoolConcurrentAdoptionRestartAndTemplateMiss(t *testing.T) {
 	for _, persistent := range []bool{false, true} {
 		t.Run(fmt.Sprintf("persistentHome=%v", persistent), func(t *testing.T) { testWarmPoolConcurrentAdoption(t, persistent) })
@@ -55,6 +81,7 @@ func TestWarmPoolConcurrentAdoptionRestartAndTemplateMiss(t *testing.T) {
 func testWarmPoolConcurrentAdoption(t *testing.T, persistent bool) {
 	ctx := context.Background()
 	r, f, w := fixture(t)
+	setWarmDefault(t, r, w, "default")
 	w.Spec.PersistentHome = persistent
 	w.Status.SpecHash = fingerprint(w)
 	backend := &poolRuntime{fakeRuntime: f, deadlines: map[string]time.Time{}}
@@ -130,5 +157,120 @@ func testWarmPoolConcurrentAdoption(t *testing.T, persistent bool) {
 	var pods core.PodList
 	if err = r.List(ctx, &pods, client.MatchingLabels{warmLabel: "true"}); err != nil || len(pods.Items) != 2 {
 		t.Fatal("unexpected extra Pods")
+	}
+}
+
+func TestWarmPoolUsesOnlyConfiguredDefaultImagesAndSwitchDrainsUnusedSlots(t *testing.T) {
+	ctx := context.Background()
+	r, f, w := fixture(t)
+	setWarmDefault(t, r, w, "default")
+	w.Spec.PersistentHome = false
+	w.Status.SpecHash = fingerprint(w)
+	backend := &poolRuntime{fakeRuntime: f, deadlines: map[string]time.Time{}}
+	r.Runtime = backend
+	pool := &WarmPool{Reconciler: r, Namespace: w.Namespace, Size: 1}
+	r.WarmPool = pool
+
+	old := warmExecutionPod(w, "warm-old")
+	old.UID = types.UID("warm-old-uid")
+	old.Spec.SchedulingGates = nil
+	old.Labels = map[string]string{warmLabel: "true"}
+	old.Annotations = map[string]string{warmSpec: w.Status.SpecHash}
+	if err := r.Create(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	backend.deadlines[string(old.UID)] = time.Now().Add(time.Minute)
+	newImage := "registry.example.invalid/cellbox@sha256:" + strings.Repeat("b", 64)
+	other := w.DeepCopy()
+	other.Name, other.UID = "other-image", types.UID("other-image-uid")
+	other.ResourceVersion = ""
+	other.Spec.Container.Image = newImage
+	other.Status.SpecHash = fingerprint(other)
+	if err := r.Create(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	otherWarm := warmExecutionPod(other, "warm-other-image")
+	otherWarm.UID = types.UID("warm-other-image-uid")
+	otherWarm.Spec.SchedulingGates = nil
+	otherWarm.Labels = map[string]string{warmLabel: "true"}
+	otherWarm.Annotations = map[string]string{warmSpec: other.Status.SpecHash}
+	if err := r.Create(ctx, otherWarm); err != nil {
+		t.Fatal(err)
+	}
+	backend.deadlines[string(otherWarm.UID)] = time.Now().Add(time.Minute)
+	if pod, err := pool.acquire(ctx, other); err != nil || pod != nil {
+		t.Fatalf("nondefault image slot was adopted: pod=%v err=%v", pod, err)
+	}
+
+	// Switch the target to a new immutable image while keeping the old CR alive.
+	cm := &core.ConfigMap{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: warmdefaults.ConfigMapName}, cm); err != nil {
+		t.Fatal(err)
+	}
+	cm.Data["default"] = `{"profileId":"default","nodeName":"node","image":"` + newImage + `"}`
+	if err := r.Update(ctx, cm); err != nil {
+		t.Fatal(err)
+	}
+	if pod, err := pool.acquire(ctx, w); err != nil || pod != nil {
+		t.Fatalf("stale image slot was adopted after default switch: pod=%v err=%v", pod, err)
+	}
+	if err := pool.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var pods core.PodList
+	if err := r.List(ctx, &pods, client.MatchingLabels{warmLabel: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 1 || pods.Items[0].Annotations[warmSpec] != other.Status.SpecHash {
+		t.Fatalf("pool did not switch exclusively to the new default image: %#v", pods.Items)
+	}
+}
+
+func TestWarmPoolMissingDefaultDrainsUnclaimedAndKeepsClaimed(t *testing.T) {
+	ctx := context.Background()
+	r, f, w := fixture(t)
+	setWarmDefault(t, r, w, "default")
+	backend := &poolRuntime{fakeRuntime: f, deadlines: map[string]time.Time{}}
+	r.Runtime = backend
+	pool := &WarmPool{Reconciler: r, Namespace: w.Namespace, Size: 1}
+	claimed := warmExecutionPod(w, "warm-claimed")
+	claimed.UID = types.UID("warm-claimed-uid")
+	claimed.Spec.SchedulingGates = nil
+	claimed.Labels = map[string]string{warmLabel: "true", api.OwnerLabel: string(w.UID)}
+	claimed.Annotations = map[string]string{warmSpec: w.Status.SpecHash}
+	if err := controllerutil.SetControllerReference(w, claimed, r.Scheme()); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Create(ctx, claimed); err != nil {
+		t.Fatal(err)
+	}
+	unclaimed := warmExecutionPod(w, "warm-unclaimed")
+	unclaimed.UID = types.UID("warm-unclaimed-uid")
+	unclaimed.Spec.SchedulingGates = nil
+	unclaimed.Labels = map[string]string{warmLabel: "true"}
+	unclaimed.Annotations = map[string]string{warmSpec: w.Status.SpecHash}
+	if err := r.Create(ctx, unclaimed); err != nil {
+		t.Fatal(err)
+	}
+	backend.deadlines[string(claimed.UID)] = time.Now().Add(time.Minute)
+	backend.deadlines[string(unclaimed.UID)] = time.Now().Add(time.Minute)
+	cm := &core.ConfigMap{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: warmdefaults.ConfigMapName}, cm); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Delete(ctx, cm); err != nil {
+		t.Fatal(err)
+	}
+	if pod, err := pool.acquire(ctx, w); err != nil || pod != nil {
+		t.Fatalf("missing target must disable adoption: pod=%v err=%v", pod, err)
+	}
+	if err := pool.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: claimed.Name}, &core.Pod{}); err != nil {
+		t.Fatalf("claimed box was removed without a default target: %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: unclaimed.Name}, &core.Pod{}); err == nil {
+		t.Fatal("unclaimed warm slot was not drained with no configured default")
 	}
 }

@@ -1671,6 +1671,41 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       summary: List configured profiles without authentication
+  /v1/profiles/{id}/warm-default:
+    put:
+      operationId: setWarmDefaultImage
+      summary: Select the profile image eligible for speculative warm slots
+      description: Uses a client-owned imported image, or the configured base image when omitted. Existing Boxes retain their pinned images.
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                importedImageId:
+                  type: string
+      responses:
+        "200":
+          description: Warm target persisted
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  image:
+                    type: string
+                required: [image]
+        default:
+          $ref: '#/components/responses/Error'
   /v1/routes:
     post:
       description: One route per box/port; duplicate registration returns the existing
