@@ -249,7 +249,7 @@ func TestPurgeRemovesDeletedBoxTombstoneLeftByRetention(t *testing.T) {
 	}
 }
 
-func TestRecordHeadUsesTemplateSchemaBeforeUsingRetirement(t *testing.T) {
+func TestRecordHeadUsesCurrentSchemaBeforeUsingRetirement(t *testing.T) {
 	objects := &ledgerObjects{}
 	store := openRecords(t, objects)
 	head, err := decodeRecordHead(objects.data[stateObjectKey])
@@ -266,7 +266,7 @@ func TestRecordHeadUsesTemplateSchemaBeforeUsingRetirement(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := decodeRecordHead(legacyData); err == nil {
-		t.Fatal("pre-template record head schema was accepted")
+		t.Fatal("pre-catalog record head schema was accepted")
 	}
 	seedPurge(t, store)
 	if err = purgeService(store, objects).purgeBox(context.Background(), "owner", "box"); err != nil {
@@ -274,7 +274,7 @@ func TestRecordHeadUsesTemplateSchemaBeforeUsingRetirement(t *testing.T) {
 	}
 	head, err = decodeRecordHead(objects.data[stateObjectKey])
 	if err != nil || len(head.Retired) == 0 || head.Schema != stateSchema {
-		t.Fatal("retirement changed or lost the template metadata schema fence")
+		t.Fatal("retirement changed or lost the current metadata schema fence")
 	}
 }
 

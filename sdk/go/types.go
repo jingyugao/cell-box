@@ -9,9 +9,10 @@ import (
 	"time"
 )
 
-// CreateOptions selects an immutable template version and an application-owned label.
+// CreateOptions selects a fixed revision, or the current stable revision of a template.
 type CreateOptions struct {
-	TemplateID string `json:"templateId"`
+	RevisionID string `json:"revisionId,omitempty"`
+	TemplateID string `json:"templateId,omitempty"`
 	OwnerKey   string `json:"ownerKey"`
 	// Staged holds the configured workload until explicitly activated via the API.
 	Staged         bool   `json:"staged,omitempty"`
@@ -23,6 +24,7 @@ type SandboxInfo struct {
 	ID              string       `json:"id"`
 	OwnerKey        string       `json:"ownerKey"`
 	TemplateID      string       `json:"templateId"`
+	RevisionID      string       `json:"revisionId"`
 	TemplateName    string       `json:"templateName"`
 	TemplateVersion string       `json:"templateVersion"`
 	ProfileID       string       `json:"profileId"`
@@ -64,29 +66,97 @@ type Profile struct {
 	Capabilities Capabilities `json:"capabilities"`
 }
 
-// Template is an immutable, versioned sandbox configuration. WarmSlots is the
-// desired number of compatible prewarmed slots shared by sandboxes using it.
+// Template is a family of immutable revisions.
 type Template struct {
-	ID              string    `json:"id"`
-	Name            string    `json:"name"`
-	Version         string    `json:"version"`
-	ProfileID       string    `json:"profileId"`
-	ImportedImageID string    `json:"importedImageId,omitempty"`
-	Image           string    `json:"image"`
-	CPU             float64   `json:"cpu"`
-	MemoryMiB       int64     `json:"memoryMiB"`
-	WarmSlots       int       `json:"warmSlots"`
-	Deleting        bool      `json:"deleting,omitempty"`
-	CreatedAt       time.Time `json:"createdAt"`
+	ID               string    `json:"id"`
+	Name             string    `json:"name"`
+	Description      string    `json:"description,omitempty"`
+	DefaultWarmSlots int       `json:"defaultWarmSlots"`
+	StableRevisionID string    `json:"stableRevisionId,omitempty"`
+	Generation       uint64    `json:"generation"`
+	CreatedAt        time.Time `json:"createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt"`
 }
 
-// CreateTemplateOptions defines a new immutable template version.
+// CreateTemplateOptions defines a template family.
 type CreateTemplateOptions struct {
-	Name            string `json:"name"`
-	Version         string `json:"version"`
-	ProfileID       string `json:"profileId"`
-	ImportedImageID string `json:"importedImageId,omitempty"`
-	WarmSlots       int    `json:"warmSlots,omitempty"`
+	Name             string `json:"name"`
+	Description      string `json:"description,omitempty"`
+	DefaultWarmSlots int    `json:"defaultWarmSlots,omitempty"`
+}
+
+type UpdateTemplateOptions struct {
+	Description        *string `json:"description,omitempty"`
+	DefaultWarmSlots   *int    `json:"defaultWarmSlots,omitempty"`
+	StableRevisionID   *string `json:"stableRevisionId,omitempty"`
+	ExpectedGeneration uint64  `json:"expectedGeneration"`
+}
+
+type CreateRevisionOptions struct {
+	UserVersion  string `json:"userVersion"`
+	BaseImage    string `json:"baseImage"`
+	ProfileID    string `json:"profileId"`
+	BuildCommand string `json:"buildCommand,omitempty"`
+	RunCommand   string `json:"runCommand,omitempty"`
+	Platform     string `json:"platform,omitempty"`
+	WarmSlots    *int   `json:"warmSlots,omitempty"`
+}
+
+type TemplateRevision struct {
+	ID                string    `json:"id"`
+	TemplateID        string    `json:"templateId"`
+	TemplateName      string    `json:"templateName"`
+	Description       string    `json:"description,omitempty"`
+	UserVersion       string    `json:"userVersion"`
+	Revision          int       `json:"revision"`
+	Version           string    `json:"version"`
+	ProfileID         string    `json:"profileId"`
+	BaseImage         string    `json:"baseImage"`
+	ResolvedBaseImage string    `json:"resolvedBaseImage"`
+	Image             string    `json:"image"`
+	BuildCommand      string    `json:"buildCommand,omitempty"`
+	RunCommand        string    `json:"runCommand,omitempty"`
+	Platform          string    `json:"platform,omitempty"`
+	CPU               float64   `json:"cpu"`
+	MemoryMiB         int64     `json:"memoryMiB"`
+	WarmSlots         int       `json:"warmSlots"`
+	Status            string    `json:"status"`
+	Generation        uint64    `json:"generation"`
+	BuildOperationID  string    `json:"buildOperationId,omitempty"`
+	CreatedAt         time.Time `json:"createdAt"`
+	UpdatedAt         time.Time `json:"updatedAt"`
+}
+
+type UpdateRevisionOptions struct {
+	Description        *string `json:"description,omitempty"`
+	Status             *string `json:"status,omitempty"`
+	WarmSlots          *int    `json:"warmSlots,omitempty"`
+	ExpectedGeneration uint64  `json:"expectedGeneration"`
+}
+
+type RevisionListOptions struct {
+	UserVersion string
+	Limit       int
+	Offset      int
+}
+
+type TemplateListOptions struct {
+	Name   string
+	Limit  int
+	Offset int
+}
+
+type OperationListOptions struct {
+	TemplateID string
+	Status     string
+	Limit      int
+	Offset     int
+}
+
+type OperationLogs struct {
+	Text       string `json:"text"`
+	NextOffset int64  `json:"nextOffset"`
+	EOF        bool   `json:"eof"`
 }
 
 // Operation records durable server work. IdempotencyKey is populated locally
@@ -96,6 +166,7 @@ type Operation struct {
 	Kind           string            `json:"kind"`
 	TargetID       string            `json:"targetId"`
 	Status         string            `json:"status"`
+	Stage          string            `json:"stage,omitempty"`
 	Version        uint64            `json:"version"`
 	CreatedAt      time.Time         `json:"createdAt"`
 	FinishedAt     *time.Time        `json:"finishedAt,omitempty"`

@@ -1,6 +1,7 @@
 package image
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -80,6 +81,52 @@ func TestPrepareBuildKitReturnsPublishedDigest(t *testing.T) {
 		if _, err := PrepareBuildKit(context.Background(), opts); err == nil {
 			t.Fatal("invalid build command accepted")
 		}
+	}
+}
+
+func TestPrepareBuildKitNoCacheBuildIDAndLiveLogs(t *testing.T) {
+	guest := staticGuest(t)
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args")
+	script := filepath.Join(dir, "buildctl")
+	contents := "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" > \"$ARGS_FILE\"\nprintf 'build output\\n'\nwhile [ \"$#\" -gt 0 ]; do\n  case \"$1\" in --metadata-file) shift; metadata=$1 ;; esac\n  shift\ndone\nprintf '%s' '{\"containerimage.digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}' > \"$metadata\"\n"
+	if err := os.WriteFile(script, []byte(contents), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARGS_FILE", argsFile)
+	var logs bytes.Buffer
+	opts := BuildKitOptions{
+		Address: "unix:///tmp/buildkitd.sock", Binary: script,
+		Repository:  "example.com/cellbox",
+		Base:        "example.com/base@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		GuestBinary: guest, BuildCommand: "npm install -g codex", BuildID: "op-123",
+		NoCache: true, LogWriter: &logs,
+	}
+	result, err := PrepareBuildKit(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "--no-cache\n") {
+		t.Fatalf("BuildKit did not receive --no-cache: %s", args)
+	}
+	if !strings.Contains(logs.String(), "build output") {
+		t.Fatalf("BuildKit output was not streamed to LogWriter: %q", logs.String())
+	}
+	if result.Key == "" {
+		t.Fatal("content identity key should remain populated")
+	}
+	firstTag, firstKey := result.Tag, result.Key
+	opts.BuildID = "op-456"
+	second, err := PrepareBuildKit(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Tag == firstTag || second.Key != firstKey {
+		t.Fatalf("build ID must separate tags without changing content identity: first=%+v second=%+v", result, second)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -156,14 +157,13 @@ func (c *Client) ListProfiles(ctx context.Context) ([]Profile, error) {
 	return profiles, err
 }
 
-// CreateTemplate registers an immutable template version. The server treats an
-// identical name, version, and specification as idempotent and rejects conflicts.
+// CreateTemplate creates a template family. Revisions are created separately.
 func (c *Client) CreateTemplate(ctx context.Context, opts CreateTemplateOptions) (*Template, error) {
-	if strings.TrimSpace(opts.Name) == "" || strings.TrimSpace(opts.Version) == "" || strings.TrimSpace(opts.ProfileID) == "" {
-		return nil, fmt.Errorf("cellbox: template name, version, and profile ID are required")
+	if strings.TrimSpace(opts.Name) == "" {
+		return nil, fmt.Errorf("cellbox: template name is required")
 	}
-	if opts.WarmSlots < 0 || opts.WarmSlots > 1024 {
-		return nil, fmt.Errorf("cellbox: warm slots must be 0..1024")
+	if opts.DefaultWarmSlots < 0 || opts.DefaultWarmSlots > 1024 {
+		return nil, fmt.Errorf("cellbox: default warm slots must be 0..1024")
 	}
 	var template Template
 	if err := c.do(ctx, http.MethodPost, "/v1/templates", "", opts, &template); err != nil {
@@ -172,14 +172,30 @@ func (c *Client) CreateTemplate(ctx context.Context, opts CreateTemplateOptions)
 	return &template, nil
 }
 
-// ListTemplates lists templates in the client's namespace.
-func (c *Client) ListTemplates(ctx context.Context) ([]Template, error) {
+// ListTemplates lists template families in the client's namespace.
+func (c *Client) ListTemplates(ctx context.Context, opts ...TemplateListOptions) ([]Template, error) {
+	q := url.Values{}
+	if len(opts) > 0 {
+		if opts[0].Name != "" {
+			q.Set("name", opts[0].Name)
+		}
+		if opts[0].Limit > 0 {
+			q.Set("limit", strconv.Itoa(opts[0].Limit))
+		}
+		if opts[0].Offset > 0 {
+			q.Set("offset", strconv.Itoa(opts[0].Offset))
+		}
+	}
 	var templates []Template
-	err := c.do(ctx, http.MethodGet, "/v1/templates", "", nil, &templates)
+	path := "/v1/templates"
+	if encoded := q.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	err := c.do(ctx, http.MethodGet, path, "", nil, &templates)
 	return templates, err
 }
 
-// GetTemplate returns a registered template by its immutable ID.
+// GetTemplate returns a template family by its ID.
 func (c *Client) GetTemplate(ctx context.Context, id string) (*Template, error) {
 	path, err := resourcePath("/v1/templates/", id)
 	if err != nil {
@@ -192,23 +208,168 @@ func (c *Client) GetTemplate(ctx context.Context, id string) (*Template, error) 
 	return &template, nil
 }
 
-// SetTemplateWarmSlots updates the template's desired shared prewarm capacity.
-func (c *Client) SetTemplateWarmSlots(ctx context.Context, id string, slots int) (*Template, error) {
-	if slots < 0 || slots > 1024 {
-		return nil, fmt.Errorf("cellbox: warm slots must be 0..1024")
-	}
+// UpdateTemplate updates mutable family settings using optimistic concurrency.
+func (c *Client) UpdateTemplate(ctx context.Context, id string, opts UpdateTemplateOptions) (*Template, error) {
 	path, err := resourcePath("/v1/templates/", id)
 	if err != nil {
 		return nil, err
 	}
 	var template Template
-	err = c.do(ctx, http.MethodPut, path+"/prewarm", "", struct {
-		WarmSlots int `json:"warmSlots"`
-	}{slots}, &template)
+	err = c.do(ctx, http.MethodPatch, path, "", opts, &template)
 	if err != nil {
 		return nil, err
 	}
 	return &template, nil
+}
+
+func (c *Client) SetTemplateWarmSlots(ctx context.Context, id string, slots int, expectedGeneration uint64) (*Template, error) {
+	return c.UpdateTemplate(ctx, id, UpdateTemplateOptions{DefaultWarmSlots: &slots, ExpectedGeneration: expectedGeneration})
+}
+
+// BuildRevision submits an asynchronous build and returns its durable operation.
+func (c *Client) BuildRevision(ctx context.Context, templateID string, opts CreateRevisionOptions, idempotencyKey string) (*Operation, error) {
+	if strings.TrimSpace(opts.UserVersion) == "" || strings.TrimSpace(opts.BaseImage) == "" || strings.TrimSpace(opts.ProfileID) == "" {
+		return nil, fmt.Errorf("cellbox: user version, base image, and profile ID are required")
+	}
+	if opts.WarmSlots != nil && (*opts.WarmSlots < 0 || *opts.WarmSlots > 1024) {
+		return nil, fmt.Errorf("cellbox: warm slots must be 0..1024")
+	}
+	path, err := resourcePath("/v1/templates/", templateID)
+	if err != nil {
+		return nil, err
+	}
+	return c.submit(ctx, path+"/revisions", idempotencyKey, opts)
+}
+
+// WaitBuildRevision waits for a build and loads the resulting immutable revision.
+func (c *Client) WaitBuildRevision(ctx context.Context, op *Operation) (*TemplateRevision, error) {
+	if op == nil || op.ID == "" {
+		return nil, fmt.Errorf("cellbox: operation is required")
+	}
+	completed, err := c.wait(ctx, op)
+	if err != nil {
+		return nil, err
+	}
+	var revisionID string
+	if completed.Result != nil {
+		revisionID = completed.Result["revisionId"]
+	}
+	if revisionID == "" {
+		revisionID = completed.TargetID
+	}
+	if revisionID == "" {
+		return nil, &OperationError{Operation: completed, Err: fmt.Errorf("build result missing revision ID")}
+	}
+	return c.GetTemplateRevision(ctx, revisionID)
+}
+
+func (c *Client) ListTemplateRevisions(ctx context.Context, templateID string, opts ...RevisionListOptions) ([]TemplateRevision, error) {
+	path, err := resourcePath("/v1/templates/", templateID)
+	if err != nil {
+		return nil, err
+	}
+	q := url.Values{}
+	if len(opts) > 0 {
+		if opts[0].UserVersion != "" {
+			q.Set("userVersion", opts[0].UserVersion)
+		}
+		if opts[0].Limit > 0 {
+			q.Set("limit", strconv.Itoa(opts[0].Limit))
+		}
+		if opts[0].Offset > 0 {
+			q.Set("offset", strconv.Itoa(opts[0].Offset))
+		}
+	}
+	path += "/revisions"
+	if encoded := q.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var revisions []TemplateRevision
+	err = c.do(ctx, http.MethodGet, path, "", nil, &revisions)
+	return revisions, err
+}
+
+func (c *Client) GetTemplateRevision(ctx context.Context, id string) (*TemplateRevision, error) {
+	path, err := resourcePath("/v1/template-revisions/", id)
+	if err != nil {
+		return nil, err
+	}
+	var revision TemplateRevision
+	err = c.do(ctx, http.MethodGet, path, "", nil, &revision)
+	return &revision, err
+}
+
+func (c *Client) UpdateTemplateRevision(ctx context.Context, id string, opts UpdateRevisionOptions) (*TemplateRevision, error) {
+	if opts.ExpectedGeneration == 0 {
+		return nil, fmt.Errorf("cellbox: expected generation is required")
+	}
+	if opts.WarmSlots != nil && (*opts.WarmSlots < 0 || *opts.WarmSlots > 1024) {
+		return nil, fmt.Errorf("cellbox: warm slots must be 0..1024")
+	}
+	path, err := resourcePath("/v1/template-revisions/", id)
+	if err != nil {
+		return nil, err
+	}
+	var revision TemplateRevision
+	err = c.do(ctx, http.MethodPatch, path, "", opts, &revision)
+	return &revision, err
+}
+
+func (c *Client) ListOperations(ctx context.Context, opts ...OperationListOptions) ([]Operation, error) {
+	q := url.Values{}
+	if len(opts) > 0 {
+		if opts[0].TemplateID != "" {
+			q.Set("templateId", opts[0].TemplateID)
+		}
+		if opts[0].Status != "" {
+			q.Set("status", opts[0].Status)
+		}
+		if opts[0].Limit > 0 {
+			q.Set("limit", strconv.Itoa(opts[0].Limit))
+		}
+		if opts[0].Offset > 0 {
+			q.Set("offset", strconv.Itoa(opts[0].Offset))
+		}
+	}
+	path := "/v1/operations"
+	if encoded := q.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var operations []Operation
+	err := c.do(ctx, http.MethodGet, path, "", nil, &operations)
+	return operations, err
+}
+
+func (c *Client) GetOperationLogs(ctx context.Context, id string, offset int64, limit int) (*OperationLogs, error) {
+	path, err := resourcePath("/v1/operations/", id)
+	if err != nil {
+		return nil, err
+	}
+	q := url.Values{}
+	if offset > 0 {
+		q.Set("offset", strconv.FormatInt(offset, 10))
+	}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	if encoded := q.Encode(); encoded != "" {
+		path += "/logs?" + encoded
+	} else {
+		path += "/logs"
+	}
+	var logs OperationLogs
+	err = c.do(ctx, http.MethodGet, path, "", nil, &logs)
+	return &logs, err
+}
+
+func (c *Client) CancelOperation(ctx context.Context, id string) (*Operation, error) {
+	path, err := resourcePath("/v1/operations/", id)
+	if err != nil {
+		return nil, err
+	}
+	var operation Operation
+	err = c.do(ctx, http.MethodPost, path+":cancel", "", struct{}{}, &operation)
+	return &operation, err
 }
 
 // DeleteTemplate removes an unused template. The server rejects templates still
@@ -258,13 +419,13 @@ func (c *Client) wait(ctx context.Context, op *Operation) (*Operation, error) {
 		switch op.Status {
 		case "succeeded":
 			return op, nil
-		case "failed":
+		case "failed", "cancelled":
 			var err error = op.Error
 			if op.Error == nil {
-				err = fmt.Errorf("operation failed without error details")
+				err = fmt.Errorf("operation %s without error details", op.Status)
 			}
 			return op, &OperationError{Operation: op, Err: err}
-		case "queued", "running":
+		case "queued", "running", "cancelling":
 		default:
 			return op, &OperationError{Operation: op, Err: fmt.Errorf("unsupported operation status %q", op.Status)}
 		}
@@ -276,7 +437,7 @@ func (c *Client) wait(ctx context.Context, op *Operation) (*Operation, error) {
 		next.IdempotencyKey = op.IdempotencyKey
 		op = next
 		// Avoid busy polling if an intermediary/server returns early.
-		if (op.Status == "running" || op.Status == "queued") && time.Since(started) < 100*time.Millisecond {
+		if (op.Status == "running" || op.Status == "queued" || op.Status == "cancelling") && time.Since(started) < 100*time.Millisecond {
 			timer := time.NewTimer(100*time.Millisecond - time.Since(started))
 			select {
 			case <-ctx.Done():

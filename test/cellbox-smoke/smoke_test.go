@@ -16,11 +16,38 @@ import (
 	"time"
 
 	"cellbox.local/cellbox/internal/boxprovider"
+	"cellbox.local/cellbox/internal/catalog"
 	"cellbox.local/cellbox/internal/guestapi"
 	"cellbox.local/cellbox/internal/image"
 	"cellbox.local/cellbox/internal/providers/docker"
 	"cellbox.local/cellbox/internal/service"
 )
+
+type localImageBuilder struct {
+	image      string
+	command    []string
+	env        map[string]string
+	workingDir string
+}
+
+func (b localImageBuilder) Build(_ context.Context, in catalog.BuildInput, log io.Writer, stage func(string) error) (catalog.BuildResult, error) {
+	if err := stage("resolving"); err != nil {
+		return catalog.BuildResult{}, err
+	}
+	if _, err := fmt.Fprintf(log, "Using local Docker image %s\n", b.image); err != nil {
+		return catalog.BuildResult{}, err
+	}
+	if err := stage("building"); err != nil {
+		return catalog.BuildResult{}, err
+	}
+	return catalog.BuildResult{
+		ResolvedBaseImage: in.BaseImage,
+		Image:             b.image,
+		Command:           append([]string(nil), b.command...),
+		Env:               b.env,
+		WorkingDir:        b.workingDir,
+	}, nil
+}
 
 func TestDockerREST(t *testing.T) {
 	if os.Getenv("CELLBOX_DOCKER_SMOKE") != "1" {
@@ -61,7 +88,11 @@ func TestDockerREST(t *testing.T) {
 	cfg := guestapi.DefaultConfig()
 	cfg.Command = []string{"/workload", "serve"}
 	cfg.Tools = []guestapi.Tool{{ID: "demo", Executable: "/opt/cellbox/tools/demo", Args: []string{"tool"}, CredentialEnv: map[string]string{"DEMO_FILE": "demo"}}}
-	s, err := service.New(service.Config{DataDir: filepath.Join(dir, "state"), PublicURL: "http://127.0.0.1", StartupTimeoutSeconds: 20, ClientID: "smoke", Profiles: []service.Profile{{ID: "smoke", Provider: "docker", Image: prepared.ImageID, Guest: cfg}}}, map[string]boxprovider.Provider{"docker": docker.New("docker")})
+	s, err := service.New(service.Config{
+		DataDir: filepath.Join(dir, "state"), PublicURL: "http://127.0.0.1", StartupTimeoutSeconds: 20,
+		ClientID: "smoke", CatalogBuilder: localImageBuilder{image: prepared.ImageID, command: cfg.Command, env: cfg.Env, workingDir: cfg.Workspace},
+		Profiles: []service.Profile{{ID: "smoke", Provider: "docker", Image: prepared.ImageID, AutoTrustImportedImages: true, Guest: cfg}},
+	}, map[string]boxprovider.Provider{"docker": docker.New("docker")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,11 +144,36 @@ func TestDockerREST(t *testing.T) {
 		}
 		return op
 	}
-	var template service.Template
-	if err := json.Unmarshal(call("POST", "/v1/templates", map[string]string{"name": "smoke", "version": "v1", "profileId": "smoke"}, 201), &template); err != nil {
+	var template catalog.Template
+	if err := json.Unmarshal(call("POST", "/v1/templates", map[string]any{"name": "smoke", "description": "local Docker smoke"}, 201), &template); err != nil {
 		t.Fatal(err)
 	}
-	createRaw := call("POST", "/v1/boxes", map[string]string{"templateId": template.ID, "ownerKey": "source"}, 202)
+	baseImage := "registry.example.test/smoke-base@sha256:" + strings.Repeat("a", 64)
+	buildRaw := call("POST", "/v1/templates/"+template.ID+"/revisions", map[string]any{
+		"userVersion": "local", "baseImage": baseImage, "profileId": "smoke",
+	}, 202)
+	var buildOp catalog.Operation
+	if err := json.Unmarshal(buildRaw, &buildOp); err != nil {
+		t.Fatal(err)
+	}
+	buildDeadline := time.Now().Add(30 * time.Second)
+	for buildOp.Status == "running" || buildOp.Status == "queued" {
+		if time.Now().After(buildDeadline) {
+			t.Fatal("template build operation timeout")
+		}
+		time.Sleep(50 * time.Millisecond)
+		if err := json.Unmarshal(call("GET", "/v1/operations/"+buildOp.ID, nil, 200), &buildOp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if buildOp.Status != "succeeded" {
+		t.Fatalf("template build failed: %+v", buildOp.Error)
+	}
+	revisionID := buildOp.Result["revisionId"]
+	if revisionID == "" {
+		t.Fatalf("build operation omitted revisionId: %+v", buildOp)
+	}
+	createRaw := call("POST", "/v1/boxes", map[string]string{"revisionId": revisionID, "ownerKey": "source"}, 202)
 	var creating service.Operation
 	json.Unmarshal(createRaw, &creating)
 	t.Cleanup(func() {
@@ -134,7 +190,7 @@ func TestDockerREST(t *testing.T) {
 		return b
 	}
 	b := getBox(source)
-	if b.Phase != "running" || b.Generation != 1 || b.TemplateID != template.ID {
+	if b.Phase != "running" || b.Generation != 1 || b.TemplateID != template.ID || b.RevisionID != revisionID {
 		t.Fatalf("unexpected box %+v", b)
 	}
 	execCheck := func(argv []string, want string) {
@@ -169,7 +225,7 @@ func TestDockerREST(t *testing.T) {
 	}
 	wait(call("POST", "/v1/boxes/"+source+":unfreeze", nil, 202))
 	archive := wait(call("POST", "/v1/boxes/"+source+"/archives", nil, 202)).Result["archiveId"]
-	restoreRaw := call("POST", "/v1/boxes:restore", map[string]string{"templateId": template.ID, "ownerKey": "candidate", "archiveId": archive}, 202)
+	restoreRaw := call("POST", "/v1/boxes:restore", map[string]string{"revisionId": revisionID, "ownerKey": "candidate", "archiveId": archive}, 202)
 	var restoring service.Operation
 	json.Unmarshal(restoreRaw, &restoring)
 	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", "cellbox-"+restoring.TargetID).Run() })
@@ -185,6 +241,5 @@ func TestDockerREST(t *testing.T) {
 	call("GET", "/v1/archives/"+archive, nil, 200)
 	wait(call("POST", "/v1/boxes/"+candidate+":destroy", nil, 202))
 	call("DELETE", "/v1/archives/"+archive, nil, 204)
-	call("DELETE", "/v1/templates/"+template.ID, nil, 204)
-	t.Log("agent/debug isolation, local tool, files, anonymous loopback forwarding, freeze, archive restore and cleanup passed")
+	t.Log("agent/debug isolation, local tool, files, anonymous loopback forwarding, freeze, archive restore and cleanup passed; template revision retained for catalog lifetime")
 }

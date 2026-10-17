@@ -397,8 +397,8 @@ func TestPortableArchiveRestoreAcrossImagesRequiresOptIn(t *testing.T) {
 	}
 	if err := f.service.store.View(func(st State) error {
 		b := st.Boxes[op.TargetID]
-		if b.Box.ImportedImageID != "" || b.Profile.Image != f.config.Profiles[0].Image {
-			t.Fatalf("restore depended on deleted source import metadata: %+v", b)
+		if b.Box.ImportedImageID != "" || b.Box.RevisionID == "" || b.Box.Image != b.Profile.Image {
+			t.Fatalf("restore did not retain the selected catalog revision: %+v", b)
 		}
 		return nil
 	}); err != nil {

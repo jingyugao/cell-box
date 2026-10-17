@@ -2,6 +2,7 @@ package service
 
 import (
 	"cellbox.local/cellbox/internal/boxprovider"
+	"cellbox.local/cellbox/internal/catalog"
 	"cellbox.local/cellbox/internal/guestapi"
 	"cellbox.local/cellbox/internal/objectstorage"
 	"time"
@@ -35,10 +36,12 @@ type Profile struct {
 	Guest          guestapi.Config `json:"guest"`
 }
 type Config struct {
+	CatalogBuilder catalog.Builder `json:"-"`
 	// ClientID is a data/idempotency namespace, not an authenticated identity.
 	ClientID                  string               `json:"clientId,omitempty"`
 	ObjectStorage             objectstorage.Config `json:"objectStorage,omitempty"`
 	LocalMetadataDir          string               `json:"localMetadataDir,omitempty"`
+	CatalogDir                string               `json:"catalogDir,omitempty"`
 	InitializeLocalMetadata   bool                 `json:"initializeLocalMetadata,omitempty"`
 	Listen                    string               `json:"listen"`
 	DataDir                   string               `json:"dataDir"`
@@ -87,6 +90,7 @@ type Capabilities struct {
 }
 type Box struct {
 	TemplateID      string       `json:"templateId"`
+	RevisionID      string       `json:"revisionId"`
 	TemplateName    string       `json:"templateName"`
 	TemplateVersion string       `json:"templateVersion"`
 	ID              string       `json:"id"`
@@ -171,6 +175,7 @@ type Route struct {
 }
 type Archive struct {
 	TemplateID      string `json:"templateId"`
+	RevisionID      string `json:"revisionId"`
 	TemplateName    string `json:"templateName"`
 	TemplateVersion string `json:"templateVersion"`
 	// Recovery and image deletion must not depend on a retained source Box.
@@ -209,7 +214,6 @@ type purgeRecord struct {
 }
 
 type State struct {
-	Templates      map[string]templateRecord      `json:"templates"`
 	Purges         map[string]purgeRecord         `json:"purges,omitempty"`
 	ImportedImages map[string]importedImageRecord `json:"importedImages"`
 	Schema         int                            `json:"schema"`
@@ -222,8 +226,8 @@ type State struct {
 	Keys           map[string]keyRecord           `json:"keys"`
 }
 
-const stateSchema = 5
+const stateSchema = 6
 
 func newState() State {
-	return State{Templates: map[string]templateRecord{}, Purges: map[string]purgeRecord{}, ImportedImages: map[string]importedImageRecord{}, Schema: stateSchema, Boxes: map[string]boxRecord{}, Operations: map[string]operationRecord{}, Executions: map[string]executionRecord{}, Leases: map[string]Lease{}, Routes: map[string]Route{}, Archives: map[string]archiveRecord{}, Keys: map[string]keyRecord{}}
+	return State{Purges: map[string]purgeRecord{}, ImportedImages: map[string]importedImageRecord{}, Schema: stateSchema, Boxes: map[string]boxRecord{}, Operations: map[string]operationRecord{}, Executions: map[string]executionRecord{}, Leases: map[string]Lease{}, Routes: map[string]Route{}, Archives: map[string]archiveRecord{}, Keys: map[string]keyRecord{}}
 }

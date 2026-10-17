@@ -299,7 +299,7 @@ func (s *Service) captureStoredWorkspaceArchive(ctx context.Context, b boxRecord
 	if err = s.validateStoredCapture(ctx, id, size, digest); err != nil {
 		return Archive{}, err
 	}
-	a := Archive{ID: id, SourceBoxID: b.Box.ID, TemplateID: b.Box.TemplateID, TemplateName: b.Box.TemplateName, TemplateVersion: b.Box.TemplateVersion, ProfileID: b.Box.ProfileID, ImageID: b.Box.ImageID,
+	a := Archive{ID: id, SourceBoxID: b.Box.ID, TemplateID: b.Box.TemplateID, RevisionID: b.Box.RevisionID, TemplateName: b.Box.TemplateName, TemplateVersion: b.Box.TemplateVersion, ProfileID: b.Box.ProfileID, ImageID: b.Box.ImageID,
 		Agent: b.Profile.Guest.Agent, SHA256: digest, Size: size, Consistency: "workspace-best-effort", Portable: true,
 		CreatedAt: time.Now().UTC(), ManifestVersion: 1, ImportedImageID: b.Box.ImportedImageID, PreparedImage: b.Profile.Image}
 	if err = s.store.Update(func(st *State) error { st.Archives[id] = archiveRecord{Archive: a, ClientID: b.ClientID}; return nil }); err != nil {
@@ -409,7 +409,7 @@ func (s *Service) captureArchiveHTTP(ctx context.Context, b boxRecord) (Archive,
 	if err != nil {
 		return Archive{}, err
 	}
-	a := Archive{ID: randomID("arc-"), SourceBoxID: b.Box.ID, TemplateID: b.Box.TemplateID, TemplateName: b.Box.TemplateName, TemplateVersion: b.Box.TemplateVersion, ProfileID: b.Box.ProfileID, ImageID: b.Box.ImageID, Agent: b.Profile.Guest.Agent, SHA256: hex.EncodeToString(h.Sum(nil)), Size: n, Consistency: "workspace-best-effort", Portable: true, CreatedAt: time.Now().UTC(), ManifestVersion: 1, ImportedImageID: b.Box.ImportedImageID, PreparedImage: b.Profile.Image}
+	a := Archive{ID: randomID("arc-"), SourceBoxID: b.Box.ID, TemplateID: b.Box.TemplateID, RevisionID: b.Box.RevisionID, TemplateName: b.Box.TemplateName, TemplateVersion: b.Box.TemplateVersion, ProfileID: b.Box.ProfileID, ImageID: b.Box.ImageID, Agent: b.Profile.Guest.Agent, SHA256: hex.EncodeToString(h.Sum(nil)), Size: n, Consistency: "workspace-best-effort", Portable: true, CreatedAt: time.Now().UTC(), ManifestVersion: 1, ImportedImageID: b.Box.ImportedImageID, PreparedImage: b.Profile.Image}
 	final, err := archivePath(dir, a.ID)
 	if err != nil {
 		return Archive{}, err

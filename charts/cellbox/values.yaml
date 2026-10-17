@@ -59,6 +59,9 @@ api:
   manageSecrets: true
   # Overrides for the API JSON configuration; defaults start with no profiles.
   config: {}
+  # SQLite catalog needs persistent local/block storage. With localMetadata
+  # enabled its hostPath is reused; otherwise supply an existing PVC here.
+  catalogExistingClaim: ""
   # Temporary archive staging only; durable content is stored in S3.
   temporaryStorageSize: 4Gi
 

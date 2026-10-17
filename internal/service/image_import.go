@@ -298,43 +298,52 @@ func (s *Service) importedProfile(client, id string, profile Profile) (Profile, 
 			return apiError("CONFLICT", "Imported image is being deleted")
 		}
 		imported := record.ImportedImage
-		out.Image = imported.Image
-		out.Guest.Command = imported.Command
-		out.Guest.CommandDir = imported.WorkingDir
-		out.Guest.Env = maps.Clone(imported.Env)
-		if out.Guest.Env == nil {
-			out.Guest.Env = map[string]string{}
-		}
-		// Only imports already owned by this client reach this point. A private
-		// profile can admit their resolved digest in the captured Box profile,
-		// leaving the shared operator config unchanged.
-		if out.AutoTrustImportedImages {
-			for _, images := range []*[]string{&out.TrustedToolImages, &out.MountedToolRuntimeImages, &out.DebugHomeImages} {
-				if !slices.Contains(*images, imported.Image) {
-					*images = append(*images, imported.Image)
-				}
-			}
-		}
-		// Admitted CoCell images reuse the operator's read-only shared directory.
-		// Other imported workloads keep their isolated startup configuration.
-		if !slices.Contains(out.TrustedToolImages, imported.Image) {
-			out.Guest.Tools = nil
-			out.SharedReadOnlyHostPath = ""
-		}
-		out.DebugReadOnlyHostPath = ""
-		// Only an explicitly admitted HOME runner inherits the managed directory.
-		if !profileCapabilities(out).MountedDebugHome {
-			out.DebugReadWriteHostPath = ""
-		}
-		for key, value := range profile.Guest.Env {
-			if out.SharedReadOnlyHostPath == "" && (value == api.SharedMountPath || strings.HasPrefix(value, api.SharedMountPath+"/")) {
-				continue
-			}
-			out.Guest.Env[key] = value
-		}
+		out = applyImageConfiguration(profile, imported.Image, imported.Command, imported.WorkingDir, imported.Env)
 		return nil
 	})
 	return out, err
+}
+
+// applyImageConfiguration preserves the profile admission boundary for every
+// image assembled by the import API or the catalog builder.
+func applyImageConfiguration(profile Profile, imageRef string, command []string, commandDir string, imageEnv map[string]string) Profile {
+	data, err := json.Marshal(profile)
+	if err != nil {
+		return Profile{}
+	}
+	var out Profile
+	if json.Unmarshal(data, &out) != nil {
+		return Profile{}
+	}
+	out.Image = imageRef
+	out.Guest.Command = append([]string(nil), command...)
+	out.Guest.CommandDir = commandDir
+	out.Guest.Env = maps.Clone(imageEnv)
+	if out.Guest.Env == nil {
+		out.Guest.Env = map[string]string{}
+	}
+	if out.AutoTrustImportedImages {
+		for _, images := range []*[]string{&out.TrustedToolImages, &out.MountedToolRuntimeImages, &out.DebugHomeImages} {
+			if !slices.Contains(*images, imageRef) {
+				*images = append(*images, imageRef)
+			}
+		}
+	}
+	if !slices.Contains(out.TrustedToolImages, imageRef) {
+		out.Guest.Tools = nil
+		out.SharedReadOnlyHostPath = ""
+	}
+	out.DebugReadOnlyHostPath = ""
+	if !profileCapabilities(out).MountedDebugHome {
+		out.DebugReadWriteHostPath = ""
+	}
+	for key, value := range profile.Guest.Env {
+		if out.SharedReadOnlyHostPath == "" && (value == api.SharedMountPath || strings.HasPrefix(value, api.SharedMountPath+"/")) {
+			continue
+		}
+		out.Guest.Env[key] = value
+	}
+	return out
 }
 
 type imageUsage struct {
@@ -406,18 +415,17 @@ func (s *Service) imageUsage(st State, id string) imageUsage {
 			break
 		}
 	}
-	for _, rec := range st.Templates {
-		if rec.Template.ImportedImageID == id || matchesPrepared(rec.Profile.Image) {
-			out.Blockers = append(out.Blockers, "templates-reference-image")
-			break
-		}
-	}
 	for _, rec := range st.Archives {
 		if rec.Archive.ImportedImageID == id || matchesPrepared(rec.Archive.PreparedImage) {
 			out.Blockers = append(out.Blockers, "archives-reference-image")
 			break
 		}
 
+	}
+	if referenced, err := s.catalog.ImageReferenced(context.Background(), target.ImportedImage.Image); err != nil {
+		out.Blockers = append(out.Blockers, "catalog-reference-check-failed")
+	} else if referenced {
+		out.Blockers = append(out.Blockers, "templates-reference-image")
 	}
 	if imageBuildBusy(&st) != nil {
 		out.Blockers = append(out.Blockers, "image-operation-running")
@@ -495,11 +503,16 @@ func (s *Service) deleteImportedImage(w http.ResponseWriter, r *http.Request) {
 			if _, ok := ref.(name.Digest); !ok {
 				return nil, apiError("IMAGE_DELETE_FAILED", "Prepared image reference is not immutable")
 			}
-			if err := remote.Delete(ref, remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain)); err != nil {
-				var registryError *remotetransport.Error
-				if !errors.As(err, &registryError) || registryError.StatusCode != http.StatusNotFound {
-					return nil, apiError("IMAGE_DELETE_FAILED", "Registry could not delete the prepared image; retry deletion")
+			if err := s.catalog.DeleteImage(ctx, imported.Image, func() error {
+				if err := remote.Delete(ref, remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain)); err != nil {
+					var registryError *remotetransport.Error
+					if !errors.As(err, &registryError) || registryError.StatusCode != http.StatusNotFound {
+						return apiError("IMAGE_DELETE_FAILED", "Registry could not delete the prepared image; retry deletion")
+					}
 				}
+				return nil
+			}); err != nil {
+				return nil, catalogAPIError(err)
 			}
 			if err := s.store.Update(func(st *State) error {
 				record, ok := st.ImportedImages[id]

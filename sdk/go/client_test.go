@@ -86,8 +86,37 @@ func TestCreateWaitsForOperationAndConnects(t *testing.T) {
 	}
 }
 
-func TestTemplateLifecycleUsesVersionedTemplateEndpoints(t *testing.T) {
-	templateBody := `{"id":"tpl-1","name":"python","version":"v1","profileId":"small","image":"python:3","cpu":1,"memoryMiB":512,"warmSlots":2,"createdAt":"2026-01-02T03:04:05Z"}`
+func TestWaitOperationTreatsCancellingAsPending(t *testing.T) {
+	var gets atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/operations/op-cancel" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+			return
+		}
+		n := gets.Add(1)
+		status := "queued"
+		if n == 2 {
+			status = "cancelling"
+		} else if n >= 3 {
+			status = "succeeded"
+		}
+		writeJSONTest(w, Operation{ID: "op-cancel", Kind: "template-build", Status: status})
+	}))
+	defer server.Close()
+	client := testClient(t, server, "")
+	op, err := client.WaitOperation(context.Background(), "op-cancel")
+	if err != nil {
+		t.Fatalf("WaitOperation while cancelling: %v", err)
+	}
+	if op.Status != "succeeded" || gets.Load() < 3 {
+		t.Fatalf("operation=%+v GETs=%d, want succeeded after cancelling", op, gets.Load())
+	}
+}
+
+func TestTemplateFamilyAndRevisionAPIContract(t *testing.T) {
+	templateBody := `{"id":"tpl-1","name":"python","description":"python env","defaultWarmSlots":2,"stableRevisionId":"rev-1","generation":3,"createdAt":"2026-01-02T03:04:05Z","updatedAt":"2026-01-02T03:04:05Z"}`
+	revisionBody := `{"id":"rev-1","templateId":"tpl-1","userVersion":"1.01","revision":2,"version":"1.01-r2","profileId":"small","baseImage":"python:3","resolvedBaseImage":"python@sha256:abc","image":"cellbox/python@sha256:def","buildCommand":"npm install -g codex","runCommand":"node launcher.js","platform":"linux/amd64","cpu":1,"memoryMiB":512,"warmSlots":2,"status":"active","generation":1}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assertHeaders(t, r)
 		switch {
@@ -96,26 +125,47 @@ func TestTemplateLifecycleUsesVersionedTemplateEndpoints(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Error(err)
 			}
-			if body.Name != "python" || body.Version != "v1" || body.ProfileID != "small" || body.ImportedImageID != "image-1" || body.WarmSlots != 2 {
+			if body.Name != "python" || body.Description != "python env" || body.DefaultWarmSlots != 2 {
 				t.Errorf("create template body = %+v", body)
 			}
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(templateBody))
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/templates":
-			writeJSONTest(w, []Template{{ID: "tpl-1", Name: "python", Version: "v1"}})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/templates" && r.URL.Query().Get("name") == "python" && r.URL.Query().Get("limit") == "10":
+			writeJSONTest(w, []Template{{ID: "tpl-1", Name: "python"}})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/templates/tpl-1":
 			_, _ = w.Write([]byte(templateBody))
-		case r.Method == http.MethodPut && r.URL.Path == "/v1/templates/tpl-1/prewarm":
-			var body struct {
-				WarmSlots int `json:"warmSlots"`
-			}
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/templates/tpl-1":
+			var body UpdateTemplateOptions
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Error(err)
 			}
-			if body.WarmSlots != 0 {
-				t.Errorf("warmSlots = %d, want 0", body.WarmSlots)
+			if body.ExpectedGeneration != 3 || body.StableRevisionID == nil || *body.StableRevisionID != "rev-1" {
+				t.Errorf("template patch body = %+v", body)
 			}
 			_, _ = w.Write([]byte(templateBody))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/templates/tpl-1/revisions":
+			var body CreateRevisionOptions
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			if body.UserVersion != "1.01" || body.BaseImage != "python:3" || body.BuildCommand == "" || r.Header.Get("Idempotency-Key") != "build-key" {
+				t.Errorf("revision submission body/header = %+v / %q", body, r.Header.Get("Idempotency-Key"))
+			}
+			w.WriteHeader(http.StatusAccepted)
+			writeJSONTest(w, Operation{ID: "op-build", Kind: "template-build", TargetID: "rev-1", Status: "queued"})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/templates/tpl-1/revisions" && r.URL.Query().Get("userVersion") == "1.01":
+			writeJSONTest(w, []TemplateRevision{{ID: "rev-1", Version: "1.01-r2"}})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/template-revisions/rev-1":
+			_, _ = w.Write([]byte(revisionBody))
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/template-revisions/rev-1":
+			var body UpdateRevisionOptions
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			if body.ExpectedGeneration != 1 || body.WarmSlots == nil || *body.WarmSlots != 4 {
+				t.Errorf("revision patch = %+v", body)
+			}
+			_, _ = w.Write([]byte(revisionBody))
 		case r.Method == http.MethodDelete && r.URL.Path == "/v1/templates/tpl-1":
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -126,21 +176,39 @@ func TestTemplateLifecycleUsesVersionedTemplateEndpoints(t *testing.T) {
 	defer server.Close()
 	client := testClient(t, server, "")
 
-	template, err := client.CreateTemplate(context.Background(), CreateTemplateOptions{Name: "python", Version: "v1", ProfileID: "small", ImportedImageID: "image-1", WarmSlots: 2})
-	if err != nil || template.ID != "tpl-1" || template.MemoryMiB != 512 {
+	template, err := client.CreateTemplate(context.Background(), CreateTemplateOptions{Name: "python", Description: "python env", DefaultWarmSlots: 2})
+	if err != nil || template.ID != "tpl-1" || template.StableRevisionID != "rev-1" {
 		t.Fatalf("CreateTemplate = %+v, %v", template, err)
 	}
-	listed, err := client.ListTemplates(context.Background())
+	listed, err := client.ListTemplates(context.Background(), TemplateListOptions{Name: "python", Limit: 10})
 	if err != nil || len(listed) != 1 || listed[0].ID != "tpl-1" {
 		t.Fatalf("ListTemplates = %+v, %v", listed, err)
 	}
 	got, err := client.GetTemplate(context.Background(), "tpl-1")
-	if err != nil || got.Version != "v1" {
+	if err != nil || got.Name != "python" {
 		t.Fatalf("GetTemplate = %+v, %v", got, err)
 	}
-	updated, err := client.SetTemplateWarmSlots(context.Background(), "tpl-1", 0)
+	stable := "rev-1"
+	updated, err := client.UpdateTemplate(context.Background(), "tpl-1", UpdateTemplateOptions{StableRevisionID: &stable, ExpectedGeneration: 3})
 	if err != nil || updated.ID != "tpl-1" {
-		t.Fatalf("SetTemplateWarmSlots = %+v, %v", updated, err)
+		t.Fatalf("UpdateTemplate = %+v, %v", updated, err)
+	}
+	warm := 4
+	op, err := client.BuildRevision(context.Background(), "tpl-1", CreateRevisionOptions{UserVersion: "1.01", BaseImage: "python:3", ProfileID: "small", BuildCommand: "npm install -g codex"}, "build-key")
+	if err != nil || op.ID != "op-build" {
+		t.Fatalf("BuildRevision = %+v, %v", op, err)
+	}
+	revisions, err := client.ListTemplateRevisions(context.Background(), "tpl-1", RevisionListOptions{UserVersion: "1.01"})
+	if err != nil || len(revisions) != 1 {
+		t.Fatalf("ListTemplateRevisions = %+v, %v", revisions, err)
+	}
+	loaded, err := client.GetTemplateRevision(context.Background(), "rev-1")
+	if err != nil || loaded.Image == "" {
+		t.Fatalf("GetTemplateRevision = %+v, %v", loaded, err)
+	}
+	_, err = client.UpdateTemplateRevision(context.Background(), "rev-1", UpdateRevisionOptions{WarmSlots: &warm, ExpectedGeneration: 1})
+	if err != nil {
+		t.Fatal(err)
 	}
 	if err := client.DeleteTemplate(context.Background(), "tpl-1"); err != nil {
 		t.Fatalf("DeleteTemplate: %v", err)
@@ -155,11 +223,11 @@ func TestCreateRequiresTemplateIDAndWarmSlotsCannotBeNegative(t *testing.T) {
 	if _, err := client.CreateAsync(context.Background(), CreateOptions{OwnerKey: "owner"}); err == nil {
 		t.Fatal("CreateAsync accepted missing template ID")
 	}
-	if _, err := client.CreateTemplate(context.Background(), CreateTemplateOptions{Name: "python", Version: "v1", ProfileID: "small", WarmSlots: -1}); err == nil {
+	if _, err := client.CreateTemplate(context.Background(), CreateTemplateOptions{Name: "python", DefaultWarmSlots: -1}); err == nil {
 		t.Fatal("CreateTemplate accepted negative warm slots")
 	}
-	if _, err := client.SetTemplateWarmSlots(context.Background(), "tpl", -1); err == nil {
-		t.Fatal("SetTemplateWarmSlots accepted negative slots")
+	if _, err := client.BuildRevision(context.Background(), "tpl", CreateRevisionOptions{UserVersion: "1.0", BaseImage: "base", ProfileID: "p", WarmSlots: func() *int { x := -1; return &x }()}, "k"); err == nil {
+		t.Fatal("BuildRevision accepted negative warm slots")
 	}
 	if requests.Load() != 0 {
 		t.Fatalf("invalid requests sent %d requests", requests.Load())

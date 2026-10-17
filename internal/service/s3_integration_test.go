@@ -32,6 +32,7 @@ func TestS3IntegrationAPIRestartWithoutLocalDataAndArchiveRestore(t *testing.T) 
 	f.service = nil
 	cfg := objectstorage.Config{Endpoint: endpoint, Bucket: os.Getenv("CELLBOX_TEST_S3_BUCKET"), Region: "us-east-1", Prefix: fmt.Sprintf("cellbox-tests/%d", time.Now().UnixNano()), PathStyle: true, AccessKeyEnv: "OSS_ACCESS_KEY", SecretKeyEnv: "OSS_SECRET_KEY"}
 	f.config.ObjectStorage = cfg
+	f.config.CatalogDir = t.TempDir()
 	if err := os.RemoveAll(f.config.DataDir); err != nil {
 		t.Fatal(err)
 	}

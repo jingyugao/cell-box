@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,7 +18,11 @@ import (
 	"time"
 
 	"cellbox.local/cellbox/internal/boxprovider"
+	"cellbox.local/cellbox/internal/catalog"
 	"cellbox.local/cellbox/internal/guestapi"
+	"cellbox.local/cellbox/internal/image"
+	"crypto/sha256"
+	"encoding/hex"
 )
 
 const testClientToken = "client-a-secret-abcdefghijklmnopqrstuvwxyz"
@@ -151,6 +157,38 @@ type coreFixture struct {
 	activateCalls atomic.Int32
 }
 
+type fixtureCatalogBuilder struct{}
+
+func (fixtureCatalogBuilder) Build(_ context.Context, in catalog.BuildInput, _ io.Writer, stage func(string) error) (catalog.BuildResult, error) {
+	if err := stage("building"); err != nil {
+		return catalog.BuildResult{}, err
+	}
+	var profile Profile
+	if err := json.Unmarshal(in.Profile.Snapshot, &profile); err != nil {
+		return catalog.BuildResult{}, err
+	}
+	command := append([]string(nil), profile.Guest.Command...)
+	workingDir := profile.Guest.CommandDir
+	env := profile.Guest.Env
+	if env == nil {
+		env = map[string]string{}
+	}
+	if in.RunCommand != "" {
+		var err error
+		parsed, parseErr := image.ParseRunCommand(in.RunCommand)
+		err = parseErr
+		if err != nil {
+			return catalog.BuildResult{}, err
+		}
+		command, workingDir = parsed.Command, parsed.WorkingDir
+		for key, value := range parsed.Env {
+			env[key] = value
+		}
+	}
+	hash := sha256.Sum256([]byte(in.BaseImage + "\n" + in.BuildCommand + "\n" + in.RunCommand))
+	return catalog.BuildResult{ResolvedBaseImage: in.BaseImage, Image: "registry.example.test/prepared@sha256:" + hex.EncodeToString(hash[:]), Command: command, Env: env, WorkingDir: workingDir}, nil
+}
+
 func newCoreFixture(t *testing.T) *coreFixture {
 	t.Helper()
 	f := &coreFixture{}
@@ -174,9 +212,9 @@ func newCoreFixture(t *testing.T) *coreFixture {
 		}
 	}))
 	f.provider = &fakeCoreProvider{guestURL: f.guest.URL, executionID: "fake-container/start-one"}
-	f.config = Config{DataDir: t.TempDir(), StartupTimeoutSeconds: 3,
+	f.config = Config{DataDir: t.TempDir(), StartupTimeoutSeconds: 3, CatalogBuilder: fixtureCatalogBuilder{},
 		ClientID: "client-a",
-		Profiles: []Profile{{ID: "profile-a", Provider: "docker", Image: "sha256:" + strings.Repeat("a", 64), CPU: 1, MemoryMiB: 512, Guest: guestapi.DefaultConfig()}},
+		Profiles: []Profile{{ID: "profile-a", Provider: "docker", Image: "sha256:" + strings.Repeat("a", 64), CPU: 1, MemoryMiB: 512, AutoTrustImportedImages: true, Guest: guestapi.DefaultConfig()}},
 	}
 	var err error
 	f.service, err = New(f.config, map[string]boxprovider.Provider{"docker": f.provider})
@@ -275,13 +313,62 @@ func (f *coreFixture) template(t *testing.T) string {
 func (f *coreFixture) templateFor(t *testing.T, profile Profile, name, version, importedImageID string, warmSlots int) string {
 	t.Helper()
 	status, body := f.call(t, "POST", "/v1/templates", testClientToken, "", map[string]any{
-		"name": name, "version": version, "profileId": profile.ID,
-		"importedImageId": importedImageID, "warmSlots": warmSlots,
+		"name": name, "defaultWarmSlots": warmSlots,
 	})
-	if status != http.StatusCreated && status != http.StatusOK {
-		t.Fatalf("register template: HTTP %d: %s", status, body)
+	wantStatus(t, status, http.StatusCreated, body)
+	family := decodeResponse[catalog.Template](t, body)
+	baseImage := "registry.example.test/fixture-base:latest"
+	runCommand := ""
+	if importedImageID != "" {
+		var imported ImportedImage
+		if err := f.service.store.View(func(st State) error {
+			record, ok := st.ImportedImages[importedImageID]
+			if !ok || record.ClientID != "client-a" {
+				return fmt.Errorf("test imported image %s is unavailable", importedImageID)
+			}
+			baseImage = record.ImportedImage.Image
+			imported = record.ImportedImage
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		args := []string{"docker", "run"}
+		if imported.WorkingDir != "" {
+			args = append(args, "--workdir", imported.WorkingDir)
+		}
+		keys := make([]string, 0, len(imported.Env))
+		for key := range imported.Env {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			args = append(args, "--env", key+"="+imported.Env[key])
+		}
+		args = append(args, baseImage)
+		args = append(args, imported.Command...)
+		for i, arg := range args {
+			args[i] = strconv.Quote(arg)
+		}
+		runCommand = strings.Join(args, " ")
 	}
-	return decodeResponse[Template](t, body).ID
+	key := fmt.Sprintf("build-%s-%s", name, version)
+	status, body = f.call(t, "POST", "/v1/templates/"+family.ID+"/revisions", testClientToken, key, map[string]any{
+		"userVersion": version, "baseImage": baseImage, "profileId": profile.ID, "runCommand": runCommand,
+	})
+	wantStatus(t, status, http.StatusAccepted, body)
+	op := decodeResponse[catalog.Operation](t, body)
+	f.waitOperation(t, op.ID, "succeeded")
+	status, body = f.call(t, "GET", "/v1/templates/"+family.ID+"/revisions", testClientToken, "", nil)
+	wantStatus(t, status, http.StatusOK, body)
+	revisions := decodeResponse[[]catalog.Revision](t, body)
+	if len(revisions) != 1 {
+		t.Fatalf("expected one built revision: %+v", revisions)
+	}
+	status, body = f.call(t, "PATCH", "/v1/templates/"+family.ID, testClientToken, "", map[string]any{
+		"stableRevisionId": revisions[0].ID, "expectedGeneration": family.Generation,
+	})
+	wantStatus(t, status, http.StatusOK, body)
+	return family.ID
 }
 
 func TestStagedCreateHoldsWorkloadUntilActivation(t *testing.T) {

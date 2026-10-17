@@ -39,8 +39,8 @@ func (c *Client) Create(ctx context.Context, opts CreateOptions) (*Sandbox, erro
 
 // CreateAsync submits provisioning. Use WaitOperation then Connect to attach.
 func (c *Client) CreateAsync(ctx context.Context, opts CreateOptions) (*Operation, error) {
-	if opts.TemplateID == "" || opts.OwnerKey == "" || len(opts.OwnerKey) > 256 {
-		return nil, fmt.Errorf("cellbox: template ID and owner key (1..256 bytes) are required")
+	if (opts.TemplateID == "") == (opts.RevisionID == "") || opts.OwnerKey == "" || len(opts.OwnerKey) > 256 {
+		return nil, fmt.Errorf("cellbox: exactly one of template ID or revision ID and an owner key (1..256 bytes) are required")
 	}
 	return c.submit(ctx, "/v1/boxes", opts.IdempotencyKey, opts)
 }

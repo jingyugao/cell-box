@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"cellbox.local/cellbox/internal/catalog"
 	"cellbox.local/cellbox/internal/guestapi"
 	"cellbox.local/cellbox/internal/service"
 	"sigs.k8s.io/yaml"
@@ -66,7 +67,13 @@ func TestOpenAPIResponseShapesAndReferences(t *testing.T) {
 	}
 	walk(doc)
 	schemas := doc["components"].(map[string]any)["schemas"].(map[string]any)
-	types := map[string]any{"ImportedImage": service.ImportedImage{}, "Box": service.Box{}, "Operation": service.Operation{}, "Execution": service.Execution{}, "Capabilities": service.Capabilities{}, "Lease": service.Lease{}, "Route": service.Route{}, "Archive": service.Archive{}, "Identity": guestapi.Identity{}, "ExecResult": guestapi.ExecResult{}, "FileEntry": guestapi.FileEntry{}}
+	types := map[string]any{
+		"ImportedImage": service.ImportedImage{}, "Box": service.Box{}, "RuntimeOperation": service.Operation{},
+		"TemplateBuildOperation": catalog.Operation{}, "Template": catalog.Template{}, "TemplateRevision": catalog.Revision{},
+		"Execution": service.Execution{}, "Capabilities": service.Capabilities{}, "Lease": service.Lease{},
+		"Route": service.Route{}, "Archive": service.Archive{}, "Identity": guestapi.Identity{},
+		"ExecResult": guestapi.ExecResult{}, "FileEntry": guestapi.FileEntry{},
+	}
 	for name, value := range types {
 		t.Run(name, func(t *testing.T) {
 			schema := schemas[name].(map[string]any)
@@ -94,5 +101,10 @@ func TestOpenAPIResponseShapesAndReferences(t *testing.T) {
 				t.Errorf("schema has %d properties, Go has %d fields", len(properties), typ.NumField())
 			}
 		})
+	}
+	operation := schemas["Operation"].(map[string]any)
+	variants, ok := operation["oneOf"].([]any)
+	if !ok || len(variants) != 2 {
+		t.Fatalf("Operation must be a union of runtime and template build operation shapes: %#v", operation["oneOf"])
 	}
 }

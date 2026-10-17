@@ -64,7 +64,7 @@ func validRecordKey(key string) bool {
 	if len(parts) != 4 || parts[0]+"/"+parts[1] != recordPrefix {
 		return false
 	}
-	if parts[2] != "boxes" && parts[2] != "operations" && parts[2] != "archives" && parts[2] != "keys" && parts[2] != "purges" && parts[2] != "templates" {
+	if parts[2] != "boxes" && parts[2] != "operations" && parts[2] != "archives" && parts[2] != "keys" && parts[2] != "purges" {
 		return false
 	}
 	name := strings.TrimSuffix(parts[3], ".json")
@@ -291,7 +291,7 @@ func mergeRecordState(dst *State, src State) error {
 		}
 		dst.Keys[id] = fence
 	}
-	for _, err := range []error{mergeMap(dst.Templates, src.Templates), mergeMap(dst.Boxes, src.Boxes), mergeMap(dst.Operations, src.Operations), mergeMap(dst.Executions, src.Executions), mergeMap(dst.Leases, src.Leases), mergeMap(dst.Archives, src.Archives), mergeMap(dst.Purges, src.Purges)} {
+	for _, err := range []error{mergeMap(dst.Boxes, src.Boxes), mergeMap(dst.Operations, src.Operations), mergeMap(dst.Executions, src.Executions), mergeMap(dst.Leases, src.Leases), mergeMap(dst.Archives, src.Archives), mergeMap(dst.Purges, src.Purges)} {
 		if err != nil {
 			return err
 		}
@@ -349,9 +349,6 @@ func (s *Store) projectRecords(ctx context.Context, state *State) (map[string][]
 			return recordKey("boxes", op.Operation.TargetID)
 		}
 		return recordKey("operations", op.Operation.ID)
-	}
-	for id, template := range state.Templates {
-		group(recordKey("templates", id)).Templates[id] = template
 	}
 	for id, box := range state.Boxes {
 		digest, err := s.profileReference(ctx, box.Profile)

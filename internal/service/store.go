@@ -84,7 +84,7 @@ func OpenStore(dir string) (*Store, error) {
 			s.Close()
 			return nil, fmt.Errorf("unsupported state schema")
 		}
-		if s.state.Templates == nil || s.state.Boxes == nil || s.state.Operations == nil || s.state.Keys == nil || s.state.Executions == nil || s.state.Leases == nil || s.state.Routes == nil || s.state.ImportedImages == nil || s.state.Archives == nil {
+		if s.state.Boxes == nil || s.state.Operations == nil || s.state.Keys == nil || s.state.Executions == nil || s.state.Leases == nil || s.state.Routes == nil || s.state.ImportedImages == nil || s.state.Archives == nil {
 			s.Close()
 			return nil, fmt.Errorf("state contains null collections")
 		}

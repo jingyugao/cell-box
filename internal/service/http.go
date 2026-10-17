@@ -96,11 +96,9 @@ func decodeOptionalLimit(w http.ResponseWriter, r *http.Request, target any, lim
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/profiles", s.listProfiles)
-	mux.HandleFunc("POST /v1/templates", s.createTemplate)
-	mux.HandleFunc("GET /v1/templates", s.listTemplates)
-	mux.HandleFunc("GET /v1/templates/{id}", s.getTemplate)
-	mux.HandleFunc("PUT /v1/templates/{id}/prewarm", s.setTemplateWarmSlots)
-	mux.HandleFunc("DELETE /v1/templates/{id}", s.deleteTemplate)
+	if s.catalog != nil {
+		s.catalog.Register(mux, clientID)
+	}
 	mux.HandleFunc("POST /v1/images", s.buildImage)
 	mux.HandleFunc("POST /v1/images:import", s.importImage)
 	mux.HandleFunc("GET /v1/images", s.listImportedImages)
@@ -227,7 +225,13 @@ func (s *Service) Handler() http.Handler {
 		writeJSON(w, 202, op)
 	})
 	mux.HandleFunc("GET /v1/execs/{id}", s.getExec)
-	mux.HandleFunc("GET /v1/operations/{id}", s.getOperation)
+	mux.HandleFunc("GET /v1/operations/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if s.catalog != nil && strings.HasPrefix(r.PathValue("id"), "build-") {
+			s.catalog.ServeOperation(w, r)
+			return
+		}
+		s.getOperation(w, r)
+	})
 	mux.HandleFunc("GET /v1/operations/{id}/events", s.operationEvents)
 	mux.HandleFunc("POST /v1/boxes/{id}/leases", s.createLease)
 	mux.HandleFunc("PATCH /v1/leases/{id}", s.renewLease)

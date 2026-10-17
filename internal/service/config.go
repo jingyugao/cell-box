@@ -29,6 +29,9 @@ func LoadConfig(r io.Reader) (Config, error) {
 	return c, c.Validate()
 }
 func (c *Config) Validate() error {
+	if c.CatalogDir != "" && (!path.IsAbs(c.CatalogDir) || path.Clean(c.CatalogDir) != c.CatalogDir || c.CatalogDir == "/" || strings.ContainsAny(c.CatalogDir, "\x00\r\n")) {
+		return fmt.Errorf("catalogDir must be a dedicated clean absolute directory on persistent local storage")
+	}
 	if c.LocalMetadataDir != "" && (!path.IsAbs(c.LocalMetadataDir) || path.Clean(c.LocalMetadataDir) != c.LocalMetadataDir || c.LocalMetadataDir == "/" || strings.ContainsAny(c.LocalMetadataDir, "\x00\r\n")) {
 		return fmt.Errorf("localMetadataDir must be a dedicated clean absolute directory")
 	}
