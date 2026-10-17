@@ -420,6 +420,12 @@ func (p *WarmPool) publishSnapshot(ctx context.Context) error {
 			entry.observation.Resources.MemoryRequestBytes += requests.Memory().Value()
 			entry.observation.Resources.MemoryLimitBytes += limits.Memory().Value()
 		}
+		// A newly created gated Pod has no runtime ticket until RegisterWarm.
+		// This is normal preparation, not an observation failure.
+		if len(pod.Spec.SchedulingGates) > 0 {
+			entry.observation.PreparingSlots++
+			continue
+		}
 		phase, _, stateErr := backend.WarmState(ctx, pod)
 		if stateErr != nil {
 			return stateErr

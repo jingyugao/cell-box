@@ -181,9 +181,9 @@ _, err := client.CancelOperation(ctx, operationID)
 if err != nil { return err }
 ```
 
-修改 `DefaultWarmSlots` 或 revision 的 `WarmSlots` 只会将期望配置保存到 SQLite catalog。本期不会据此创建、发布或统计 Kubernetes 预热池。构建 revision 时，`WarmSlots == nil` 会复制模板默认值；显式传入 `WarmSlots`（包括 `0`）则使用该值。
+修改 `DefaultWarmSlots` 或 revision 的 `WarmSlots` 会先将期望值保存到 SQLite catalog，再由后台同步到 Kubernetes 预热池；HTTP 请求不等待这一步完成。构建 revision 时，`WarmSlots == nil` 会复制模板默认值；显式传入 `WarmSlots`（包括 `0`）则使用该值。
 
-模板名创建后不可修改；`description`、`defaultWarmSlots` 和 `stableRevisionId` 可通过带 `ExpectedGeneration` 的 `UpdateTemplate` 修改。可用 `SetTemplateStableRevision(ctx, templateID, "", generation)` 清空 stable 指针。Revision 的镜像、基础镜像、构建命令、运行配置和 profile 快照不可变；`description`、`status`（`active`/`retired`）和 `warmSlots` 可更新。Retire stable revision 前必须先切换或清空 stable 指针；retired 只阻止后续选择，不影响已固定该 revision 的沙箱。revision 删除和运行引用统计接口尚未提供。只有没有任何 revision、也没有排队或运行中构建任务的空模板族可删除。
+模板名创建后不可修改；`description`、`defaultWarmSlots` 和 `stableRevisionId` 可通过带 `ExpectedGeneration` 的 `UpdateTemplate` 修改。可用 `SetTemplateStableRevision(ctx, templateID, "", generation)` 清空 stable 指针。Revision 的镜像、基础镜像、构建命令、运行配置和 profile 快照不可变；`description`、`status`（`active`/`retired`）和 `warmSlots` 可更新。Retire stable revision 前必须先切换或清空 stable 指针；retired 会撤回预热需求并阻止后续选择，但不影响已固定该 revision 的沙箱。`GetTemplateRuntime` 提供每个 revision 的沙箱数和阶段快照，`GetRevisionWarmPool` 提供预热同步与池状态。只有没有任何 revision、也没有排队或运行中构建任务的空模板族可删除。
 
 常用方法按资源整理如下：
 
@@ -193,7 +193,7 @@ if err != nil { return err }
 | Revision | `BuildRevision`、`WaitBuildRevision`、`ListTemplateRevisions`、`GetTemplateRevision`、`UpdateTemplateRevision`、`GetRevisionWarmPool` | 构建成功后生成不可变 revision；可改描述、状态和预热配置 |
 | 构建任务 | `GetOperation`、`WaitOperation`、`ListOperations`、`GetOperationLogs`、`CancelOperation` | 查看/等待/取消构建，按 offset 读取日志；不会自动重放构建命令 |
 | Profile / 执行记录 | `ListProfiles`、`GetExecution` | Profile 是服务端配置；执行记录用于读取已完成命令的结果 |
-| 沙箱 | `Create`、`CreateAsync`、`Connect`、`GetSandbox`、`ListSandboxes`、`GetTemplateRuntime`、`Sandbox.Destroy` | 清单和运行时快照属于运行时接口；服务端后台观察 Kubernetes，查询接口读取快照 |
+| 沙箱 | `Create`、`CreateAsync`、`Connect`、`GetSandbox`、`ListSandboxes`、`GetTemplateRuntime`、`Sandbox.Destroy` | `GetSandbox` 读服务端已保存记录；`ListSandboxes` 直接读取 runtime inventory（Kubernetes profile 会查询集群）；`GetTemplateRuntime` 读后台快照 |
 | 命令 | `Commands.Run`、`RunArgv`、`Start`、`StartArgv`、`Command.Wait` | 有时限的单次命令，不提供 PTY 或流式输出 |
 | 文件 | `Files.Open`、`Read`、`Write`、`List` | workspace 相对路径；不自动恢复沙箱 |
 | 生命周期 | `Suspend`、`Resume`、`Freeze`、`Unfreeze`、`EnsureRunning`、`Activate` | 依 profile 能力使用；`Resume`、`EnsureRunning`、`Activate` 返回新 handle，需接收返回值 |
@@ -238,7 +238,7 @@ if err != nil {
 
 ## 生命周期和文件
 
-`Sandbox` 提供的生命周期方法取决于所选 profile：`k8s-resumable` 支持 `Suspend`/`Resume`，`docker-normal` 支持 `Freeze`/`Unfreeze`。这些方法接受包含幂等键的 `LifecycleOptions`。`Resume`、`EnsureRunning` 和 `Activate` 会返回一个**新的 sandbox handle**；后续执行命令前请改用新 handle。请先检查 `SandboxInfo.Capabilities`，确认当前 profile 支持所需操作。`Client.ListSandboxes` 返回沙箱清单快照，不会连接或恢复沙箱；这是运行时清单接口，可能会查询 Kubernetes。
+`Sandbox` 提供的生命周期方法取决于所选 profile：`k8s-resumable` 支持 `Suspend`/`Resume`，`docker-normal` 支持 `Freeze`/`Unfreeze`。这些方法接受包含幂等键的 `LifecycleOptions`。`Resume`、`EnsureRunning` 和 `Activate` 会返回一个**新的 sandbox handle**；后续执行命令前请改用新 handle。请先检查 `SandboxInfo.Capabilities`，确认当前 profile 支持所需操作。`Client.ListSandboxes` 返回当前沙箱清单并直接调用运行时清单接口；使用 Kubernetes profile 时会查询 Kubernetes。`GetTemplateRuntime`、`GetRevisionWarmPool` 则读取服务端后台观察快照，不在请求内调用 Kubernetes。
 
 `Sandbox.Files` 可在配置的 workspace 下读取、写入和列出文件，路径相对于 workspace。文件访问不会自动恢复已挂起的沙箱。`Read` 最大读取 16 MiB；`Write` 最大写入 16 MiB，会覆盖目标文件（非原子操作，父目录必须已存在）；`Open` 流式下载并返回 `io.ReadCloser`，调用方必须关闭它。文件请求作用于当前沙箱，不使用命令和生命周期接口的 generation compare-and-swap。网络错误导致写入结果不确定时，不要自动重试。
 
@@ -274,7 +274,7 @@ go -C sdk/go run ./examples/lifecycle
 
 Revision 构建成功且状态为 `active`、`warmSlots > 0` 时，服务端后台会发布预热需求；`warmSlots` 为 `0` 或 revision 退休时会撤回需求。创建 template 只保存默认值，不会单独创建预热池；构建 revision 时 `warmSlots == nil` 才继承模板默认值。stable 指针切换不会改变旧 revision 的预热需求。后台发布失败会继续重试。
 
-预热 Pod 按兼容的运行配置共享池，节点总容量受 Controller 限额约束（默认最多 2 个，配置上限 32 个）；因此各 revision 的 `requestedSlots` 可能因共享和预算而小于各自需求，不能把每个 revision 的资源字段相加当作节点池总量。`resources` 是当前分配的空闲预热 Pod 的 Kubernetes requests/limits 配置，不是实际 CPU/内存使用量。预热 Pod 用于 resumable sandbox 的恢复路径，不能据此承诺首次冷创建会更快。撤回需求只清理空闲预热 Pod，不会杀掉已经领用的 sandbox。
+预热 Pod 按兼容的运行配置共享池，节点总容量受 Controller 限额约束（默认最多 2 个，配置上限 32 个）。同一个 `poolId` 的槽位数是共享池汇总值，会在关联的每个 revision 状态中重复出现；`allocatedSlots` 可能因节点容量小于 `requestedSlots`，统计多 revision 时按 `poolId` 去重。`resources` 是当前分配的空闲预热 Pod 的 Kubernetes requests/limits 配置，不是实际 CPU/内存使用量。`failedSlots` 统计当前处于失败态的预热 Pod，以及 Controller 最近 15 秒内记录、但对应 Pod 已清理的创建失败。预热 Pod 用于 resumable sandbox 的恢复路径，不能据此承诺首次冷创建会更快。撤回需求只清理空闲预热 Pod，不会杀掉已经领用的 sandbox。
 
 ```go
 runtime, err := client.GetTemplateRuntime(ctx, templateID)

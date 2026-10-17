@@ -106,13 +106,16 @@ components:
       required: [cpuRequestMilli, cpuLimitMilli, memoryRequestBytes, memoryLimitBytes]
     WarmPoolStatus:
       type: object
+      description: Pool counters aggregate all compatible revisions attached to this pool and may repeat in each revision's status. Deduplicate by poolId when summarizing.
       properties:
         poolId: {type: string}
-        requestedSlots: {type: integer}
-        allocatedSlots: {type: integer}
+        requestedSlots: {type: integer, description: Sum of configured demand for compatible revisions in this pool.}
+        allocatedSlots: {type: integer, description: Slots allocated under the node-wide controller capacity.}
         readySlots: {type: integer}
         preparingSlots: {type: integer}
-        failedSlots: {type: integer}
+        failedSlots:
+          type: integer
+          description: Current failed Pods plus failures cleaned by the controller in the last 15 seconds.
         resources: {$ref: '#/components/schemas/WarmPoolResources'}
         observedAt: {type: string, format: date-time}
         stale: {type: boolean}
@@ -2148,8 +2151,10 @@ paths:
         Returns a background-observed snapshot; this request does not call Kubernetes.
         Active revisions with warmSlots greater than zero publish demand after a
         successful build. Zero slots or retirement withdraws demand. Compatible
-        revisions can share a pool. Snapshot fields include observedAt and stale;
-        pool is null when no pool is currently associated. Resource values are
+        revisions can share a pool; changing the stable revision does not withdraw
+        demand from the previous revision. Node capacity defaults to 2 slots and is
+        configurable up to 32. Snapshot fields include observedAt and stale; pool
+        is null when no pool is currently associated. Resource values are
         configured requests/limits, not measured usage. Do not sum resources across
         revisions without deduplicating by poolId.
       parameters:

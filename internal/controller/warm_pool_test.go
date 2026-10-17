@@ -327,6 +327,27 @@ func TestWarmPoolPublishesPerNodeSnapshotWithCapacityAndConfiguredResources(t *t
 	if got.PoolID == "" || got.DesiredHash != snapshot.DesiredHash || len(got.TemplateIDs) != 1 || got.TemplateIDs[0] != "revision-one" || got.RequestedSlots != 1 || got.AllocatedSlots != 1 || got.ReadySlots != 1 || got.PreparingSlots != 0 || got.FailedSlots != 0 || got.Resources.CPURequestMilli <= 0 || got.Resources.MemoryRequestBytes <= 0 || got.ObservedAt.IsZero() {
 		t.Fatalf("incomplete pool observation: %#v", got)
 	}
+	// A new gated Pod has no registered ticket yet and must be preparing,
+	// regardless of what the runtime probe would report for an existing ticket.
+	gated := warmExecutionPod(w, "warm-not-registered")
+	gated.UID = "warm-not-registered-uid"
+	gated.Labels = map[string]string{warmLabel: "true"}
+	gated.Annotations = map[string]string{warmSpec: w.Status.SpecHash}
+	if err := r.Create(ctx, gated); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.publishSnapshot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: warmtemplates.StatusConfigMapName(r.NodeName)}, cm); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(cm.Data["snapshot.json"]), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Pools[0].ReadySlots != 1 || snapshot.Pools[0].PreparingSlots != 1 {
+		t.Fatalf("unregistered Pod counted as ready: %+v", snapshot.Pools[0])
+	}
 }
 
 func TestWarmPoolScaleDownKeepsClaimedPodAndPublishesAllocatedBudget(t *testing.T) {
