@@ -2,16 +2,20 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"sync"
 	"time"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/warmdefaults"
+	"cellbox.local/cellbox/internal/boxprovider"
+	"cellbox.local/cellbox/internal/warmtemplates"
 	core "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -35,6 +39,22 @@ type WarmPool struct {
 	Namespace  string
 	Size       int
 	mu         sync.Mutex
+	failureMu  sync.Mutex
+	failures   map[string]warmFailure
+}
+
+type warmFailure struct {
+	fingerprint string
+	at          time.Time
+}
+
+func (p *WarmPool) recordFailure(uid, hash string) {
+	p.failureMu.Lock()
+	defer p.failureMu.Unlock()
+	if p.failures == nil {
+		p.failures = map[string]warmFailure{}
+	}
+	p.failures[uid] = warmFailure{fingerprint: hash, at: time.Now()}
 }
 
 func (*WarmPool) NeedLeaderElection() bool { return true }
@@ -89,20 +109,6 @@ func (p *WarmPool) pods(ctx context.Context, options ...client.ListOption) ([]co
 	return out, nil
 }
 
-func (p *WarmPool) defaultImages(ctx context.Context) (map[string]bool, error) {
-	images, err := warmdefaults.Read(ctx, p.Reconciler, p.Namespace)
-	if err != nil {
-		return nil, err
-	}
-	targets := make(map[string]bool, len(images))
-	for _, image := range images {
-		if image.NodeName == p.Reconciler.NodeName {
-			targets[image.Image] = true
-		}
-	}
-	return targets, nil
-}
-
 func (p *WarmPool) remove(ctx context.Context, pod *core.Pod) error {
 	r := p.Reconciler
 	if pod.DeletionTimestamp == nil {
@@ -114,13 +120,74 @@ func (p *WarmPool) remove(ctx context.Context, pod *core.Pod) error {
 	return r.Runtime.Cleanup(ctx, pod)
 }
 
+// allocateWarmSlots uses max-min fair allocation: equally sized demands receive
+// equal capacity, and a template below its fair share releases the remainder to
+// the others. Identical Specs have already been folded into one demand.
+func allocateWarmSlots(demands map[string]int, budget int) map[string]int {
+	targets := make(map[string]int, len(demands))
+	keys := make([]string, 0, len(demands))
+	for key, demand := range demands {
+		if demand > 0 {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	remaining := budget
+	for remaining > 0 {
+		active := 0
+		for _, key := range keys {
+			if targets[key] < demands[key] {
+				active++
+			}
+		}
+		if active == 0 {
+			break
+		}
+		share := remaining / active
+		if share == 0 {
+			share = 1
+		}
+		progress := 0
+		for _, key := range keys {
+			room := demands[key] - targets[key]
+			if room <= 0 {
+				continue
+			}
+			give := share
+			if give > room {
+				give = room
+			}
+			if give > remaining {
+				give = remaining
+			}
+			targets[key] += give
+			remaining -= give
+			progress += give
+			if remaining == 0 {
+				break
+			}
+		}
+		if progress == 0 {
+			break
+		}
+	}
+	return targets
+}
+
 func (p *WarmPool) reconcile(ctx context.Context) error {
+	if err := p.reconcilePools(ctx); err != nil {
+		return err
+	}
+	return p.publishSnapshot(ctx)
+}
+
+func (p *WarmPool) reconcilePools(ctx context.Context) error {
 	r := p.Reconciler
 	backend, ok := r.Runtime.(warmRuntime)
 	if !ok {
 		return fmt.Errorf("runtime does not support warm Pods")
 	}
-	defaultImages, err := p.defaultImages(ctx)
+	configured, err := warmtemplates.Read(ctx, r, p.Namespace)
 	if err != nil {
 		return err
 	}
@@ -140,33 +207,30 @@ func (p *WarmPool) reconcile(ctx context.Context) error {
 		return err
 	}
 	templates := map[string]*api.ResumablePod{}
-	var candidates []*api.ResumablePod
+	demands := map[string]int{}
 	restoring := false
 	for i := range workloads.Items {
 		w := &workloads.Items[i]
-		eligible := w.Status.Phase == "Creating" || w.Status.Phase == "Running" || w.Status.Phase == "Checkpointing" || w.Status.Phase == "Suspending" || w.Status.Phase == "Suspended" || w.Status.Phase == "Restoring"
-		if w.Spec.NodeName == r.NodeName && defaultImages[w.Spec.Container.Image] && w.DeletionTimestamp == nil && w.Status.SpecHash != "" && eligible && validate(w) == nil {
-			if w.Status.Phase == "Restoring" && time.Since(w.Status.Since.Time) < 2*time.Second {
-				restoring = true
-			}
-			templates[w.Status.SpecHash] = w
-			candidates = append(candidates, w)
+		if w.Spec.NodeName == r.NodeName && w.Status.Phase == "Restoring" && time.Since(w.Status.Since.Time) < 2*time.Second {
+			restoring = true
 		}
 	}
-	// Recent workloads get capacity first. Two recent workloads sharing a
-	// template share two slots; old suspended configurations do not grow the pool.
-	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].Status.Since.Equal(&candidates[j].Status.Since) {
-			return candidates[i].Name < candidates[j].Name
+	for _, configuredTemplate := range configured {
+		if configuredTemplate.Slots == 0 || configuredTemplate.Spec.NodeName != r.NodeName {
+			continue
 		}
-		return candidates[j].Status.Since.Before(&candidates[i].Status.Since)
-	})
-	targets := map[string]int{}
-	if len(candidates) > 0 {
-		for i := 0; i < p.Size; i++ {
-			targets[candidates[i%len(candidates)].Status.SpecHash]++
+		w := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{Name: configuredTemplate.ID, Namespace: p.Namespace, UID: types.UID("00000000-0000-4000-8000-000000000001")}, Spec: configuredTemplate.Spec}
+		if err := validate(w); err != nil {
+			return fmt.Errorf("invalid warm template %q: %w", configuredTemplate.ID, err)
 		}
+		hash := fingerprint(w)
+		w.Status.SpecHash = hash
+		if templates[hash] == nil {
+			templates[hash] = w
+		}
+		demands[hash] += configuredTemplate.Slots
 	}
+	targets := allocateWarmSlots(demands, p.Size)
 	keys := []string{}
 	for k := range targets {
 		keys = append(keys, k)
@@ -198,6 +262,9 @@ func (p *WarmPool) reconcile(ctx context.Context) error {
 		phase, deadline, stateErr := backend.WarmState(ctx, pod)
 		expired := (!deadline.IsZero() && time.Until(deadline) < 5*time.Second) || (deadline.IsZero() && !pod.CreationTimestamp.IsZero() && time.Since(pod.CreationTimestamp.Time) > 90*time.Second)
 		if pod.DeletionTimestamp != nil || targets[hash] == 0 || expired || phase == "expired" || phase == "retired" || pod.Status.Phase == core.PodFailed || pod.Status.Phase == core.PodSucceeded {
+			if pod.Status.Phase == core.PodFailed || pod.Status.Phase == core.PodSucceeded {
+				p.recordFailure(string(pod.UID), hash)
+			}
 			if err = p.remove(ctx, pod); err != nil {
 				return err
 			}
@@ -218,15 +285,28 @@ func (p *WarmPool) reconcile(ctx context.Context) error {
 		} else if stateErr != nil {
 			return stateErr
 		}
-		total++
+		if phase == "waiting" && time.Until(deadline) < 15*time.Second {
+			aging = append(aging, pod)
+			if phase == "waiting" {
+				available++
+			}
+			total++
+			continue
+		}
+		if counts[hash] >= targets[hash] {
+			// Drop excess idle capacity before filling other templates' fair
+			// shares. Keep the oldest compatible slots because pods are sorted by
+			// creation time.
+			if err = p.remove(ctx, pod); err != nil {
+				return err
+			}
+			continue
+		}
 		if phase == "waiting" {
 			available++
 		}
-		if phase == "waiting" && time.Until(deadline) < 15*time.Second {
-			aging = append(aging, pod)
-			continue
-		}
 		counts[hash]++
+		total++
 	}
 	// Retire the rotating slot only after another loop has prepared its successor.
 	if total >= p.Size+1 {
@@ -254,6 +334,156 @@ func (p *WarmPool) reconcile(ctx context.Context) error {
 	return nil
 }
 
+func (p *WarmPool) publishSnapshot(ctx context.Context) error {
+	r := p.Reconciler
+	key := types.NamespacedName{Namespace: p.Namespace, Name: warmtemplates.ConfigMapName}
+	desired := &core.ConfigMap{}
+	err := r.Get(ctx, key, desired)
+	if apierrors.IsNotFound(err) {
+		desired.Data = map[string]string{}
+		err = nil
+	}
+	if err != nil {
+		return err
+	}
+	configured, err := warmtemplates.Read(ctx, r, p.Namespace)
+	if err != nil {
+		return err
+	}
+	latest := &core.ConfigMap{}
+	latestErr := r.Get(ctx, key, latest)
+	if apierrors.IsNotFound(latestErr) {
+		if desired.ResourceVersion != "" {
+			return fmt.Errorf("warm template ConfigMap changed while publishing status")
+		}
+	} else if latestErr != nil {
+		return latestErr
+	} else if latest.ResourceVersion != desired.ResourceVersion {
+		return fmt.Errorf("warm template ConfigMap changed while publishing status")
+	}
+	backend, ok := r.Runtime.(warmRuntime)
+	if !ok {
+		return fmt.Errorf("runtime does not support warm Pods")
+	}
+	type pool struct {
+		observation boxprovider.WarmPoolObservation
+	}
+	groups := map[string]*pool{}
+	demands := map[string]int{}
+	for _, template := range configured {
+		if template.Spec.NodeName != r.NodeName {
+			continue
+		}
+		w := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{Name: template.ID, Namespace: p.Namespace, UID: types.UID("00000000-0000-4000-8000-000000000001")}, Spec: template.Spec}
+		if err := validate(w); err != nil {
+			return fmt.Errorf("invalid warm template %q: %w", template.ID, err)
+		}
+		hash := fingerprint(w)
+		entry := groups[hash]
+		if entry == nil {
+			entry = &pool{observation: boxprovider.WarmPoolObservation{PoolID: poolID(p.Namespace, r.NodeName, hash), DesiredHash: warmtemplates.DesiredHash(desired.Data)}}
+			groups[hash] = entry
+		}
+		entry.observation.TemplateIDs = append(entry.observation.TemplateIDs, template.ID)
+		entry.observation.RequestedSlots += template.Slots
+		demands[hash] += template.Slots
+	}
+	allocated := allocateWarmSlots(demands, p.Size)
+	for hash, entry := range groups {
+		entry.observation.AllocatedSlots = allocated[hash]
+		sort.Strings(entry.observation.TemplateIDs)
+	}
+	pods, err := p.pods(ctx)
+	if err != nil {
+		return err
+	}
+	seenFailed := map[string]bool{}
+	for i := range pods {
+		pod := &pods[i]
+		if meta.GetControllerOf(pod) != nil || pod.DeletionTimestamp != nil {
+			continue
+		}
+		entry := groups[pod.Annotations[warmSpec]]
+		if entry == nil {
+			continue
+		}
+		if pod.Status.Phase == core.PodFailed || pod.Status.Phase == core.PodSucceeded {
+			entry.observation.FailedSlots++
+			seenFailed[string(pod.UID)] = true
+			continue
+		}
+		rc := pod.Spec.Containers
+		if len(rc) > 0 {
+			requests, limits := rc[0].Resources.Requests, rc[0].Resources.Limits
+			entry.observation.Resources.CPURequestMilli += requests.Cpu().MilliValue()
+			entry.observation.Resources.CPULimitMilli += limits.Cpu().MilliValue()
+			entry.observation.Resources.MemoryRequestBytes += requests.Memory().Value()
+			entry.observation.Resources.MemoryLimitBytes += limits.Memory().Value()
+		}
+		// A newly created gated Pod has no runtime ticket until RegisterWarm.
+		// This is normal preparation, not an observation failure.
+		if len(pod.Spec.SchedulingGates) > 0 {
+			entry.observation.PreparingSlots++
+			continue
+		}
+		phase, _, stateErr := backend.WarmState(ctx, pod)
+		if stateErr != nil {
+			return stateErr
+		}
+		if phase == "waiting" {
+			entry.observation.ReadySlots++
+		} else {
+			entry.observation.PreparingSlots++
+		}
+	}
+	p.failureMu.Lock()
+	for uid, failure := range p.failures {
+		if time.Since(failure.at) > 15*time.Second {
+			delete(p.failures, uid)
+			continue
+		}
+		if seenFailed[uid] {
+			continue
+		}
+		if entry := groups[failure.fingerprint]; entry != nil {
+			entry.observation.FailedSlots++
+		}
+	}
+	p.failureMu.Unlock()
+	observedAt := time.Now().UTC()
+	pools := make([]boxprovider.WarmPoolObservation, 0, len(groups))
+	for _, entry := range groups {
+		entry.observation.ObservedAt = observedAt
+		pools = append(pools, entry.observation)
+	}
+	sort.Slice(pools, func(i, j int) bool { return pools[i].PoolID < pools[j].PoolID })
+	snapshot := warmtemplates.Snapshot{NodeName: r.NodeName, DesiredHash: warmtemplates.DesiredHash(desired.Data), ObservedGeneration: desired.Generation, ObservedAt: observedAt, Pools: pools}
+	data, err := warmtemplates.EncodeSnapshot(snapshot)
+	if err != nil {
+		return err
+	}
+	statusKey := types.NamespacedName{Namespace: p.Namespace, Name: warmtemplates.StatusConfigMapName(r.NodeName)}
+	status := &core.ConfigMap{}
+	err = r.Get(ctx, statusKey, status)
+	if apierrors.IsNotFound(err) {
+		status = &core.ConfigMap{ObjectMeta: meta.ObjectMeta{Namespace: p.Namespace, Name: statusKey.Name, Labels: map[string]string{"cellbox.local/warm-status": "true"}}, Data: data}
+		return r.Create(ctx, status)
+	}
+	if err != nil {
+		return err
+	}
+	if status.Data["snapshot.json"] == data["snapshot.json"] {
+		return nil
+	}
+	status.Data = data
+	return r.Update(ctx, status)
+}
+
+func poolID(namespace, node, fingerprint string) string {
+	h := sha256.Sum256([]byte(namespace + "\x00" + node + "\x00" + fingerprint))
+	return hex.EncodeToString(h[:])
+}
+
 func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (result *core.Pod, retErr error) {
 	if p.Size == 0 {
 		return nil, nil
@@ -265,15 +495,33 @@ func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (result *co
 	var listed time.Time
 	var stateTime, patchTime time.Duration
 	defer func() {
-		ctrl.LoggerFrom(ctx).Info("warm acquisition timing", "lockMs", locked.Sub(started).Milliseconds(), "listMs", listed.Sub(locked).Milliseconds(), "leaseMs", stateTime.Milliseconds(), "patchMs", patchTime.Milliseconds())
+		listTime := int64(0)
+		if !listed.IsZero() {
+			listTime = listed.Sub(locked).Milliseconds()
+		}
+		ctrl.LoggerFrom(ctx).Info("warm acquisition timing", "lockMs", locked.Sub(started).Milliseconds(), "listMs", listTime, "leaseMs", stateTime.Milliseconds(), "patchMs", patchTime.Milliseconds())
 	}()
 	r := p.Reconciler
 	backend := r.Runtime.(warmRuntime)
-	defaultImages, err := p.defaultImages(ctx)
+	configured, err := warmtemplates.Read(ctx, r, p.Namespace)
 	if err != nil {
 		return nil, err
 	}
-	if w.Spec.NodeName != r.NodeName || !defaultImages[w.Spec.Container.Image] {
+	allowed := false
+	for _, template := range configured {
+		if template.Slots < 1 || template.Spec.NodeName != r.NodeName {
+			continue
+		}
+		candidate := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{Name: template.ID, Namespace: p.Namespace, UID: types.UID("00000000-0000-4000-8000-000000000001")}, Spec: template.Spec}
+		if validate(candidate) == nil && fingerprint(candidate) == w.Status.SpecHash {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return nil, nil
+	}
+	if w.Spec.NodeName != r.NodeName {
 		return nil, nil
 	}
 	// Candidate discovery needs no quorum read: the node lease and the

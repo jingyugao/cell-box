@@ -360,8 +360,11 @@ func TestCoreRESTCreateExecRestartAndExpireOutput(t *testing.T) {
 	objects := &ledgerObjects{}
 	reopen := func() {
 		// Reuse the fixture's fake runtime and HTTP clients, with a fresh OSS
-		// Store and process context. Close waits for all previous workers.
-		if err := f.service.Close(); err != nil {
+		// Store and process context. Keep the separate SQLite catalog open.
+		f.service.cancel()
+		f.service.wg.Wait()
+		f.service.http.CloseIdleConnections()
+		if err := f.service.store.Close(); err != nil {
 			t.Fatal(err)
 		}
 		f.service.ctx, f.service.cancel = context.WithCancel(context.Background())

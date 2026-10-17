@@ -5,6 +5,8 @@
 {{- $localMetadataInitialize := get $localMetadata "initialize" | default false }}
 {{- $localMetadataNode := get $localMetadata "nodeName" | default "" | toString | trim }}
 {{- $localMetadataHostPath := get $localMetadata "hostPath" | default "/var/lib/cellbox-metadata" | toString }}
+{{- $catalogClaim := .Values.api.catalogExistingClaim | default "" | toString | trim }}
+{{- if and (not $localMetadataEnabled) (eq $catalogClaim "") }}{{- fail "SQLite catalog requires localMetadata.enabled or api.catalogExistingClaim on persistent local/block storage" }}{{- end }}
 {{- if ne (int .Values.api.replicas) 1 }}{{- fail "api.replicas must be 1; the API has a single active Lease owner" }}{{- end }}
 {{- if and $localMetadataInitialize (not $localMetadataEnabled) }}{{- fail "localMetadata.initialize requires localMetadata.enabled" }}{{- end }}
 {{- if $localMetadataEnabled }}
@@ -112,6 +114,9 @@ spec:
             - /etc/cellbox-storage/config.json
             - --leader-election-namespace
             - {{ $apiNamespace }}
+            {{- if not $localMetadataEnabled }}
+            - --catalog-dir=/var/lib/cellbox-catalog/catalog
+            {{- end }}
             {{- if $localMetadataEnabled }}
             - --local-metadata-dir=/var/lib/cellbox-metadata
             {{- if $localMetadataInitialize }}
@@ -183,6 +188,10 @@ spec:
               readOnly: true
             - name: data
               mountPath: /var/lib/cellbox
+            {{- if not $localMetadataEnabled }}
+            - name: catalog
+              mountPath: /var/lib/cellbox-catalog
+            {{- end }}
             {{- if $localMetadataEnabled }}
             - name: local-metadata
               mountPath: /var/lib/cellbox-metadata
@@ -252,6 +261,11 @@ spec:
         - name: data
           emptyDir:
             sizeLimit: {{ .Values.api.temporaryStorageSize }}
+        {{- if not $localMetadataEnabled }}
+        - name: catalog
+          persistentVolumeClaim:
+            claimName: {{ $catalogClaim | quote }}
+        {{- end }}
         - name: temp
           emptyDir:
             sizeLimit: {{ ternary "1Gi" "64Mi" .Values.buildkit.enabled }}

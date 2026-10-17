@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -70,6 +71,80 @@ func sortInventory(boxes []Box) {
 		return boxes[i].CreatedAt.Before(boxes[j].CreatedAt)
 	})
 }
+
+type boxListOptions struct {
+	ids        []string
+	templateID string
+	revisionID string
+	phase      string
+	limit      int
+	offset     int
+}
+
+func parseBoxListOptions(r *http.Request) (boxListOptions, error) {
+	q := r.URL.Query()
+	var out boxListOptions
+	out.ids = q["id"]
+	for _, key := range []string{"templateId", "revisionId", "phase", "limit", "offset"} {
+		if len(q[key]) > 1 {
+			return out, apiError("INVALID_REQUEST", key+" may be supplied only once")
+		}
+	}
+	out.templateID = q.Get("templateId")
+	out.revisionID = q.Get("revisionId")
+	out.phase = q.Get("phase")
+	if _, ok := q["templateId"]; ok && out.templateID == "" {
+		return out, apiError("INVALID_REQUEST", "templateId must not be empty")
+	}
+	if _, ok := q["revisionId"]; ok && out.revisionID == "" {
+		return out, apiError("INVALID_REQUEST", "revisionId must not be empty")
+	}
+	if _, ok := q["phase"]; ok && out.phase == "" {
+		return out, apiError("INVALID_REQUEST", "phase must not be empty")
+	}
+	if value := q.Get("limit"); value != "" {
+		limit, err := strconv.Atoi(value)
+		if err != nil || limit < 1 || limit > 500 {
+			return out, apiError("INVALID_REQUEST", "limit must be 1..500")
+		}
+		out.limit = limit
+	} else if _, ok := q["limit"]; ok {
+		return out, apiError("INVALID_REQUEST", "limit must be 1..500")
+	}
+	if value := q.Get("offset"); value != "" {
+		offset, err := strconv.Atoi(value)
+		if err != nil || offset < 0 {
+			return out, apiError("INVALID_REQUEST", "offset must be >= 0")
+		}
+		out.offset = offset
+	} else if _, ok := q["offset"]; ok {
+		return out, apiError("INVALID_REQUEST", "offset must be >= 0")
+	}
+	return out, nil
+}
+
+func (o boxListOptions) apply(boxes []Box) []Box {
+	filtered := boxes[:0]
+	for _, box := range boxes {
+		if o.templateID != "" && box.TemplateID != o.templateID ||
+			o.revisionID != "" && box.RevisionID != o.revisionID ||
+			o.phase != "" && box.Phase != o.phase {
+			continue
+		}
+		filtered = append(filtered, box)
+	}
+	boxes = filtered
+	sortInventory(boxes)
+	if o.offset >= len(boxes) {
+		return []Box{}
+	}
+	boxes = boxes[o.offset:]
+	if o.limit > 0 && len(boxes) > o.limit {
+		boxes = boxes[:o.limit]
+	}
+	return boxes
+}
+
 func (s *Service) listBoxes(w http.ResponseWriter, r *http.Request) {
 	observation := r.URL.Query().Get("observation")
 	if observation != "" && observation != "resource" {
@@ -77,6 +152,11 @@ func (s *Service) listBoxes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resourcesOnly := observation == "resource"
+	options, err := parseBoxListOptions(r)
+	if err != nil {
+		fail(w, err)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 	namespaces := map[string]boxprovider.InventoryProvider{}
@@ -103,7 +183,7 @@ func (s *Service) listBoxes(w http.ResponseWriter, r *http.Request) {
 		namespaces[profile.Provider+"/"+profile.Namespace] = provider
 	}
 	wanted := map[string]bool{}
-	for _, id := range r.URL.Query()["id"] {
+	for _, id := range options.ids {
 		wanted[id] = true
 	}
 	filtered := len(wanted) > 0
@@ -138,8 +218,7 @@ func (s *Service) listBoxes(w http.ResponseWriter, r *http.Request) {
 		fail(w, apiError("NOT_FOUND", "Box not found"))
 		return
 	}
-	sortInventory(boxes)
-	writeJSON(w, 200, boxes)
+	writeJSON(w, 200, options.apply(boxes))
 }
 func (s *Service) listCheckpoints(w http.ResponseWriter, r *http.Request) {
 	if s.objects == nil {

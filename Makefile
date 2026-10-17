@@ -35,24 +35,29 @@ build:
 	cp api/openapi.yaml "$$out/api/"
 	cp LICENSE VERSION README.md "$$out/"
 	if [[ -d doc ]]; then cp -r doc "$$out/"; fi
+	mkdir -p "$$out/sdk"
+	cp -r sdk/go "$$out/sdk/"
+	# Remove Markdown left by older builds; never publish local scratch notes.
 	docs_out="$$out/tmp/docs"
 	[[ ! -L $$docs_out ]] || { echo "Refusing to replace symlinked documentation directory: $$docs_out" >&2; exit 1; }
-	mkdir -p "$$docs_out"
 	for old_doc in "$$docs_out"/*.md; do if [[ -f $$old_doc ]]; then rm -- "$$old_doc"; fi; done
-	if [[ -d tmp/docs ]]; then cp -r tmp/docs/. "$$docs_out/"; fi
+	if [[ -d $$docs_out ]]; then rmdir --ignore-fail-on-non-empty "$$docs_out"; fi
+	if [[ -d $$out/tmp ]]; then rmdir --ignore-fail-on-non-empty "$$out/tmp"; fi
 	printf 'Release directory: %s\n' "$$out"
 
 test:
 	go test -race ./...
+	cd sdk/go && go test -race ./...
 
 vet:
 	go vet ./...
+	cd sdk/go && go vet ./...
 
 check: test vet
 	@for script in test/scripts/*.sh; do bash -n "$$script"; done
 
 fmt:
-	gofmt -w api cmd internal pkg test
+	gofmt -w api cmd internal sdk/go test
 
 package:
 	@set -u

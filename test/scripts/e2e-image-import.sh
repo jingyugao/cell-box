@@ -17,6 +17,7 @@ base, profile, source = sys.argv[1:]
 base = base.rstrip('/')
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 boxes, archives = [], []
+template_id = revision_id = None
 
 def call(method, path, data=None):
     headers = {'Authorization': 'Bearer ' + os.environ['CELLBOX_CLIENT_TOKEN']}
@@ -57,17 +58,23 @@ try:
     run = 'docker run --rm -e IMPORT_MESSAGE=image-import-ok -w ' + shlex.quote(workspace) + ' -p 127.0.0.1:18080:8080 '
     run += shlex.quote(source) + ' sh -c ' + shlex.quote(workload)
     build_command = 'mkdir -p /opt/product && printf "%s" "platform-build-ok" > /opt/product/cellbox-build-proof.txt'
-    imported_id = wait(call('POST', '/v1/images:import', {'url': source, 'runCommand': run, 'buildCommand': build_command}))['result']['importedImageId']
-    imported = call('GET', '/v1/images/' + imported_id)
-    assert '@sha256:' in imported['resolvedSource']
-    assert imported['command'][-1] == workload
-    assert imported['env']['IMPORT_MESSAGE'] == 'image-import-ok'
-    assert imported['ports'] == [8080]
-    assert imported['buildCommand'] == build_command
-    assert any(x['id'] == imported_id for x in call('GET', '/v1/images'))
-    print('PASS: source tag resolved, guest image published, startup parameters retained', flush=True)
+    template = call('POST', '/v1/templates', {'name': 'image-import-e2e-' + str(uuid.uuid4()), 'description': 'e2e image import and revision build'})
+    template_id = template['id']
+    build = call('POST', f'/v1/templates/{template_id}/revisions', {
+        'userVersion': 'v1', 'baseImage': source, 'profileId': profile,
+        'runCommand': run, 'buildCommand': build_command,
+    })
+    build = wait(build)
+    revision_id = build['result']['revisionId']
+    revision = call('GET', '/v1/template-revisions/' + revision_id)
+    assert '@sha256:' in revision['resolvedBaseImage'] and '@sha256:' in revision['image']
+    assert revision['baseImage'] == source and revision['buildCommand'] == build_command
+    assert revision['version'] == 'v1-r1' and revision['profileId'] == profile
+    logs = call('GET', f"/v1/operations/{build['id']}/logs?offset=0&limit=65536")
+    assert 'Published image:' in logs['text'] and logs['eof']
+    print('PASS: source tag resolved, BuildKit published immutable revision, build logs retained', flush=True)
 
-    box_id = create('/v1/boxes', {'profileId': profile, 'ownerKey': 'image-import-e2e-' + str(uuid.uuid4()), 'importedImageId': imported_id})
+    box_id = create('/v1/boxes', {'revisionId': revision_id, 'ownerKey': 'image-import-e2e-' + str(uuid.uuid4())})
     for _ in range(30):
         try:
             if call('GET', f'/v1/boxes/{box_id}/files?path=imported-proof.txt') == b'image-import-ok':
@@ -78,7 +85,7 @@ try:
     else:
         raise RuntimeError('Imported startup command did not create its proof file')
     box = call('GET', '/v1/boxes/' + box_id)
-    assert box['image'] == imported['image'] and box['importedImageId'] == imported_id
+    assert box['image'] == revision['image'] and box['revisionId'] == revision_id
     execution = wait(call('POST', f'/v1/boxes/{box_id}/execs', {'argv': ['/bin/cat', workspace + '/imported-proof.txt'], 'expectedGeneration': box['generation']}))
     result = call('GET', '/v1/execs/' + execution['result']['execId'])['result']
     assert result['exitCode'] == 0 and result['stdout'] == 'image-import-ok'
@@ -100,10 +107,10 @@ try:
     # Free the source's resources so restoration also works on a small test node.
     wait(call('POST', f'/v1/boxes/{box_id}:destroy'))
     boxes.remove(box_id)
-    restored_id = create('/v1/boxes:restore', {'profileId': profile, 'ownerKey': 'image-import-restore-' + str(uuid.uuid4()), 'archiveId': archive})
+    restored_id = create('/v1/boxes:restore', {'revisionId': revision_id, 'ownerKey': 'image-import-restore-' + str(uuid.uuid4()), 'archiveId': archive})
     restored = call('GET', '/v1/boxes/' + restored_id)
-    assert restored['phase'] == 'staged' and restored['image'] == imported['image']
-    assert restored['importedImageId'] == imported_id
+    assert restored['phase'] == 'staged' and restored['image'] == revision['image']
+    assert restored['revisionId'] == revision_id
     assert call('GET', f'/v1/boxes/{restored_id}/files?path=imported-proof.txt') == b'image-import-ok'
     wait(call('POST', f'/v1/boxes/{restored_id}:activate'))
     restored = call('GET', '/v1/boxes/' + restored_id)
@@ -125,7 +132,15 @@ finally:
         except Exception as error:
             failed = True
             print(f'Could not delete test archive {archive}: {error}', file=sys.stderr)
+    if template_id and not revision_id:
+        try:
+            call('DELETE', '/v1/templates/' + template_id)
+        except Exception as error:
+            failed = True
+            print(f'Could not delete empty test template {template_id}: {error}', file=sys.stderr)
     if failed:
         raise RuntimeError('Test resource cleanup incomplete; inspect the IDs above')
+if template_id:
+    print(f'Preserved template {template_id} and revision {revision_id}; phase one does not delete built revisions', flush=True)
 print('PASS: image import lifecycle E2E completed; test sandboxes and archives removed')
 PY

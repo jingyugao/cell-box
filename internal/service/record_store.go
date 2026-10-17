@@ -15,9 +15,8 @@ import (
 	"cellbox.local/cellbox/internal/objectstorage"
 )
 
-// Head schema 4 fences binaries that do not understand permanent retirement.
-// Resource/local state schema remains 3; opening an existing head migrates it.
-const recordHeadSchema = 4
+// Template-era metadata has no migration from pre-release ledgers.
+const recordHeadSchema = stateSchema
 
 const recordPrefix = "metadata/records"
 const profilePrefix = "metadata/profiles"
@@ -75,7 +74,7 @@ func validRecordKey(key string) bool {
 
 func decodeRecordHead(data []byte) (recordHead, error) {
 	var head recordHead
-	if json.Unmarshal(data, &head) != nil || (head.Schema != stateSchema && head.Schema != recordHeadSchema) || head.Revision == "" {
+	if json.Unmarshal(data, &head) != nil || head.Schema != recordHeadSchema || head.Revision == "" {
 		return head, errors.New("invalid core metadata head")
 	}
 	retired := map[string]bool{}

@@ -148,11 +148,14 @@ func (r *persistentHomePoolRuntime) ActivateWarm(context.Context, *api.Resumable
 func TestPersistentHomeWarmPodHasNoTemplateHomeAndCanBeClaimed(t *testing.T) {
 	ctx := context.Background()
 	r, f, w := fixture(t)
-	setWarmDefault(t, r, w, "default")
+	setWarmTemplate(t, r, w, "template-a")
+	w.Spec.PersistentHome = true
+	replaceWarmTemplateSpec(t, r, w.Namespace, "template-a", w.Spec)
+	w.Spec.DesiredState = "Running"
 	oldTemplate := w.DeepCopy()
 	oldTemplate.UID = "normal-box"
 	oldTemplate.Status.SpecHash = fingerprint(oldTemplate)
-	warm := executionPod(oldTemplate, "warm-old")
+	warm := warmExecutionPod(oldTemplate, "warm-old")
 	warm.UID = types.UID("warm-slot")
 	warm.Spec.SchedulingGates = nil
 	warm.Labels = map[string]string{warmLabel: "true"}
@@ -160,9 +163,6 @@ func TestPersistentHomeWarmPodHasNoTemplateHomeAndCanBeClaimed(t *testing.T) {
 	if err := r.Create(ctx, warm); err != nil {
 		t.Fatal(err)
 	}
-
-	w.Spec.PersistentHome = true
-	w.Spec.DesiredState = "Running"
 	if err := r.Update(ctx, w); err != nil {
 		t.Fatal(err)
 	}
@@ -178,8 +178,8 @@ func TestPersistentHomeWarmPodHasNoTemplateHomeAndCanBeClaimed(t *testing.T) {
 	pool := &WarmPool{Reconciler: r, Namespace: w.Namespace, Size: 2}
 	r.WarmPool = pool
 
-	if pod, err := pool.acquire(ctx, w); err != nil || pod != nil {
-		t.Fatalf("persistent-home restore adopted a shared warm Pod: pod=%v err=%v", pod, err)
+	if pod, err := pool.acquire(ctx, w); err != nil || pod == nil {
+		t.Fatalf("persistent-home restore should reuse its template slot without mounting HOME in the pooled Pod: pod=%v err=%v", pod, err)
 	}
 	if err := pool.reconcile(ctx); err != nil {
 		t.Fatal(err)
@@ -188,29 +188,32 @@ func TestPersistentHomeWarmPodHasNoTemplateHomeAndCanBeClaimed(t *testing.T) {
 	if err := r.List(ctx, &pods, client.MatchingLabels{warmLabel: "true"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(pods.Items) != 1 {
-		t.Fatalf("persistent-home pool did not replace incompatible slot: %#v", pods.Items)
+	if len(pods.Items) != 2 {
+		t.Fatalf("persistent-home claim should leave its shared template capacity replenished: got %d Pods", len(pods.Items))
 	}
-	if backend.registerCalls != 0 || backend.activateCalls != 0 {
-		t.Fatalf("persistent HOME touched warm runtime: register=%d activate=%d", backend.registerCalls, backend.activateCalls)
+	if backend.activateCalls != 0 {
+		t.Fatalf("pool maintenance activated a workload before Box restore: activations=%d", backend.activateCalls)
 	}
-	if f.cleanups != 1 {
-		t.Fatalf("stale shared warm Pod cleanup count = %d, want 1", f.cleanups)
+	if f.cleanups != 0 {
+		t.Fatalf("a valid template-level slot should remain available to compatible Boxes: cleanup count = %d", f.cleanups)
 	}
-	prepared := &pods.Items[0]
-	if !admittedDebugMount(w, prepared) {
-		t.Fatal("warm Pod has unexpected mounts")
-	}
-	for _, v := range prepared.Spec.Volumes {
-		if v.Name == "agent-home" {
-			t.Fatal("warm Pod exposed its template owner's HOME")
+	var prepared *core.Pod
+	for i := range pods.Items {
+		candidate := &pods.Items[i]
+		if !admittedDebugMount(w, candidate) {
+			t.Fatal("template Pod has unexpected mounts")
+		}
+		for _, v := range candidate.Spec.Volumes {
+			if v.Name == "agent-home" {
+				t.Fatal("warm Pod exposed a Box HOME")
+			}
+		}
+		if owned(w, candidate) {
+			prepared = candidate
 		}
 	}
-	prepared.UID = "persistent-warm-slot"
-	prepared.Spec.SchedulingGates = nil
-	backend.deadlines[string(prepared.UID)] = time.Now().Add(time.Minute)
-	if err := r.Update(ctx, prepared); err != nil {
-		t.Fatal(err)
+	if prepared == nil {
+		t.Fatal("persistent-home Box did not claim its compatible warm Pod")
 	}
 	if _, err := r.begin(ctx, w); err != nil {
 		t.Fatal(err)

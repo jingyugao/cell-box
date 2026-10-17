@@ -297,7 +297,8 @@ func TestCaptureSurvivesBoxDeletionAndRestores(t *testing.T) {
 	f.waitOperation(t, destroy.ID, "succeeded")
 	status, body = f.call(t, "GET", "/v1/archives/"+archiveID, testClientToken, "", nil)
 	wantStatus(t, status, 200, body)
-	status, body = f.call(t, "POST", "/v1/boxes:restore", testClientToken, "restore-once", map[string]string{"profileId": "profile-a", "ownerKey": "restored", "archiveId": archiveID})
+	templateID := f.template(t)
+	status, body = f.call(t, "POST", "/v1/boxes:restore", testClientToken, "restore-once", map[string]string{"templateId": templateID, "ownerKey": "restored", "archiveId": archiveID})
 	wantStatus(t, status, 202, body)
 	restore := decodeResponse[Operation](t, body)
 	f.waitOperation(t, restore.ID, "succeeded")
@@ -359,7 +360,8 @@ func TestPortableArchiveRestoreAcrossImagesRequiresOptIn(t *testing.T) {
 	f.provider.mu.Lock()
 	f.provider.guestURL = guest.URL
 	f.provider.mu.Unlock()
-	request := map[string]any{"profileId": "profile-a", "ownerKey": "portable-target", "archiveId": archiveID}
+	templateID := f.template(t)
+	request := map[string]any{"templateId": templateID, "ownerKey": "portable-target", "archiveId": archiveID}
 	status, body := f.call(t, "POST", "/v1/boxes:restore", testClientToken, "restore-needs-optin", request)
 	wantStatus(t, status, 409, body)
 	request["acceptImageChange"] = true
@@ -395,8 +397,8 @@ func TestPortableArchiveRestoreAcrossImagesRequiresOptIn(t *testing.T) {
 	}
 	if err := f.service.store.View(func(st State) error {
 		b := st.Boxes[op.TargetID]
-		if b.Box.ImportedImageID != "" || b.Profile.Image != f.config.Profiles[0].Image {
-			t.Fatalf("restore depended on deleted source import metadata: %+v", b)
+		if b.Box.ImportedImageID != "" || b.Box.RevisionID == "" || b.Box.Image != b.Profile.Image {
+			t.Fatalf("restore did not retain the selected catalog revision: %+v", b)
 		}
 		return nil
 	}); err != nil {

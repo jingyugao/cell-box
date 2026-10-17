@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,6 +34,13 @@ type BuildKitOptions struct {
 	Platform     string
 	DockerConfig string
 	BuildCommand string
+	// BuildID gives each build attempt a distinct mutable tag while preserving
+	// the content-derived Key used for image identity.
+	BuildID string
+	// NoCache forces BuildKit to execute every Dockerfile step for this build.
+	NoCache bool
+	// LogWriter receives combined BuildKit stdout and stderr as they are emitted.
+	LogWriter io.Writer
 }
 
 func ValidateBuildCommand(command string) error {
@@ -118,6 +126,10 @@ func PrepareBuildKit(ctx context.Context, opts BuildKitOptions) (BuildKitResult,
 	keyBytes := sha256.Sum256([]byte(strings.Join(keyParts, "\n")))
 	key := hex.EncodeToString(keyBytes[:])
 	tag := opts.Repository + ":cellbox-" + key
+	if opts.BuildID != "" {
+		buildIDHash := sha256.Sum256([]byte(opts.BuildID))
+		tag += "-" + hex.EncodeToString(buildIDHash[:8])
+	}
 	dir, err := os.MkdirTemp("", "cellbox-buildkit-")
 	if err != nil {
 		return zero, err
@@ -203,12 +215,19 @@ func PrepareBuildKit(ctx context.Context, opts BuildKitOptions) (BuildKitResult,
 	if opts.Platform != "" {
 		args = append(args, "--opt", "platform="+opts.Platform)
 	}
+	if opts.NoCache {
+		args = append(args, "--no-cache")
+	}
 	cmd := exec.CommandContext(ctx, opts.Binary, args...)
 	if opts.DockerConfig != "" {
 		cmd.Env = append(os.Environ(), "DOCKER_CONFIG="+opts.DockerConfig)
 	}
 	output := &boundedOutput{}
-	cmd.Stdout, cmd.Stderr = output, output
+	var combined io.Writer = output
+	if opts.LogWriter != nil {
+		combined = io.MultiWriter(output, opts.LogWriter)
+	}
+	cmd.Stdout, cmd.Stderr = combined, combined
 	err = cmd.Run()
 	if err != nil {
 		return zero, fmt.Errorf("BuildKit build failed: %w: %s", err, strings.TrimSpace(string(output.data)))

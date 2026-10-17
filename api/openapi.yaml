@@ -34,8 +34,129 @@ components:
             $ref: '#/components/schemas/Error'
       description: 'Structured error: 400 invalid input, 401 unauthenticated, 403
         denied, 404 missing or not owned, 409 conflict/busy/stale generation, 410 expired result or operation, 422
-        unsupported, 502 runtime failure, 504 timeout.'
+        unsupported, 502 runtime failure, 504 timeout or UNKNOWN_OUTCOME when a template desired state was saved but publishing has not yet been confirmed.'
   schemas:
+    Template:
+      additionalProperties: false
+      description: Client-owned template family. Revisions contain immutable build configuration.
+      properties:
+        id:
+          type: string
+          pattern: '^tpl-[0-9a-f]+$'
+        name:
+          type: string
+          pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$'
+          maxLength: 80
+        description:
+          type: string
+          maxLength: 8192
+        defaultWarmSlots:
+          type: integer
+          minimum: 0
+          maximum: 1024
+        stableRevisionId:
+          type: string
+        generation:
+          type: integer
+          minimum: 1
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required: [id, name, defaultWarmSlots, generation, createdAt, updatedAt]
+      type: object
+    TemplateRevision:
+      additionalProperties: false
+      description: Immutable built sandbox configuration, except description, status and warmSlots.
+      properties:
+        id: {type: string}
+        templateId: {type: string}
+        templateName: {type: string}
+        userVersion: {type: string}
+        revision: {type: integer, minimum: 1}
+        version: {type: string, description: Display version, for example 1.01-r2.}
+        description: {type: string}
+        profileId: {type: string}
+        baseImage: {type: string, description: Submitted base image reference.}
+        resolvedBaseImage: {type: string, description: Base image reference resolved to its immutable digest.}
+        image: {type: string, description: Final immutable image digest.}
+        buildCommand: {type: string}
+        runCommand: {type: string}
+        platform: {type: string}
+        cpu: {type: number, exclusiveMinimum: 0}
+        memoryMiB: {type: integer, minimum: 1}
+        warmSlots: {type: integer, minimum: 0, maximum: 1024}
+        status: {type: string, enum: [active, retired]}
+        generation: {type: integer, minimum: 1}
+        buildOperationId: {type: string}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+      required: [id, templateId, templateName, userVersion, revision, version, profileId, baseImage, resolvedBaseImage, image, platform, cpu, memoryMiB, warmSlots, status, generation, buildOperationId, createdAt, updatedAt]
+      type: object
+    WarmPoolResources:
+      type: object
+      description: Configured Kubernetes requests and limits for allocated idle warm Pods, not measured usage.
+      properties:
+        cpuRequestMilli: {type: integer, format: int64}
+        cpuLimitMilli: {type: integer, format: int64}
+        memoryRequestBytes: {type: integer, format: int64}
+        memoryLimitBytes: {type: integer, format: int64}
+      required: [cpuRequestMilli, cpuLimitMilli, memoryRequestBytes, memoryLimitBytes]
+    WarmPoolStatus:
+      type: object
+      description: Pool counters aggregate all compatible revisions attached to this pool and may repeat in each revision's status. Deduplicate by poolId when summarizing.
+      properties:
+        poolId: {type: string}
+        requestedSlots: {type: integer, description: Sum of configured demand for compatible revisions in this pool.}
+        allocatedSlots: {type: integer, description: Slots allocated under the node-wide controller capacity.}
+        readySlots: {type: integer}
+        preparingSlots: {type: integer}
+        failedSlots:
+          type: integer
+          description: Current failed Pods plus failures cleaned by the controller in the last 15 seconds.
+        resources: {$ref: '#/components/schemas/WarmPoolResources'}
+        observedAt: {type: string, format: date-time}
+        stale: {type: boolean}
+      required: [poolId, requestedSlots, allocatedSlots, readySlots, preparingSlots, failedSlots, resources, observedAt, stale]
+    RevisionWarmStatus:
+      type: object
+      properties:
+        revisionId: {type: string}
+        generation: {type: integer}
+        observedGeneration: {type: integer}
+        desiredSlots: {type: integer}
+        syncStatus: {type: string, enum: [pending, applied, error, unsupported]}
+        error: {type: string}
+        observedAt: {type: string, format: date-time}
+        stale: {type: boolean}
+        pool:
+          allOf:
+          - {$ref: '#/components/schemas/WarmPoolStatus'}
+          nullable: true
+      required: [revisionId, generation, observedGeneration, desiredSlots, syncStatus, stale, pool]
+    RevisionRuntimeStatus:
+      type: object
+      properties:
+        revisionId: {type: string}
+        sandboxCount: {type: integer, nullable: true}
+        phases:
+          type: object
+          additionalProperties: {type: integer}
+        observedAt: {type: string, format: date-time}
+        stale: {type: boolean}
+        error: {type: string}
+        warmPool: {$ref: '#/components/schemas/RevisionWarmStatus'}
+      required: [revisionId, sandboxCount, phases, stale, warmPool]
+    TemplateRuntimeStatus:
+      type: object
+      properties:
+        templateId: {type: string}
+        revisions:
+          type: array
+          items: {$ref: '#/components/schemas/RevisionRuntimeStatus'}
+      required: [templateId, revisions]
     Archive:
       additionalProperties: false
       properties:
@@ -52,7 +173,7 @@ components:
         imageId:
           type: string
         importedImageId:
-          description: Imported image required by default when restoring this archive.
+          description: Imported image dependency captured by the archive. Restore always requires an explicit target template.
           type: string
         preparedImage:
           description: Prepared image reference captured independently of the source box.
@@ -64,6 +185,15 @@ components:
           type: boolean
         profileId:
           type: string
+        templateId:
+          type: string
+        revisionId:
+          type: string
+          description: Immutable template revision pinned to this Box.
+        templateName:
+          type: string
+        templateVersion:
+          type: string
         sha256:
           type: string
         size:
@@ -73,6 +203,10 @@ components:
       required:
       - id
       - sourceBoxId
+      - templateId
+      - revisionId
+      - templateName
+      - templateVersion
       - profileId
       - imageId
       - portable
@@ -118,6 +252,16 @@ components:
           type: string
         profileId:
           type: string
+          description: Read-only resolved provenance from the pinned template.
+        templateId:
+          type: string
+        revisionId:
+          type: string
+          description: Immutable template revision pinned to this Box.
+        templateName:
+          type: string
+        templateVersion:
+          type: string
         resourceVersion:
           type: integer
         observedAt:
@@ -152,6 +296,10 @@ components:
       - id
       - ownerKey
       - profileId
+      - templateId
+      - revisionId
+      - templateName
+      - templateVersion
       - phase
       - generation
       - resourceVersion
@@ -225,6 +373,9 @@ components:
       type: object
     CreateBox:
       additionalProperties: false
+      oneOf:
+      - required: [templateId]
+      - required: [revisionId]
       properties:
         staged:
           type: boolean
@@ -234,14 +385,14 @@ components:
           maxLength: 256
           minLength: 1
           type: string
-        profileId:
+        templateId:
           type: string
-        importedImageId:
+          minLength: 1
+        revisionId:
           type: string
-          description: ID of a successful import owned by this client. Omit to use the profile image.
-      required:
-      - profileId
-      - ownerKey
+          minLength: 1
+      description: Choose exactly one of templateId (resolves current stable revision at admission) or revisionId (pins an explicit revision).
+      required: [ownerKey]
       type: object
     Error:
       additionalProperties: false
@@ -386,54 +537,60 @@ components:
       required: []
       type: object
     Operation:
+      description: A lifecycle operation or a local template build. The id prefix and kind identify the matching shape.
+      oneOf:
+      - $ref: '#/components/schemas/RuntimeOperation'
+      - $ref: '#/components/schemas/TemplateBuildOperation'
+    RuntimeOperation:
       additionalProperties: false
       properties:
-        createdAt:
-          format: date-time
-          type: string
+        id: {type: string}
+        kind: {type: string}
+        targetId: {type: string}
+        status: {type: string}
+        version: {type: integer}
+        createdAt: {type: string, format: date-time}
+        finishedAt: {type: string, format: date-time}
+        result:
+          type: object
+          additionalProperties: {type: string}
         box:
-          description: Full lifecycle snapshot captured atomically with successful completion; operationId is cleared.
           $ref: '#/components/schemas/Box'
         error:
-          additionalProperties: false
-          properties:
-            code:
-              type: string
-            message:
-              type: string
-          required:
-          - code
-          - message
+          $ref: '#/components/schemas/ErrorDetail'
+      required: [id, kind, targetId, status, version, createdAt]
+      type: object
+    TemplateBuildOperation:
+      additionalProperties: false
+      properties:
+        id: {type: string}
+        kind: {type: string, const: template-build}
+        targetId: {type: string}
+        status: {type: string, enum: [queued, running, cancelling, succeeded, failed, cancelled]}
+        stage: {type: string}
+        version: {type: integer}
+        input:
           type: object
-        finishedAt:
-          format: date-time
-          type: string
-        id:
-          type: string
-        kind:
-          type: string
+          additionalProperties: true
+          description: Submitted build request. buildCommand may contain sensitive values and is returned verbatim.
+        createdAt: {type: string, format: date-time}
+        startedAt: {type: string, format: date-time}
+        finishedAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
         result:
-          additionalProperties:
-            type: string
           type: object
-        status:
-          enum:
-          - queued
-          - running
-          - succeeded
-          - failed
-          type: string
-        targetId:
-          type: string
-        version:
-          type: integer
-      required:
-      - id
-      - kind
-      - targetId
-      - status
-      - version
-      - createdAt
+          additionalProperties: {type: string}
+        error:
+          $ref: '#/components/schemas/ErrorDetail'
+      required: [id, kind, targetId, status, stage, version, input, createdAt, updatedAt]
+      type: object
+    ErrorDetail:
+      additionalProperties: false
+      properties:
+        code: {type: string}
+        message: {type: string}
+      required: [code, message]
+      type: object
       type: object
     Profile:
       additionalProperties: false
@@ -489,6 +646,10 @@ components:
       type: object
     RestoreBox:
       additionalProperties: false
+      oneOf:
+      - required: [templateId]
+      - required: [revisionId]
+      description: Restore always uses the explicitly selected template. acceptImageChange is required when its resolved image differs from the archive image; the archive must be portable and agent UID/GID must still match.
       properties:
         archiveId:
           type: string
@@ -496,20 +657,17 @@ components:
           maxLength: 256
           minLength: 1
           type: string
-        profileId:
+        templateId:
           type: string
-        importedImageId:
+          minLength: 1
+        revisionId:
           type: string
-          description: ID of a successful import owned by this client. Archive restore
-            reuses the source imported image when omitted, unless acceptImageChange is
-            true, in which case the target profile image is used.
+          minLength: 1
         acceptImageChange:
           type: boolean
           description: Explicitly allow a validated portable workspace archive to restore into a different immutable image. Agent UID/GID must still match.
-      required:
-      - profileId
-      - ownerKey
-      - archiveId
+      description: Choose exactly one of templateId (resolves current stable revision) or revisionId.
+      required: [ownerKey, archiveId]
       type: object
     Route:
       additionalProperties: false
@@ -799,6 +957,21 @@ paths:
           type: array
         style: form
         explode: true
+      - in: query
+        name: templateId
+        schema: {type: string}
+      - in: query
+        name: revisionId
+        schema: {type: string}
+      - in: query
+        name: phase
+        schema: {type: string}
+      - in: query
+        name: limit
+        schema: {type: integer, minimum: 1, maximum: 500}
+      - in: query
+        name: offset
+        schema: {type: integer, minimum: 0}
       responses:
         "200":
           content:
@@ -1415,9 +1588,14 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [importedImageId]
+              oneOf:
+              - required: [templateId]
+              - required: [revisionId]
               properties:
-                importedImageId:
+                templateId:
+                  type: string
+                  minLength: 1
+                revisionId:
                   type: string
                   minLength: 1
       responses:
@@ -1650,6 +1828,81 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       summary: Get durable operation status
+  /v1/operations:
+    get:
+      operationId: listOperations
+      description: Lists catalog build operations from SQLite. Does not query Kubernetes.
+      parameters:
+      - in: query
+        name: templateId
+        schema: {type: string}
+      - in: query
+        name: status
+        schema: {type: string, enum: [queued, running, cancelling, succeeded, failed, cancelled]}
+      - in: query
+        name: limit
+        schema: {type: integer, minimum: 1, maximum: 500, default: 100}
+      - in: query
+        name: offset
+        schema: {type: integer, minimum: 0, default: 0}
+      responses:
+        "200":
+          description: Catalog build operations
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Operation'}
+        default:
+          $ref: '#/components/responses/Error'
+      summary: List template build operations without Kubernetes access
+  /v1/operations/{id}/logs:
+    get:
+      operationId: getOperationLogs
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+      - in: query
+        name: offset
+        schema: {type: integer, minimum: 0, default: 0}
+      - in: query
+        name: limit
+        schema: {type: integer, minimum: 1, maximum: 1048576, default: 65536}
+      responses:
+        "200":
+          description: A bounded slice of the operation log; no streaming or follow mode.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [text, nextOffset, eof]
+                properties:
+                  text: {type: string}
+                  nextOffset: {type: integer}
+                  eof: {type: boolean}
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Read a slice of operation logs
+  /v1/operations/{id}:cancel:
+    post:
+      operationId: cancelOperation
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+      responses:
+        "200":
+          description: Cancellation requested or operation already finished.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Operation'}
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Request cancellation of a cancellable build operation
   /v1/operations/{id}/events:
     get:
       description: SSE event snapshot uses operation version as id. Reconnection sends
@@ -1687,17 +1940,25 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       summary: List configured profiles without authentication
-  /v1/profiles/{id}/warm-default:
-    put:
-      operationId: setWarmDefaultImage
-      summary: Select the profile image eligible for speculative warm slots
-      description: Uses a client-owned imported image, or the configured base image when omitted. Existing Boxes retain their pinned images.
-      parameters:
-      - in: path
-        name: id
-        required: true
-        schema:
-          type: string
+  /v1/templates:
+    get:
+      operationId: listTemplates
+      summary: List template families from SQLite without Kubernetes access
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Template'
+        default:
+          $ref: '#/components/responses/Error'
+    post:
+      operationId: createTemplate
+      summary: Create a template family
+      description: Creates metadata in SQLite; does not query Kubernetes.
       requestBody:
         required: true
         content:
@@ -1705,21 +1966,229 @@ paths:
             schema:
               type: object
               additionalProperties: false
+              required: [name]
               properties:
-                importedImageId:
+                name:
                   type: string
+                  pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$'
+                  maxLength: 80
+                description:
+                  type: string
+                  maxLength: 8192
+                defaultWarmSlots:
+                  type: integer
+                  minimum: 0
+                  maximum: 1024
+                  default: 0
       responses:
-        "200":
-          description: Warm target persisted
+        "201":
+          description: Template created
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: false
-                properties:
-                  image:
-                    type: string
-                required: [image]
+                $ref: '#/components/schemas/Template'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/templates/{id}:
+    parameters:
+    - in: path
+      name: id
+      required: true
+      schema:
+        type: string
+    get:
+      operationId: getTemplate
+      summary: Get a template family from SQLite
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Template'
+        default:
+          $ref: '#/components/responses/Error'
+    patch:
+      operationId: updateTemplate
+      summary: Update template metadata, default warm target, or stable revision
+      description: Metadata only; does not query Kubernetes. expectedGeneration prevents lost updates.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedGeneration]
+              properties:
+                expectedGeneration: {type: integer, minimum: 1}
+                description: {type: string, maxLength: 8192}
+                defaultWarmSlots: {type: integer, minimum: 0, maximum: 1024}
+                stableRevisionId:
+                  type: string
+                  description: Set to an empty string to clear the stable revision.
+      responses:
+        "200":
+          description: Updated template family
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Template'}
+        default:
+          $ref: '#/components/responses/Error'
+    delete:
+      operationId: deleteTemplate
+      summary: Delete an empty template family
+      description: Deletes only when it has no revisions or queued/running/cancelling builds; no Kubernetes reference check is performed.
+      responses:
+        "204":
+          description: Template deleted
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/templates/{id}/revisions:
+    get:
+      operationId: listTemplateRevisions
+      description: Lists persisted revisions. Does not query Kubernetes or report runtime use counts.
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+      - in: query
+        name: userVersion
+        schema: {type: string}
+      responses:
+        "200":
+          description: Revisions ordered by creation time
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/TemplateRevision'}
+        default:
+          $ref: '#/components/responses/Error'
+      summary: List template revisions
+    post:
+      operationId: buildTemplateRevision
+      description: Queues a BuildKit operation using a resolved immutable base image. The build command executes inside the image build, and runCommand is applied when creating a sandbox. No Kubernetes APIs are queried by this endpoint.
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [userVersion, baseImage, profileId]
+              properties:
+                userVersion: {type: string, minLength: 1, maxLength: 80}
+                baseImage: {type: string, minLength: 1}
+                profileId: {type: string, minLength: 1}
+                buildCommand: {type: string, maxLength: 65536}
+                runCommand: {type: string, maxLength: 65536, description: One literal docker run command parsed using the existing image run-command contract.}
+                platform: {type: string}
+                warmSlots: {type: integer, minimum: 0, maximum: 1024}
+      responses:
+        "202":
+          description: Build operation queued
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Operation'}
+        default:
+          $ref: '#/components/responses/Error'
+      summary: Build and register a new template revision
+  /v1/template-revisions/{id}:
+    parameters:
+    - in: path
+      name: id
+      required: true
+      schema: {type: string}
+    get:
+      operationId: getTemplateRevision
+      summary: Get a template revision from SQLite without Kubernetes access
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TemplateRevision'}
+        default:
+          $ref: '#/components/responses/Error'
+    patch:
+      operationId: updateTemplateRevision
+      summary: Update revision description, status, or persisted warm target
+      description: warmSlots changes the desired warm-pool target; background synchronization publishes changes and retries failures. expectedGeneration is required.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedGeneration]
+              properties:
+                expectedGeneration: {type: integer, minimum: 1}
+                description: {type: string, maxLength: 8192}
+                status: {type: string, enum: [active, retired]}
+                warmSlots: {type: integer, minimum: 0, maximum: 1024}
+      responses:
+        "200":
+          description: Updated revision metadata
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TemplateRevision'}
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/template-revisions/{id}/warm-pool:
+    get:
+      operationId: getRevisionWarmPool
+      summary: Get cached warm-pool synchronization and inventory status
+      description: |
+        Returns a background-observed snapshot; this request does not call Kubernetes.
+        Active revisions with warmSlots greater than zero publish demand after a
+        successful build. Zero slots or retirement withdraws demand. Compatible
+        revisions can share a pool; changing the stable revision does not withdraw
+        demand from the previous revision. Node capacity defaults to 2 slots and is
+        configurable up to 32. Snapshot fields include observedAt and stale; pool
+        is null when no pool is currently associated. Resource values are
+        configured requests/limits, not measured usage. Do not sum resources across
+        revisions without deduplicating by poolId.
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+      responses:
+        "200":
+          description: Background warm-pool observation
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RevisionWarmStatus'}
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/templates/{id}/runtime:
+    get:
+      operationId: getTemplateRuntime
+      summary: Get cached sandbox usage and warm-pool status for template revisions
+      description: |
+        Returns last background observations and does not call Kubernetes in the
+        request. sandboxCount may be null when no reliable observation is available;
+        check stale and observedAt before using counts.
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+      responses:
+        "200":
+          description: Background runtime observations
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TemplateRuntimeStatus'}
         default:
           $ref: '#/components/responses/Error'
   /v1/routes:

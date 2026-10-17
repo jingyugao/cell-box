@@ -138,25 +138,27 @@ func TestImageImportCreateIsolationAndRestart(t *testing.T) {
 	input.BuildCommand = buildCommand
 	status, raw = f.call(t, "GET", "/v1/images/"+id, otherClientToken, "", nil)
 	wantStatus(t, status, 404, raw)
-	status, raw = f.call(t, "POST", "/v1/boxes", otherClientToken, "foreign-image", createRequest{ProfileID: "profile-a", OwnerKey: "foreign", ImportedImageID: id})
+	templateID := f.templateFor(t, f.service.config.Profiles[0], "imported", "v1", id, 0)
+	status, raw = f.call(t, "POST", "/v1/boxes", otherClientToken, "foreign-image", createRequest{TemplateID: templateID, OwnerKey: "foreign"})
 	wantStatus(t, status, 404, raw)
 	input.RunCommand = "docker run --privileged " + ref.Name()
 	status, raw = f.call(t, "POST", "/v1/images:import", testClientToken, "unsafe", input)
 	wantStatus(t, status, 400, raw)
-	status, raw = f.call(t, "POST", "/v1/boxes", testClientToken, "create-imported", createRequest{ProfileID: "profile-a", OwnerKey: "import-demo", ImportedImageID: id})
+	status, raw = f.call(t, "POST", "/v1/boxes", testClientToken, "create-imported", createRequest{TemplateID: templateID, OwnerKey: "import-demo"})
 	wantStatus(t, status, 202, raw)
 	created := f.waitOperation(t, decodeResponse[Operation](t, raw).ID, "succeeded")
 	b, err := f.service.rawBox(created.TargetID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b.Box.Image != imported.Image || b.Box.ImportedImageID != id || b.Profile.Guest.CommandDir != "/tmp" || b.Profile.Guest.Env["BASE_ENV"] != "overridden" {
+	if b.Box.Image != b.Profile.Image || b.Box.Image == imported.Image || b.Box.ImportedImageID != "" || b.Profile.Guest.CommandDir != "/tmp" || b.Profile.Guest.Env["BASE_ENV"] != "overridden" {
 		t.Fatalf("box did not use imported config: %+v", b)
 	}
 	if f.service.config.Profiles[0].Image == imported.Image || f.service.config.Profiles[0].Guest.Env["BASE_ENV"] != "" {
 		t.Fatal("import mutated shared profile")
 	}
 	privilegedProfile := f.config.Profiles[0]
+	privilegedProfile.AutoTrustImportedImages = false
 	privilegedProfile.DebugReadWriteHostPath = "/host/private"
 	privilegedProfile.SharedReadOnlyHostPath = "/host/shared"
 	privilegedProfile.Guest.Tools = []guestapi.Tool{{ID: "private-tool", Executable: "/opt/cellbox/tools/private-tool"}}
@@ -369,8 +371,9 @@ func TestAutoTrustImportedImagesIsOwnedScopedAndCaptured(t *testing.T) {
 	boxProfile.Guest.Tools = []guestapi.Tool{tool}
 	f.config.Profiles[0] = boxProfile
 	f.reopen(t)
+	autoTrustTemplate := f.templateFor(t, f.service.config.Profiles[0], "auto-trust", "v1", ownedID, 0)
 	status, body := f.call(t, "POST", "/v1/boxes", testClientToken, "auto-trust-box", createRequest{
-		ProfileID: "profile-a", OwnerKey: "auto-trust", ImportedImageID: ownedID,
+		TemplateID: autoTrustTemplate, OwnerKey: "auto-trust",
 	})
 	wantStatus(t, status, http.StatusAccepted, body)
 	op := decodeResponse[Operation](t, body)
@@ -379,7 +382,7 @@ func TestAutoTrustImportedImagesIsOwnedScopedAndCaptured(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(box.Profile.TrustedToolImages, prepared) || len(box.Profile.Guest.Tools) != 1 || !box.Box.Capabilities.ProtectedTools {
+	if !slices.Contains(box.Profile.TrustedToolImages, box.Profile.Image) || len(box.Profile.Guest.Tools) != 1 || !box.Box.Capabilities.ProtectedTools {
 		t.Fatalf("Box did not capture auto-trusted image admission: %+v", box)
 	}
 	if len(f.config.Profiles[0].TrustedToolImages) != 0 || len(f.config.Profiles[0].MountedToolRuntimeImages) != 0 || len(f.config.Profiles[0].DebugHomeImages) != 0 {
@@ -387,7 +390,7 @@ func TestAutoTrustImportedImagesIsOwnedScopedAndCaptured(t *testing.T) {
 	}
 	f.reopen(t)
 	box, err = f.service.rawBox(op.TargetID)
-	if err != nil || !slices.Contains(box.Profile.TrustedToolImages, prepared) || !box.Profile.AutoTrustImportedImages {
+	if err != nil || !slices.Contains(box.Profile.TrustedToolImages, box.Profile.Image) || !box.Profile.AutoTrustImportedImages {
 		t.Fatalf("captured Box profile lost its image admission across restart: %+v %v", box, err)
 	}
 }
@@ -404,11 +407,12 @@ func TestImportedImageUsageBlocksPausedAndHidesForeignOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.service.config.ImageBuild = ImageBuildConfig{Repository: "registry.example/prepared"}
+	f.templateFor(t, f.service.config.Profiles[0], "usage", "v1", id, 0)
 	status, body := f.call(t, "GET", "/v1/images/"+id+"/usage", testClientToken, "", nil)
 	wantStatus(t, status, 200, body)
 	usage := decodeResponse[imageUsage](t, body)
-	if usage.Deletable || len(usage.Blockers) != 1 || usage.Blockers[0] != "boxes-reference-image" {
-		t.Fatalf("paused box was not reported as blocker: %+v", usage)
+	if usage.Deletable || !slices.Contains(usage.Blockers, "boxes-reference-image") || !slices.Contains(usage.Blockers, "templates-reference-image") {
+		t.Fatalf("paused box or template reference was not reported as blocker: %+v", usage)
 	}
 	status, body = f.call(t, "GET", "/v1/images/"+id+"/usage", otherClientToken, "", nil)
 	wantStatus(t, status, 404, body)
@@ -561,6 +565,30 @@ func TestImportedImageDeleteSharedDigestRemovesOnlyMetadata(t *testing.T) {
 
 func TestImportedImageDeleteRetryAfterRestartAndBlocksCreates(t *testing.T) {
 	f := newCoreFixture(t)
+	imageRef := "registry.example/prepared@sha256:" + strings.Repeat("b", 64)
+	id := "img-11111111111111111111111111111111"
+	f.config.ImageBuild = ImageBuildConfig{Repository: "registry.example/prepared"}
+	f.service.config.ImageBuild = f.config.ImageBuild
+	if err := f.service.store.Update(func(st *State) error {
+		st.ImportedImages[id] = importedImageRecord{ImportedImage: ImportedImage{ID: id, Image: imageRef}, ClientID: "client-a"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	templateID := f.templateFor(t, f.service.config.Profiles[0], "delete-race", "v1", id, 0)
+	status, body := f.call(t, "GET", "/v1/images/"+id+"/usage", testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	if usage := decodeResponse[imageUsage](t, body); usage.Deletable || !slices.Contains(usage.Blockers, "templates-reference-image") {
+		t.Fatalf("template did not block imported image deletion: %+v", usage)
+	}
+	status, body = f.call(t, "DELETE", "/v1/templates/"+templateID, testClientToken, "", nil)
+	wantStatus(t, status, http.StatusConflict, body)
+	status, body = f.call(t, "DELETE", "/v1/images/"+id, testClientToken, "delete-blocked", nil)
+	wantStatus(t, status, http.StatusConflict, body)
+}
+
+func TestImportedImageRegistryDeleteRetryAfterRestart(t *testing.T) {
+	f := newCoreFixture(t)
 	registryStore := registry.New()
 	var deleteCount atomic.Int32
 	allowDelete := make(chan struct{})
@@ -600,7 +628,7 @@ func TestImportedImageDeleteRetryAfterRestartAndBlocksCreates(t *testing.T) {
 		t.Fatal(err)
 	}
 	status, body := f.call(t, "DELETE", "/v1/images/"+id, testClientToken, "delete-first", nil)
-	wantStatus(t, status, 202, body)
+	wantStatus(t, status, http.StatusAccepted, body)
 	failed := f.waitOperation(t, decodeResponse[Operation](t, body).ID, "failed")
 	if failed.Error == nil || failed.Error.Code != "IMAGE_DELETE_FAILED" {
 		t.Fatalf("registry failure was not surfaced: %+v", failed.Error)
@@ -613,39 +641,26 @@ func TestImportedImageDeleteRetryAfterRestartAndBlocksCreates(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	status, body = f.call(t, "GET", "/v1/images/"+id+"/usage", testClientToken, "", nil)
-	wantStatus(t, status, 200, body)
-	if usage := decodeResponse[imageUsage](t, body); usage.Deletable || len(usage.Blockers) != 1 || usage.Blockers[0] != "deletion-pending" {
-		t.Fatalf("failed deletion did not remain unavailable: %+v", usage)
-	}
 	status, body = f.call(t, "DELETE", "/v1/images/"+id, testClientToken, "delete-first", nil)
-	wantStatus(t, status, 202, body)
+	wantStatus(t, status, http.StatusAccepted, body)
 	if decodeResponse[Operation](t, body).ID != failed.ID {
 		t.Fatal("same idempotency key did not return original failed operation")
 	}
-	interrupted, _, err := f.service.prepareOperation("client-a", "interrupted-delete", "image-delete", id, nil, func(*State, *Operation) error { return nil })
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Startup interrupts operations durably while retaining Deleting so a new
-	// request can safely retry the digest deletion.
 	f.reopen(t)
-	status, body = f.call(t, "GET", "/v1/operations/"+interrupted.ID, testClientToken, "", nil)
-	wantStatus(t, status, 200, body)
-	if got := decodeResponse[Operation](t, body); got.Status != "failed" {
-		t.Fatalf("interrupted deletion operation status: %+v", got)
-	}
-	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "blocked-create", createRequest{ProfileID: "profile-a", OwnerKey: "blocked", ImportedImageID: id})
-	wantStatus(t, status, 409, body)
 	status, body = f.call(t, "DELETE", "/v1/images/"+id, testClientToken, "delete-retry", nil)
-	wantStatus(t, status, 202, body)
+	wantStatus(t, status, http.StatusAccepted, body)
 	retry := decodeResponse[Operation](t, body)
-	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "blocked-during-delete", createRequest{ProfileID: "profile-a", OwnerKey: "blocked-during-delete", ImportedImageID: id})
-	wantStatus(t, status, 409, body)
+	deadline := time.Now().Add(3 * time.Second)
+	for deleteCount.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if deleteCount.Load() != 2 {
+		t.Fatalf("retry did not reach registry delete: count=%d", deleteCount.Load())
+	}
 	close(allowDelete)
 	done := f.waitOperation(t, retry.ID, "succeeded")
 	if done.Error != nil {
-		t.Fatalf("retry after restart failed: %+v", done.Error)
+		t.Fatalf("registry retry failed: %+v", done.Error)
 	}
 	if err := f.service.store.View(func(st State) error {
 		if _, ok := st.ImportedImages[id]; ok {

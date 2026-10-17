@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 )
 
 var ErrNotFound = errors.New("runtime not found")
@@ -74,15 +75,46 @@ type ImageCacheProvider interface {
 	CacheImage(context.Context, string, string, string) error // image, node, namespace
 }
 
-// WarmDefaultImage selects the only image eligible for a profile's warm pool.
-type WarmDefaultImage struct {
-	ProfileID string `json:"profileId"`
-	NodeName  string `json:"nodeName"`
-	Image     string `json:"image"`
+// WarmTemplate describes a reusable runtime configuration and its share of
+// the node-wide warm capacity.
+type WarmTemplate struct {
+	ID    string `json:"id"`
+	Slots int    `json:"slots"`
+	Spec  Spec   `json:"spec"`
 }
-type WarmDefaultImageProvider interface {
-	SetWarmDefaultImage(context.Context, string, WarmDefaultImage) error
-	GetWarmDefaultImages(context.Context, string) ([]WarmDefaultImage, error)
+type WarmTemplateProvider interface {
+	SetWarmTemplates(context.Context, string, []WarmTemplate) error
+}
+
+// WarmPoolResources reports configured requests and limits for currently
+// allocated idle warm Pods. It does not report measured runtime usage.
+type WarmPoolResources struct {
+	CPURequestMilli    int64 `json:"cpuRequestMilli"`
+	CPULimitMilli      int64 `json:"cpuLimitMilli"`
+	MemoryRequestBytes int64 `json:"memoryRequestBytes"`
+	MemoryLimitBytes   int64 `json:"memoryLimitBytes"`
+}
+
+// WarmPoolObservation is a controller-published snapshot for one compatible
+// runtime fingerprint on one node.
+type WarmPoolObservation struct {
+	PoolID         string            `json:"poolId"`
+	TemplateIDs    []string          `json:"templateIds"`
+	DesiredHash    string            `json:"desiredHash"`
+	ObservedAt     time.Time         `json:"observedAt"`
+	Stale          bool              `json:"stale"`
+	RequestedSlots int               `json:"requestedSlots"`
+	AllocatedSlots int               `json:"allocatedSlots"`
+	ReadySlots     int               `json:"readySlots"`
+	PreparingSlots int               `json:"preparingSlots"`
+	FailedSlots    int               `json:"failedSlots"`
+	Resources      WarmPoolResources `json:"resources"`
+}
+
+// WarmTemplateObserver reads controller snapshots; callers must not infer
+// zero usage when the snapshot is absent or stale.
+type WarmTemplateObserver interface {
+	ObserveWarmTemplates(context.Context, string, []string) ([]WarmPoolObservation, error)
 }
 
 // FencedGuestProvider validates the execution while resolving its

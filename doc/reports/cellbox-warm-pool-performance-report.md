@@ -1,5 +1,7 @@
 # Cellbox 预热池优化报告
 
+> 历史报告：本文描述下方指定提交的实现和当时的测量结果。当前版本已改为由 catalog revision 的 `warmSlots` 驱动预热，不再等待已有 Box 提供模板；当前行为见[使用说明](../cellbox-usage.md)。本文保留原始数据和旧实现描述，不代表当前版本的性能承诺。
+
 报告日期：2026-10-05。范围：节点预热池及其 checkpoint 恢复路径。实现来自 [Cellbox #21](https://github.com/jingyugao/cell-box/pull/21)，合并提交 `daf8ccd`；代码核对基准为 `cf8a740`。性能数据来自 2026-10-04 的已有实测，本次文档修改没有重新压测。
 
 ## 1. 优化目标与结果

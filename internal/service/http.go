@@ -96,7 +96,10 @@ func decodeOptionalLimit(w http.ResponseWriter, r *http.Request, target any, lim
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/profiles", s.listProfiles)
-	mux.HandleFunc("PUT /v1/profiles/{id}/warm-default", s.setWarmDefaultImage)
+	if s.catalog != nil {
+		s.catalog.Register(mux, clientID)
+		s.registerTemplateRuntime(mux)
+	}
 	mux.HandleFunc("POST /v1/images", s.buildImage)
 	mux.HandleFunc("POST /v1/images:import", s.importImage)
 	mux.HandleFunc("GET /v1/images", s.listImportedImages)
@@ -223,7 +226,13 @@ func (s *Service) Handler() http.Handler {
 		writeJSON(w, 202, op)
 	})
 	mux.HandleFunc("GET /v1/execs/{id}", s.getExec)
-	mux.HandleFunc("GET /v1/operations/{id}", s.getOperation)
+	mux.HandleFunc("GET /v1/operations/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if s.catalog != nil && strings.HasPrefix(r.PathValue("id"), "build-") {
+			s.catalog.ServeOperation(w, r)
+			return
+		}
+		s.getOperation(w, r)
+	})
 	mux.HandleFunc("GET /v1/operations/{id}/events", s.operationEvents)
 	mux.HandleFunc("POST /v1/boxes/{id}/leases", s.createLease)
 	mux.HandleFunc("PATCH /v1/leases/{id}", s.renewLease)
@@ -297,6 +306,15 @@ func (s *Service) listProfiles(w http.ResponseWriter, r *http.Request) {
 func (s *Service) listLocalBoxes(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	ids := r.URL.Query()["id"]
+	var options boxListOptions
+	if r.URL.Path == "/v1/boxes" {
+		var err error
+		options, err = parseBoxListOptions(r)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+	}
 	if len(ids) > 0 {
 		seen := make(map[string]bool, len(ids))
 		unique := make([]string, 0, len(ids))
@@ -325,12 +343,16 @@ func (s *Service) listLocalBoxes(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	boxes = filtered
-	sort.Slice(boxes, func(i, j int) bool {
-		if boxes[i].CreatedAt.Equal(boxes[j].CreatedAt) {
-			return boxes[i].ID < boxes[j].ID
-		}
-		return boxes[i].CreatedAt.Before(boxes[j].CreatedAt)
-	})
+	if r.URL.Path == "/v1/boxes" {
+		boxes = options.apply(boxes)
+	} else {
+		sort.Slice(boxes, func(i, j int) bool {
+			if boxes[i].CreatedAt.Equal(boxes[j].CreatedAt) {
+				return boxes[i].ID < boxes[j].ID
+			}
+			return boxes[i].CreatedAt.Before(boxes[j].CreatedAt)
+		})
+	}
 	writeJSON(w, 200, boxes)
 }
 func (s *Service) operation(client, id string) (Operation, error) {

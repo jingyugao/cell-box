@@ -1,6 +1,6 @@
 #!/bin/bash
 # Import test/counter's ordinary image and verify it through the public REST API.
-# Keeps its source sandbox suspended and restored sandbox running for inspection.
+# Saves evidence under EVIDENCE_DIR and removes all test resources on exit.
 set -euo pipefail
 [[ $# == 3 ]] || { echo "Usage: $0 API_URL PROFILE_ID SOURCE_IMAGE" >&2; exit 2; }
 uv run python - "$@" <<'PY'
@@ -21,6 +21,8 @@ opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 evidence = Path(os.environ.get('EVIDENCE_DIR', 'tmp/validation/counter-import'))
 evidence.mkdir(parents=True, exist_ok=True)
 report = {'source': source, 'profileId': profile}
+boxes, archives = [], []
+template_id = revision_id = None
 
 def save(name, value):
     (evidence / (name + '.json')).write_text(json.dumps(value, indent=2) + '\n')
@@ -60,6 +62,7 @@ def wait(op):
 def create(path, body, name):
     op = call('POST', path, body)
     report[name] = op['targetId']
+    boxes.append(op['targetId'])
     save('report', report)
     return wait(op)['targetId']
 
@@ -101,24 +104,26 @@ try:
     workspace = configured['workspace']
     run = 'docker run --rm -e ' + shlex.quote('COUNTER_MARKER_PATH=' + workspace + '/marker')
     run += ' -w ' + shlex.quote(workspace) + ' -p 127.0.0.1:18000:8000 ' + shlex.quote(source)
-    body = {'url': source, 'runCommand': run}
+    template = call('POST', '/v1/templates', {'name': 'counter-import-' + str(uuid.uuid4()), 'description': 'counter import and revision e2e'})
+    template_id = template['id']
+    build_request = {'userVersion': 'v1', 'baseImage': source, 'profileId': profile, 'runCommand': run}
     key = str(uuid.uuid4())
-    op = call('POST', '/v1/images:import', body, key=key)
-    assert call('POST', '/v1/images:import', body, key=key)['id'] == op['id']
-    imported_id = wait(op)['result']['importedImageId']
-    imported = call('GET', '/v1/images/' + imported_id)
-    report['importedImageId'] = imported_id
-    report['image'] = imported['image']
-    save('imported', imported)
-    assert '@sha256:' in imported['resolvedSource'] and '@sha256:' in imported['image']
+    op = call('POST', f'/v1/templates/{template_id}/revisions', build_request, key=key)
+    assert call('POST', f'/v1/templates/{template_id}/revisions', build_request, key=key)['id'] == op['id']
+    build = wait(op)
+    revision_id = build['result']['revisionId']
+    revision = call('GET', '/v1/template-revisions/' + revision_id)
+    report['revisionId'] = revision_id
+    report['image'] = revision['image']
+    save('revision', revision)
+    assert '@sha256:' in revision['resolvedBaseImage'] and '@sha256:' in revision['image']
     expected_digest = os.environ.get('COUNTER_SOURCE_DIGEST')
     if expected_digest:
-        assert imported['resolvedSource'].endswith('@' + expected_digest)
-    assert imported['command'] == ['/server'] and imported['workingDir'] == workspace
-    assert imported['env']['COUNTER_MARKER_PATH'] == workspace + '/marker' and imported['ports'] == [8000]
-    print('PASS: registry image imported, entrypoint retained, guest injected, idempotency verified', flush=True)
+        assert revision['resolvedBaseImage'].endswith('@' + expected_digest)
+    assert revision['baseImage'] == source and revision['runCommand'] == run and revision['profileId'] == profile
+    print('PASS: registry base resolved, immutable template revision built, idempotency verified', flush=True)
 
-    box = create('/v1/boxes', {'profileId': profile, 'ownerKey': 'counter-import-' + str(uuid.uuid4()), 'importedImageId': imported_id}, 'boxId')
+    box = create('/v1/boxes', {'revisionId': revision_id, 'ownerKey': 'counter-import-' + str(uuid.uuid4())}, 'boxId')
     route = route_for(box)
     report['sourceRouteId'] = route
     ready(route)
@@ -158,12 +163,13 @@ try:
     print('PASS: suspend/resume preserved count, process identity and 32 MiB of memory; counter continues at 11', flush=True)
 
     archive = wait(call('POST', f'/v1/boxes/{box}/archives'))['result']['archiveId']
+    archives.append(archive)
     report['archiveId'] = archive
     # Keep the source checkpoint, freeing running resources for archive restore.
     wait(call('POST', f'/v1/boxes/{box}:suspend'))
-    restored = create('/v1/boxes:restore', {'profileId': profile, 'ownerKey': 'counter-restore-' + str(uuid.uuid4()), 'archiveId': archive}, 'restoredBoxId')
+    restored = create('/v1/boxes:restore', {'revisionId': revision_id, 'ownerKey': 'counter-restore-' + str(uuid.uuid4()), 'archiveId': archive}, 'restoredBoxId')
     restored_box = call('GET', '/v1/boxes/' + restored)
-    assert restored_box['phase'] == 'staged' and restored_box['importedImageId'] == imported_id
+    assert restored_box['phase'] == 'staged' and restored_box['revisionId'] == revision_id
     assert call('GET', f'/v1/boxes/{restored}/files?path=marker') == before['instance'].encode()
     assert call('GET', f'/v1/boxes/{restored}/files?path=counter-proof.json') == proof
     wait(call('POST', f'/v1/boxes/{restored}:activate'))
@@ -179,4 +185,27 @@ try:
     print(json.dumps(report, indent=2), flush=True)
 finally:
     save('report', report)
+    failed = False
+    for box_id in reversed(boxes):
+        try:
+            wait(call('POST', f'/v1/boxes/{box_id}:destroy'))
+        except Exception as error:
+            failed = True
+            print(f'Could not destroy test sandbox {box_id}: {error}', file=sys.stderr)
+    for archive in archives:
+        try:
+            call('DELETE', '/v1/archives/' + archive)
+        except Exception as error:
+            failed = True
+            print(f'Could not delete test archive {archive}: {error}', file=sys.stderr)
+    if template_id and not revision_id:
+        try:
+            call('DELETE', '/v1/templates/' + template_id)
+        except Exception as error:
+            failed = True
+            print(f'Could not delete empty test template {template_id}: {error}', file=sys.stderr)
+    if failed:
+        raise RuntimeError('Test resource cleanup incomplete; inspect the IDs above')
+if template_id:
+    print(f'Preserved template {template_id} and revision {revision_id}; phase one does not delete built revisions', flush=True)
 PY

@@ -12,18 +12,20 @@ import (
 // execution before rearming the same disk and starts the replacement staged.
 func (s *Service) upgradeBox(w http.ResponseWriter, r *http.Request, id string) {
 	var input struct {
-		ImportedImageID string `json:"importedImageId"`
+		TemplateID string `json:"templateId,omitempty"`
+		RevisionID string `json:"revisionId,omitempty"`
 	}
 	if err := decode(w, r, &input); err != nil {
 		fail(w, err)
 		return
 	}
-	if input.ImportedImageID == "" {
-		fail(w, apiError("INVALID_REQUEST", "importedImageId is required"))
+	if (input.TemplateID == "") == (input.RevisionID == "") {
+		fail(w, apiError("INVALID_REQUEST", "Specify exactly one of templateId or revisionId"))
 		return
 	}
 	client := clientID(r)
 	var original, next boxRecord
+	var target templateRecord
 	op, fresh, err := s.prepareOperation(client, r.Header.Get("Idempotency-Key"), "upgrade", id, input, func(st *State, op *Operation) error {
 		var err error
 		original, err = owned(st, client, id)
@@ -47,16 +49,26 @@ func (s *Service) upgradeBox(w http.ResponseWriter, r *http.Request, id string) 
 		default:
 			return apiError("CONFLICT", "Box is not ready for disk upgrade")
 		}
-		image, ok := st.ImportedImages[input.ImportedImageID]
-		if !ok || image.ClientID != client {
-			return apiError("NOT_FOUND", "Imported image not found")
+		target, err = s.resolveTemplate(client, input.TemplateID, input.RevisionID, false)
+		if err != nil {
+			return err
 		}
-		if image.ImportedImage.Deleting {
-			return apiError("CONFLICT", "Imported image is being deleted")
+		profile := target.Profile
+		if !profile.PersistentHome || profile.NodeName != original.Profile.NodeName || profile.Namespace != original.Profile.Namespace ||
+			profile.Guest.Workspace != original.Profile.Guest.Workspace || profile.Guest.Agent != original.Profile.Guest.Agent ||
+			!reflect.DeepEqual(profile.Guest.Debug, original.Profile.Guest.Debug) ||
+			profile.SharedReadOnlyHostPath != original.Profile.SharedReadOnlyHostPath ||
+			profile.DebugReadOnlyHostPath != original.Profile.DebugReadOnlyHostPath || profile.DebugReadWriteHostPath != original.Profile.DebugReadWriteHostPath {
+			return apiError("CONFLICT", "Upgrade must retain the disk, node, identities and mounts")
+		}
+		_, ok := s.providers[profile.Provider].(boxprovider.HomeUpgradeProvider)
+		if !ok {
+			return boxprovider.ErrUnsupported
 		}
 		// Hold the existing Box operation lock while resolving and caching the target.
 		next = original
-		next.UpgradeImageID = input.ImportedImageID
+		next.UpgradeImageID = ""
+		next.UpgradeTemplateID = target.RevisionID
 		next.Box.OperationID, next.Box.Phase = op.ID, "upgrading"
 		next.Box.Error = nil
 		next.Box.Version++
@@ -69,25 +81,7 @@ func (s *Service) upgradeBox(w http.ResponseWriter, r *http.Request, id string) 
 	}
 	if fresh {
 		s.launchWithCommitContext(r.Context(), op, func(ctx context.Context) (map[string]string, error) {
-			profile, err := s.profile(client, original.Box.ProfileID)
-			if err != nil {
-				return nil, err
-			}
-			profile, err = s.importedProfile(client, input.ImportedImageID, profile)
-			if err != nil {
-				return nil, err
-			}
-			if !profile.PersistentHome || profile.NodeName != original.Profile.NodeName || profile.Namespace != original.Profile.Namespace ||
-				profile.Guest.Workspace != original.Profile.Guest.Workspace || profile.Guest.Agent != original.Profile.Guest.Agent ||
-				!reflect.DeepEqual(profile.Guest.Debug, original.Profile.Guest.Debug) ||
-				profile.SharedReadOnlyHostPath != original.Profile.SharedReadOnlyHostPath ||
-				profile.DebugReadOnlyHostPath != original.Profile.DebugReadOnlyHostPath || profile.DebugReadWriteHostPath != original.Profile.DebugReadWriteHostPath {
-				return nil, apiError("CONFLICT", "Upgrade must retain the disk, node, identities and mounts")
-			}
-			_, ok := s.providers[profile.Provider].(boxprovider.HomeUpgradeProvider)
-			if !ok {
-				return nil, boxprovider.ErrUnsupported
-			}
+			profile := target.Profile
 			if err := s.cacheImportedImage(ctx, profile.Image); err != nil {
 				return nil, err
 			}
@@ -96,15 +90,18 @@ func (s *Service) upgradeBox(w http.ResponseWriter, r *http.Request, id string) 
 					return nil, err
 				}
 			}
-			profile.CPU, profile.MemoryMiB = original.Profile.CPU, original.Profile.MemoryMiB
+			// The template owns resources as well as the image; never override its captured configuration.
 			next.Profile = profile
-			next.Box.Image, next.Box.ImageID, next.Box.ImportedImageID = profile.Image, profile.Image, input.ImportedImageID
+			next.Box.Image, next.Box.ImageID, next.Box.ImportedImageID = profile.Image, profile.Image, ""
+			next.Box.ProfileID = profile.ID
+			next.Box.TemplateID, next.Box.RevisionID = target.Template.ID, target.RevisionID
+			next.Box.TemplateName, next.Box.TemplateVersion = target.Template.Name, target.Template.Version
 			next.Box.Capabilities = profileCapabilities(profile)
 			next.Staged, next.RestoreComplete = true, true
 			next.RestoreArchiveID = ""
 			// Persist intent before changing the CR. Observation replays the same
 			// nonce after a lost response or API restart, never activates the old Pod.
-			next.Upgrade = &upgradeIntent{Nonce: op.ID, PreviousImportedImageID: original.Box.ImportedImageID}
+			next.Upgrade = &upgradeIntent{Nonce: op.ID, PreviousTemplateID: original.Box.TemplateID, PreviousImportedImageID: original.Box.ImportedImageID}
 			if err := s.store.Update(func(st *State) error { st.Boxes[id] = next; return nil }); err != nil {
 				return nil, err
 			}
@@ -115,7 +112,7 @@ func (s *Service) upgradeBox(w http.ResponseWriter, r *http.Request, id string) 
 			if _, err := s.waitState(ctx, id, "staged", true); err != nil {
 				return nil, err
 			}
-			return map[string]string{"boxId": id, "image": profile.Image, "importedImageId": input.ImportedImageID}, nil
+			return map[string]string{"boxId": id, "image": profile.Image, "templateId": target.Template.ID, "revisionId": target.RevisionID}, nil
 		}, nil)
 	}
 	writeJSON(w, http.StatusAccepted, op)

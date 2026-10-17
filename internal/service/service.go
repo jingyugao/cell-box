@@ -2,6 +2,7 @@ package service
 
 import (
 	"cellbox.local/cellbox/internal/boxprovider"
+	"cellbox.local/cellbox/internal/catalog"
 	"cellbox.local/cellbox/internal/guestapi"
 	"cellbox.local/cellbox/internal/inventory"
 	"cellbox.local/cellbox/internal/objectstorage"
@@ -16,33 +17,37 @@ import (
 	"io"
 	"net/http"
 	"path"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	"cellbox.local/cellbox/internal/image"
 
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
 type Service struct {
-	objects       objectstorage.Objects
-	config        Config
-	store         *Store
-	providers     map[string]boxprovider.Provider
-	http          *http.Client
-	toolHTTP      *http.Client
-	ctx           context.Context
-	cancel        context.CancelFunc
-	wg            sync.WaitGroup
-	mu            sync.Mutex
-	warmDefaultMu sync.Mutex
-	admissions    keyedLocks
-	observerMu    sync.Mutex
-	observers     map[string]bool
-	runtimeFeeds  map[string]*runtimeFeed
-	gcMu          sync.Mutex
-	streams       map[string]activeStream
+	objects         objectstorage.Objects
+	config          Config
+	store           *Store
+	catalog         *catalog.Manager
+	providers       map[string]boxprovider.Provider
+	http            *http.Client
+	toolHTTP        *http.Client
+	ctx             context.Context
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
+	mu              sync.Mutex
+	admissions      keyedLocks
+	observerMu      sync.Mutex
+	observers       map[string]bool
+	runtimeFeeds    map[string]*runtimeFeed
+	templateRuntime templateRuntimeCache
+	gcMu            sync.Mutex
+	streams         map[string]activeStream
 }
 type activeStream struct {
 	boxID  string
@@ -62,6 +67,10 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 		}
 	}
 	ctx, cancel := context.WithCancel(parent)
+	if config.ObjectStorage != (objectstorage.Config{}) && config.CatalogDir == "" && config.LocalMetadataDir == "" {
+		cancel()
+		return nil, errors.New("object storage deployments require catalogDir or localMetadataDir for persistent template metadata")
+	}
 	if config.LocalMetadataDir != "" && config.ObjectStorage == (objectstorage.Config{}) {
 		cancel()
 		return nil, errors.New("local metadata requires object storage for checkpoint and archive content")
@@ -110,8 +119,54 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 		http:     &http.Client{Transport: &http.Transport{Proxy: nil, ResponseHeaderTimeout: 35 * time.Second}, CheckRedirect: noRedirect},
 		toolHTTP: &http.Client{Transport: &http.Transport{Proxy: nil, ResponseHeaderTimeout: 5*time.Minute + 5*time.Second}, CheckRedirect: noRedirect},
 		ctx:      ctx, cancel: cancel, streams: map[string]activeStream{}}
+	var imageBuild image.BuildKitOptions
+	if config.ImageBuild != (ImageBuildConfig{}) {
+		imageBuild = image.BuildKitOptions{
+			Address: config.ImageBuild.Address, Binary: config.ImageBuild.BuildctlBinary,
+			Repository: config.ImageBuild.Repository, GuestBinary: config.ImageBuild.GuestBinary,
+		}
+	}
+	catalogDir := config.CatalogDir
+	if catalogDir == "" {
+		baseDir := config.LocalMetadataDir
+		if baseDir == "" {
+			baseDir = config.DataDir
+		}
+		catalogDir = filepath.Join(baseDir, "catalog")
+	}
+	s.catalog, err = catalog.Open(catalog.Config{
+		Dir:        catalogDir,
+		ImageBuild: imageBuild, InsecureRegistry: config.ImageBuild.InsecureRegistry,
+		Builder: config.CatalogBuilder,
+		ResolveProfile: func(client, id string) (catalog.Profile, error) {
+			p, profileErr := s.profile(client, id)
+			if profileErr != nil {
+				var api *APIError
+				if errors.As(profileErr, &api) {
+					return catalog.Profile{}, &catalog.Error{Code: api.Code, Message: api.Message}
+				}
+				return catalog.Profile{}, profileErr
+			}
+			snapshot, marshalErr := json.Marshal(p)
+			return catalog.Profile{ID: p.ID, CPU: p.CPU, MemoryMiB: p.MemoryMiB, Snapshot: snapshot}, marshalErr
+		},
+		FinalizeProfile: func(base catalog.Profile, result catalog.BuildResult) (json.RawMessage, error) {
+			var p Profile
+			if err := json.Unmarshal(base.Snapshot, &p); err != nil {
+				return nil, err
+			}
+			p = applyImageConfiguration(p, result.Image, result.Command, result.WorkingDir, result.Env)
+			return json.Marshal(p)
+		},
+	})
+	if err != nil {
+		cancel()
+		store.Close()
+		return nil, err
+	}
 	if err = s.cleanupStartupTemps(); err != nil {
 		cancel()
+		s.catalog.Close()
 		store.Close()
 		return nil, err
 	}
@@ -159,6 +214,7 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 					if b.Box.OperationID == id {
 						b.Box.OperationID = ""
 						b.UpgradeImageID = ""
+						b.UpgradeTemplateID = ""
 						b.Box.Version++
 						st.Boxes[bid] = b
 					}
@@ -175,6 +231,7 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 	})
 	if err != nil {
 		cancel()
+		s.catalog.Close()
 		store.Close()
 		return nil, err
 	}
@@ -188,6 +245,7 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 		})
 		if err != nil {
 			cancel()
+			s.catalog.Close()
 			store.Close()
 			return nil, err
 		}
@@ -219,6 +277,7 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 	}
 	if err := s.pruneMetadata(time.Now().UTC()); err != nil {
 		cancel()
+		s.catalog.Close()
 		store.Close()
 		return nil, err
 	}
@@ -226,6 +285,14 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 	s.recoverResumeOperations()
 	s.recoverUpgradeOperations()
 	s.startRuntimeObservers()
+	for _, profile := range config.Profiles {
+		if profile.Provider == "resumable-k8s-pod" {
+			if _, ok := providers[profile.Provider].(boxprovider.WarmTemplateProvider); ok {
+				s.startTemplateRuntime()
+				break
+			}
+		}
+	}
 	return s, nil
 }
 func (s *Service) Done() <-chan struct{} { return s.ctx.Done() }
@@ -239,7 +306,7 @@ func (s *Service) Close() error {
 	s.mu.Unlock()
 	s.wg.Wait()
 	s.http.CloseIdleConnections()
-	return s.store.Close()
+	return errors.Join(s.catalog.Close(), s.store.Close())
 }
 func (s *Service) hasOwnedUpgradeIntent(op Operation) bool {
 	if op.Kind != "upgrade" {
@@ -472,6 +539,7 @@ func (s *Service) launchWithCompletion(request context.Context, op Operation, wo
 				if !preserveUpgradeIntent {
 					b.Box.OperationID = ""
 					b.UpgradeImageID = ""
+					b.UpgradeTemplateID = ""
 					if op.Kind == "upgrade" && err == nil {
 						b.Upgrade = nil
 					}
@@ -929,39 +997,22 @@ func (s *Service) provision(ctx context.Context, id string) (Box, error) {
 }
 
 type createRequest struct {
-	ProfileID       string `json:"profileId"`
-	OwnerKey        string `json:"ownerKey"`
-	ImportedImageID string `json:"importedImageId,omitempty"`
-	Staged          bool   `json:"staged,omitempty"`
+	TemplateID string `json:"templateId,omitempty"`
+	RevisionID string `json:"revisionId,omitempty"`
+	OwnerKey   string `json:"ownerKey"`
+	Staged     bool   `json:"staged,omitempty"`
 }
 
 func (s *Service) create(client, key string, input createRequest, archiveID string, acceptImageChange bool) (Operation, error) {
 	if input.OwnerKey == "" || len(input.OwnerKey) > 256 {
 		return Operation{}, apiError("INVALID_REQUEST", "ownerKey must contain 1..256 bytes")
 	}
-	profile, err := s.profile(client, input.ProfileID)
-	if err != nil {
-		return Operation{}, err
+	if (input.TemplateID == "") == (input.RevisionID == "") {
+		return Operation{}, apiError("INVALID_REQUEST", "Specify exactly one of templateId or revisionId")
 	}
-	if archiveID != "" && input.ImportedImageID == "" && !acceptImageChange {
-		err := s.store.View(func(st State) error {
-			a, ok := st.Archives[archiveID]
-			if !ok || a.ClientID != client || a.Deleting {
-				return apiError("NOT_FOUND", "Archive not found")
-			}
-			input.ImportedImageID = a.Archive.ImportedImageID
-			return nil
-		})
-		if err != nil {
-			return Operation{}, err
-		}
-	}
-	if input.ImportedImageID != "" {
-		profile, err = s.importedProfile(client, input.ImportedImageID, profile)
-		if err != nil {
-			return Operation{}, err
-		}
-	}
+	var profile Profile
+	var template Template
+	var revisionID string
 	kind := "create"
 	if archiveID != "" {
 		kind = "restore"
@@ -972,15 +1023,12 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 		ArchiveID         string
 		AcceptImageChange bool
 	}{input, archiveID, acceptImageChange}, func(st *State, op *Operation) error {
-		if input.ImportedImageID != "" {
-			record, ok := st.ImportedImages[input.ImportedImageID]
-			if !ok || record.ClientID != client {
-				return apiError("NOT_FOUND", "Imported image not found")
-			}
-			if record.ImportedImage.Deleting {
-				return apiError("CONFLICT", "Imported image is being deleted")
-			}
+		tmpl, err := s.resolveTemplate(client, input.TemplateID, input.RevisionID, archiveID != "")
+		if err != nil {
+			return err
 		}
+		profile, template = tmpl.Profile, tmpl.Template
+		revisionID = tmpl.RevisionID
 		if archiveID != "" {
 			a, ok := st.Archives[archiveID]
 			if !ok || a.ClientID != client || a.Deleting {
@@ -1003,9 +1051,9 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 		if archiveID != "" {
 			state = "restoring"
 		}
-		st.Boxes[id] = boxRecord{Box: Box{ID: id, OwnerKey: input.OwnerKey, ProfileID: profile.ID, Phase: state, Version: 1, Image: profile.Image, Workspace: profile.Guest.Workspace, Capabilities: profileCapabilities(profile), OperationID: op.ID, CreatedAt: time.Now().UTC()}, ClientID: client, Profile: profile, Staged: archiveID != "" || input.Staged, RestoreComplete: input.Staged && archiveID == "", RestoreArchiveID: archiveID, AcceptImageChange: acceptImageChange}
+		st.Boxes[id] = boxRecord{Box: Box{ID: id, TemplateID: template.ID, RevisionID: revisionID, TemplateName: template.Name, TemplateVersion: template.Version, OwnerKey: input.OwnerKey, ProfileID: profile.ID, Phase: state, Version: 1, Image: profile.Image, Workspace: profile.Guest.Workspace, Capabilities: profileCapabilities(profile), OperationID: op.ID, CreatedAt: time.Now().UTC()}, ClientID: client, Profile: profile, Staged: archiveID != "" || input.Staged, RestoreComplete: input.Staged && archiveID == "", RestoreArchiveID: archiveID, AcceptImageChange: acceptImageChange}
 		record := st.Boxes[id]
-		record.Box.ImportedImageID = input.ImportedImageID
+		record.Box.ImportedImageID = template.ImportedImageID
 		st.Boxes[id] = record
 		return nil
 	})
@@ -1032,7 +1080,7 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 				return nil, err
 			}
 		}
-		return map[string]string{"boxId": box.ID}, nil
+		return map[string]string{"boxId": box.ID, "templateId": template.ID, "revisionId": revisionID}, nil
 	})
 	return op, nil
 }

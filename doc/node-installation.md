@@ -190,7 +190,7 @@ kubectl --context <context> wait --for=condition=Ready node/<node> --timeout=180
 kubectl --context <context> uncordon <node>
 ```
 
-按 [README](../README.md#kubernetes-安装与升级) 部署 Helm。K3s values 需设置 `controller.criDirectory: /run/k3s/containerd` 和 `controller.criSocket: /run/k3s/containerd/containerd.sock`。只让已完成节点准备的节点匹配 Controller 的 nodeSelector，并让 profile 的 nodeName 指向已准备节点。
+按[部署与升级指南](deployment.md)部署 Helm。K3s values 需设置 `controller.criDirectory: /run/k3s/containerd` 和 `controller.criSocket: /run/k3s/containerd/containerd.sock`。只让已完成节点准备的节点匹配 Controller 的 nodeSelector，并让 profile 的 nodeName 指向已准备节点。
 
 ```bash
 kubectl --context <context> get runtimeclass runsc-recoverable -o yaml

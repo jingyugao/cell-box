@@ -249,31 +249,32 @@ func TestPurgeRemovesDeletedBoxTombstoneLeftByRetention(t *testing.T) {
 	}
 }
 
-func TestRecordHeadMigratesOldSchemaBeforeUsingRetirement(t *testing.T) {
+func TestRecordHeadUsesCurrentSchemaBeforeUsingRetirement(t *testing.T) {
 	objects := &ledgerObjects{}
 	store := openRecords(t, objects)
 	head, err := decodeRecordHead(objects.data[stateObjectKey])
 	if err != nil {
 		t.Fatal(err)
 	}
-	head.Schema = stateSchema
-	data, err := json.Marshal(head)
+	if head.Schema != stateSchema {
+		t.Fatalf("record head schema = %d, want %d", head.Schema, stateSchema)
+	}
+	legacyHead := head
+	legacyHead.Schema = stateSchema - 1
+	legacyData, err := json.Marshal(legacyHead)
 	if err != nil {
 		t.Fatal(err)
 	}
-	objects.data[stateObjectKey] = data
-	store = openRecords(t, objects)
-	head, err = decodeRecordHead(objects.data[stateObjectKey])
-	if err != nil || head.Schema != recordHeadSchema {
-		t.Fatal("old record head was not migrated")
+	if _, err := decodeRecordHead(legacyData); err == nil {
+		t.Fatal("pre-catalog record head schema was accepted")
 	}
 	seedPurge(t, store)
 	if err = purgeService(store, objects).purgeBox(context.Background(), "owner", "box"); err != nil {
 		t.Fatal(err)
 	}
 	head, err = decodeRecordHead(objects.data[stateObjectKey])
-	if err != nil || len(head.Retired) == 0 || head.Schema == stateSchema {
-		t.Fatal("retirement can be silently accepted by old binaries")
+	if err != nil || len(head.Retired) == 0 || head.Schema != stateSchema {
+		t.Fatal("retirement changed or lost the current metadata schema fence")
 	}
 }
 
