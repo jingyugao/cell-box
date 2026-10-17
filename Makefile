@@ -44,15 +44,17 @@ build:
 
 test:
 	go test -race ./...
+	cd sdk/go && go test -race ./...
 
 vet:
 	go vet ./...
+	cd sdk/go && go vet ./...
 
 check: test vet
 	@for script in test/scripts/*.sh; do bash -n "$$script"; done
 
 fmt:
-	gofmt -w api cmd internal pkg test
+	gofmt -w api cmd internal sdk/go test
 
 package:
 	@set -u
