@@ -1,6 +1,6 @@
 # REST 快速开始
 
-本指南演示创建模板族、构建 revision、将其设为 stable、创建沙箱并执行命令。Go 客户端请参阅 [SDK 使用指南](go-sdk.md)。完整请求和响应结构见 [`api/openapi.yaml`](../../api/openapi.yaml)。
+本指南演示创建模板族、构建 revision、将其设为 stable、创建沙箱并执行命令，并说明预热状态查询。Go 客户端请参阅 [SDK 使用指南](go-sdk.md)。完整请求和响应结构见 [`api/openapi.yaml`](../../api/openapi.yaml)。
 
 ## 连接服务
 
@@ -26,7 +26,7 @@ curl --fail-with-body -sS -X POST "$CELLBOX_API_URL/v1/templates" \
   -d '{"name":"coding-agent","description":"Agent workspace","defaultWarmSlots":0}'
 ```
 
-将响应中的 `id` 保存为 `TEMPLATE_ID`。模板族包含可变元数据、默认预热目标，以及可选的 stable revision 指针。本期 `defaultWarmSlots` 只保存配置，不会分配预热池。Catalog 元数据保存在 API 服务配置的本地 SQLite 目录中。
+将响应中的 `id` 保存为 `TEMPLATE_ID`。模板族包含可变元数据、默认预热目标，以及可选的 stable revision 指针。创建 template 时尚无可运行镜像，因此不会创建预热池；`defaultWarmSlots` 是之后创建 revision 时使用的默认目标。Catalog 元数据保存在 API 服务配置的本地 SQLite 目录中。
 
 ## 构建 revision
 
@@ -66,9 +66,29 @@ curl --fail-with-body -sS "$CELLBOX_API_URL/v1/operations/$BUILD_ID?waitMs=10000
 export REVISION_ID='<成功 operation 的 result.revisionId>'
 ```
 
-失败时检查 operation 的 `error`，并从 `/v1/operations/$BUILD_ID/logs?offset=0&limit=65536` 分块读取日志；后续 offset 使用响应中的 `nextOffset`。日志以有大小上限的 JSON 块返回，不支持流式跟踪。
+失败时检查 operation 的 `error`，并从 `/v1/operations/$BUILD_ID/logs?offset=0&limit=65536` 分块读取日志；后续 offset 使用响应中的 `nextOffset`。日志以有大小上限的 JSON 块返回，不支持流式跟踪。构建成功不会自动切换 stable revision。构建成功且 active 的 revision 若 `warmSlots > 0`，后台会发布预热需求并重试失败发布；预热准备和构建是两个独立状态。`warmSlots` 为 0 或 revision 退休时，后台会撤回需求。
 
 模板、revision、构建 operation 和日志接口使用本地 catalog，不查询 Kubernetes。解析或构建镜像时会访问镜像仓库和 BuildKit。选择 profile 后，系统会把当时配置快照保存到 revision。构建成功不会自动切换 stable revision。
+
+切换 stable 只影响之后新建的沙箱，不会撤回旧 revision 的预热需求。兼容的 revision 可以共用预热池，且每个节点有共享容量上限（Controller 默认最多 2 个，配置上限 32 个）。撤回需求只清理空闲预热 Pod；已被 sandbox 领用的 Pod 不会因此删除。当前预热 Pod 服务于 resumable sandbox 的恢复路径，不能假定它会加速首次冷创建。
+
+## 查询预热与模板运行状态
+
+这些接口返回服务端后台采集的快照，不会在 HTTP 请求中直接查询 Kubernetes。同步器约每 2 秒发布配置并读取 Controller 状态，采集时间约 15 秒后会标记为过期。查看某个 revision 的预热同步和池状态：
+
+```sh
+curl --fail-with-body -sS "$CELLBOX_API_URL/v1/template-revisions/$REVISION_ID/warm-pool"
+```
+
+响应包括 `desiredSlots`、`syncStatus`、`generation` / `observedGeneration`、`observedAt`、`stale` 和可空的 `pool`。当 `stale` 为 true 时不要把计数当成当前状态；`pool: null` 表示当前没有关联到预热池。池中的 `requestedSlots`、`allocatedSlots`、`readySlots`、`preparingSlots`、`failedSlots` 用于区分需求和实际准备进度。
+
+查询模板全部 revision 的沙箱数量、生命周期阶段和预热状态：
+
+```sh
+curl --fail-with-body -sS "$CELLBOX_API_URL/v1/templates/$TEMPLATE_ID/runtime"
+```
+
+`sandboxCount: null` 表示尚无可靠观察结果，不是 0。`resources` 是该池已分配空闲 Pod 的 requests/limits 配置值，不是实时 CPU 或内存用量；共享池可能映射多个 revision，汇总时按 `poolId` 去重，避免重复计算资源。
 
 ## 设置 stable revision
 
@@ -124,6 +144,6 @@ curl --fail-with-body -sS -X POST "$CELLBOX_API_URL/v1/boxes/$BOX_ID:destroy" \
 
 - 模板管理只操作本地 catalog。沙箱创建、检查、命令、文件和生命周期操作使用所选 runtime provider；使用 Kubernetes provider 时可能会访问 Kubernetes。
 - 模板 stable revision 只影响之后新建的沙箱。已有沙箱继续使用创建时绑定的不可变 revision。
-- `defaultWarmSlots` 和 revision `warmSlots` 只保存配置；本期没有预热池发布、库存或资源统计接口。
+- 构建成功后，active 状态且 `warmSlots > 0` 会自动进入后台预热池同步；stable 指针切换不改变旧 revision 的需求。状态接口返回后台快照，`stale` / `observedAt` 用于判断新鲜度。
 - 只有没有 revision 且没有待处理构建的空模板族才能删除。本期不提供 revision 删除接口；将 revision 标记为 retired 可阻止新选择，同时保留历史记录。
 - 客户端断开连接或取消本地等待不会取消已受理的服务端 operation。请用 operation ID 查询状态。构建需要显式调用 `POST /v1/operations/{id}:cancel` 请求取消。

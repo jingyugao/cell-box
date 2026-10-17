@@ -136,6 +136,56 @@ type TemplateRevision struct {
 	UpdatedAt         time.Time `json:"updatedAt"`
 }
 
+// WarmPoolResources reports configured requests and limits for allocated idle
+// warm Pods. These values are not measured CPU or memory usage.
+type WarmPoolResources struct {
+	CPURequestMilli    int64 `json:"cpuRequestMilli"`
+	CPULimitMilli      int64 `json:"cpuLimitMilli"`
+	MemoryRequestBytes int64 `json:"memoryRequestBytes"`
+	MemoryLimitBytes   int64 `json:"memoryLimitBytes"`
+}
+
+// WarmPoolStatus is an observed snapshot. Nil Pool means no pool is currently
+// associated with the revision; stale snapshots must not be treated as current.
+type WarmPoolStatus struct {
+	PoolID         string            `json:"poolId"`
+	RequestedSlots int               `json:"requestedSlots"`
+	AllocatedSlots int               `json:"allocatedSlots"`
+	ReadySlots     int               `json:"readySlots"`
+	PreparingSlots int               `json:"preparingSlots"`
+	FailedSlots    int               `json:"failedSlots"`
+	Resources      WarmPoolResources `json:"resources"`
+	ObservedAt     time.Time         `json:"observedAt"`
+	Stale          bool              `json:"stale"`
+}
+
+type RevisionWarmStatus struct {
+	RevisionID         string          `json:"revisionId"`
+	Generation         uint64          `json:"generation"`
+	ObservedGeneration uint64          `json:"observedGeneration"`
+	DesiredSlots       int             `json:"desiredSlots"`
+	SyncStatus         string          `json:"syncStatus"`
+	Error              string          `json:"error,omitempty"`
+	ObservedAt         *time.Time      `json:"observedAt,omitempty"`
+	Stale              bool            `json:"stale"`
+	Pool               *WarmPoolStatus `json:"pool"`
+}
+
+type RevisionRuntimeStatus struct {
+	RevisionID   string             `json:"revisionId"`
+	SandboxCount *int               `json:"sandboxCount"`
+	Phases       map[string]int     `json:"phases"`
+	ObservedAt   *time.Time         `json:"observedAt,omitempty"`
+	Stale        bool               `json:"stale"`
+	Error        string             `json:"error,omitempty"`
+	WarmPool     RevisionWarmStatus `json:"warmPool"`
+}
+
+type TemplateRuntimeStatus struct {
+	TemplateID string                  `json:"templateId"`
+	Revisions  []RevisionRuntimeStatus `json:"revisions"`
+}
+
 type UpdateRevisionOptions struct {
 	Description        *string `json:"description,omitempty"`
 	Status             *string `json:"status,omitempty"`

@@ -190,10 +190,10 @@ if err != nil { return err }
 | 能力 | SDK 方法 | 说明 |
 | --- | --- | --- |
 | 模板族 | `CreateTemplate`、`ListTemplates`、`GetTemplate`、`UpdateTemplate`、`DeleteTemplate` | 删除仅适用于空模板族；更新使用 generation 防止覆盖并发修改 |
-| Revision | `BuildRevision`、`WaitBuildRevision`、`ListTemplateRevisions`、`GetTemplateRevision`、`UpdateTemplateRevision` | 构建成功后生成不可变 revision；可改描述、状态和预热配置 |
+| Revision | `BuildRevision`、`WaitBuildRevision`、`ListTemplateRevisions`、`GetTemplateRevision`、`UpdateTemplateRevision`、`GetRevisionWarmPool` | 构建成功后生成不可变 revision；可改描述、状态和预热配置 |
 | 构建任务 | `GetOperation`、`WaitOperation`、`ListOperations`、`GetOperationLogs`、`CancelOperation` | 查看/等待/取消构建，按 offset 读取日志；不会自动重放构建命令 |
 | Profile / 执行记录 | `ListProfiles`、`GetExecution` | Profile 是服务端配置；执行记录用于读取已完成命令的结果 |
-| 沙箱 | `Create`、`CreateAsync`、`Connect`、`GetSandbox`、`ListSandboxes`、`Sandbox.Destroy` | 清单和状态查询属于运行时接口，使用 Kubernetes profile 时可能访问集群 |
+| 沙箱 | `Create`、`CreateAsync`、`Connect`、`GetSandbox`、`ListSandboxes`、`GetTemplateRuntime`、`Sandbox.Destroy` | 清单和运行时快照属于运行时接口；服务端后台观察 Kubernetes，查询接口读取快照 |
 | 命令 | `Commands.Run`、`RunArgv`、`Start`、`StartArgv`、`Command.Wait` | 有时限的单次命令，不提供 PTY 或流式输出 |
 | 文件 | `Files.Open`、`Read`、`Write`、`List` | workspace 相对路径；不自动恢复沙箱 |
 | 生命周期 | `Suspend`、`Resume`、`Freeze`、`Unfreeze`、`EnsureRunning`、`Activate` | 依 profile 能力使用；`Resume`、`EnsureRunning`、`Activate` 返回新 handle，需接收返回值 |
@@ -269,3 +269,30 @@ go -C sdk/go run ./examples/lifecycle
 | `CELLBOX_CLIENT_ID`、`CELLBOX_CLIENT_TOKEN` | 可选 | 数据命名空间；仅有前置认证 Gateway 时设置 token |
 
 默认构建命令会安装示例工具 `template-tool`；如果自定义了 `CELLBOX_BUILD_COMMAND`，示例默认只打印提示并查看工作目录，不会假设自定义镜像里有该工具。可用 `CELLBOX_VERIFY_COMMAND` 指定实际验证命令。模板示例和生命周期示例创建的 sandbox 都会尝试自动销毁；模板和构建出的 revision 会保留。生命周期示例设置 `CELLBOX_TEMPLATE_ID` 或 `CELLBOX_REVISION_ID` 其中之一即可。其他示例代码位于 [`sdk/go/examples`](../../sdk/go/examples)。HTTP 契约和各 provider 的能力字段见 [OpenAPI 文档](../../api/openapi.yaml)。SDK 当前不提供 PTY/流式交互，也没有封装所有归档、路由或内部服务接口。
+
+## 预热池和运行时状态
+
+Revision 构建成功且状态为 `active`、`warmSlots > 0` 时，服务端后台会发布预热需求；`warmSlots` 为 `0` 或 revision 退休时会撤回需求。创建 template 只保存默认值，不会单独创建预热池；构建 revision 时 `warmSlots == nil` 才继承模板默认值。stable 指针切换不会改变旧 revision 的预热需求。后台发布失败会继续重试。
+
+预热 Pod 按兼容的运行配置共享池，节点总容量受 Controller 限额约束（默认最多 2 个，配置上限 32 个）；因此各 revision 的 `requestedSlots` 可能因共享和预算而小于各自需求，不能把每个 revision 的资源字段相加当作节点池总量。`resources` 是当前分配的空闲预热 Pod 的 Kubernetes requests/limits 配置，不是实际 CPU/内存使用量。预热 Pod 用于 resumable sandbox 的恢复路径，不能据此承诺首次冷创建会更快。撤回需求只清理空闲预热 Pod，不会杀掉已经领用的 sandbox。
+
+```go
+runtime, err := client.GetTemplateRuntime(ctx, templateID)
+if err != nil { return err }
+for _, revision := range runtime.Revisions {
+	if revision.Stale || revision.ObservedAt == nil {
+		log.Printf("revision %s runtime status is not current", revision.RevisionID)
+		continue // SandboxCount nil means unknown, not zero.
+	}
+	log.Printf("revision %s sandboxes=%d phases=%v", revision.RevisionID, *revision.SandboxCount, revision.Phases)
+	if revision.WarmPool.Pool != nil {
+		log.Printf("pool=%s ready=%d/%d stale=%t", revision.WarmPool.Pool.PoolID, revision.WarmPool.Pool.ReadySlots, revision.WarmPool.Pool.RequestedSlots, revision.WarmPool.Pool.Stale)
+	}
+}
+
+warm, err := client.GetRevisionWarmPool(ctx, revisionID)
+if err != nil { return err }
+log.Printf("sync=%s desired=%d applied-generation=%d current=%t", warm.SyncStatus, warm.DesiredSlots, warm.ObservedGeneration, !warm.Stale)
+```
+
+服务端约每 2 秒在后台同步需求并读取 Controller 快照；查询不会在请求内调用 Kubernetes。`observedAt` 是快照采集时间，超过约 15 秒或未完成首次同步时 `stale` 为 true。同步失败时检查 `error` / `syncStatus`；`sandboxCount == nil` 表示未知。预热池不存在时 `pool` 为 null。

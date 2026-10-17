@@ -95,6 +95,65 @@ components:
         updatedAt: {type: string, format: date-time}
       required: [id, templateId, templateName, userVersion, revision, version, profileId, baseImage, resolvedBaseImage, image, platform, cpu, memoryMiB, warmSlots, status, generation, buildOperationId, createdAt, updatedAt]
       type: object
+    WarmPoolResources:
+      type: object
+      description: Configured Kubernetes requests and limits for allocated idle warm Pods, not measured usage.
+      properties:
+        cpuRequestMilli: {type: integer, format: int64}
+        cpuLimitMilli: {type: integer, format: int64}
+        memoryRequestBytes: {type: integer, format: int64}
+        memoryLimitBytes: {type: integer, format: int64}
+      required: [cpuRequestMilli, cpuLimitMilli, memoryRequestBytes, memoryLimitBytes]
+    WarmPoolStatus:
+      type: object
+      properties:
+        poolId: {type: string}
+        requestedSlots: {type: integer}
+        allocatedSlots: {type: integer}
+        readySlots: {type: integer}
+        preparingSlots: {type: integer}
+        failedSlots: {type: integer}
+        resources: {$ref: '#/components/schemas/WarmPoolResources'}
+        observedAt: {type: string, format: date-time}
+        stale: {type: boolean}
+      required: [poolId, requestedSlots, allocatedSlots, readySlots, preparingSlots, failedSlots, resources, observedAt, stale]
+    RevisionWarmStatus:
+      type: object
+      properties:
+        revisionId: {type: string}
+        generation: {type: integer}
+        observedGeneration: {type: integer}
+        desiredSlots: {type: integer}
+        syncStatus: {type: string, enum: [pending, applied, error, unsupported]}
+        error: {type: string}
+        observedAt: {type: string, format: date-time}
+        stale: {type: boolean}
+        pool:
+          allOf:
+          - {$ref: '#/components/schemas/WarmPoolStatus'}
+          nullable: true
+      required: [revisionId, generation, observedGeneration, desiredSlots, syncStatus, stale, pool]
+    RevisionRuntimeStatus:
+      type: object
+      properties:
+        revisionId: {type: string}
+        sandboxCount: {type: integer, nullable: true}
+        phases:
+          type: object
+          additionalProperties: {type: integer}
+        observedAt: {type: string, format: date-time}
+        stale: {type: boolean}
+        error: {type: string}
+        warmPool: {$ref: '#/components/schemas/RevisionWarmStatus'}
+      required: [revisionId, sandboxCount, phases, stale, warmPool]
+    TemplateRuntimeStatus:
+      type: object
+      properties:
+        templateId: {type: string}
+        revisions:
+          type: array
+          items: {$ref: '#/components/schemas/RevisionRuntimeStatus'}
+      required: [templateId, revisions]
     Archive:
       additionalProperties: false
       properties:
@@ -895,6 +954,21 @@ paths:
           type: array
         style: form
         explode: true
+      - in: query
+        name: templateId
+        schema: {type: string}
+      - in: query
+        name: revisionId
+        schema: {type: string}
+      - in: query
+        name: phase
+        schema: {type: string}
+      - in: query
+        name: limit
+        schema: {type: integer, minimum: 1, maximum: 500}
+      - in: query
+        name: offset
+        schema: {type: integer, minimum: 0}
       responses:
         "200":
           content:
@@ -2044,7 +2118,7 @@ paths:
     patch:
       operationId: updateTemplateRevision
       summary: Update revision description, status, or persisted warm target
-      description: warmSlots changes desired metadata only in phase one; they do not publish or inspect a Kubernetes warm pool. expectedGeneration is required.
+      description: warmSlots changes the desired warm-pool target; background synchronization publishes changes and retries failures. expectedGeneration is required.
       requestBody:
         required: true
         content:
@@ -2064,6 +2138,52 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/TemplateRevision'}
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/template-revisions/{id}/warm-pool:
+    get:
+      operationId: getRevisionWarmPool
+      summary: Get cached warm-pool synchronization and inventory status
+      description: |
+        Returns a background-observed snapshot; this request does not call Kubernetes.
+        Active revisions with warmSlots greater than zero publish demand after a
+        successful build. Zero slots or retirement withdraws demand. Compatible
+        revisions can share a pool. Snapshot fields include observedAt and stale;
+        pool is null when no pool is currently associated. Resource values are
+        configured requests/limits, not measured usage. Do not sum resources across
+        revisions without deduplicating by poolId.
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+      responses:
+        "200":
+          description: Background warm-pool observation
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RevisionWarmStatus'}
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/templates/{id}/runtime:
+    get:
+      operationId: getTemplateRuntime
+      summary: Get cached sandbox usage and warm-pool status for template revisions
+      description: |
+        Returns last background observations and does not call Kubernetes in the
+        request. sandboxCount may be null when no reliable observation is available;
+        check stale and observedAt before using counts.
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+      responses:
+        "200":
+          description: Background runtime observations
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TemplateRuntimeStatus'}
         default:
           $ref: '#/components/responses/Error'
   /v1/routes:

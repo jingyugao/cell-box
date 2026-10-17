@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
 )
 
 // Sandbox is a handle pinned to the generation observed at Create/Connect.
@@ -76,9 +78,44 @@ func (c *Client) GetSandbox(ctx context.Context, id string) (*SandboxInfo, error
 
 // ListSandboxes returns current lifecycle snapshots in the client's namespace.
 // Unlike template catalog reads, this runtime endpoint may contact Kubernetes.
-func (c *Client) ListSandboxes(ctx context.Context) ([]SandboxInfo, error) {
+type SandboxListOptions struct {
+	TemplateID string
+	RevisionID string
+	Phase      string
+	Limit      int
+	Offset     int
+}
+
+func (c *Client) ListSandboxes(ctx context.Context, opts ...SandboxListOptions) ([]SandboxInfo, error) {
+	var option SandboxListOptions
+	if len(opts) > 0 {
+		option = opts[0]
+	}
+	if err := validateListOptions(len(opts), option.Limit, option.Offset); err != nil {
+		return nil, err
+	}
+	q := url.Values{}
+	if option.TemplateID != "" {
+		q.Set("templateId", option.TemplateID)
+	}
+	if option.RevisionID != "" {
+		q.Set("revisionId", option.RevisionID)
+	}
+	if option.Phase != "" {
+		q.Set("phase", option.Phase)
+	}
+	if option.Limit > 0 {
+		q.Set("limit", strconv.Itoa(option.Limit))
+	}
+	if option.Offset > 0 {
+		q.Set("offset", strconv.Itoa(option.Offset))
+	}
+	path := "/v1/boxes"
+	if encoded := q.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
 	var sandboxes []SandboxInfo
-	err := c.do(ctx, http.MethodGet, "/v1/boxes", "", nil, &sandboxes)
+	err := c.do(ctx, http.MethodGet, path, "", nil, &sandboxes)
 	return sandboxes, err
 }
 

@@ -30,23 +30,24 @@ import (
 )
 
 type Service struct {
-	objects      objectstorage.Objects
-	config       Config
-	store        *Store
-	catalog      *catalog.Manager
-	providers    map[string]boxprovider.Provider
-	http         *http.Client
-	toolHTTP     *http.Client
-	ctx          context.Context
-	cancel       context.CancelFunc
-	wg           sync.WaitGroup
-	mu           sync.Mutex
-	admissions   keyedLocks
-	observerMu   sync.Mutex
-	observers    map[string]bool
-	runtimeFeeds map[string]*runtimeFeed
-	gcMu         sync.Mutex
-	streams      map[string]activeStream
+	objects         objectstorage.Objects
+	config          Config
+	store           *Store
+	catalog         *catalog.Manager
+	providers       map[string]boxprovider.Provider
+	http            *http.Client
+	toolHTTP        *http.Client
+	ctx             context.Context
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
+	mu              sync.Mutex
+	admissions      keyedLocks
+	observerMu      sync.Mutex
+	observers       map[string]bool
+	runtimeFeeds    map[string]*runtimeFeed
+	templateRuntime templateRuntimeCache
+	gcMu            sync.Mutex
+	streams         map[string]activeStream
 }
 type activeStream struct {
 	boxID  string
@@ -284,6 +285,14 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 	s.recoverResumeOperations()
 	s.recoverUpgradeOperations()
 	s.startRuntimeObservers()
+	for _, profile := range config.Profiles {
+		if profile.Provider == "resumable-k8s-pod" {
+			if _, ok := providers[profile.Provider].(boxprovider.WarmTemplateProvider); ok {
+				s.startTemplateRuntime()
+				break
+			}
+		}
+	}
 	return s, nil
 }
 func (s *Service) Done() <-chan struct{} { return s.ctx.Done() }

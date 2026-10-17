@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	core "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -285,6 +286,125 @@ func TestWarmPoolPreparesTemplateWithoutAnyBoxAndSharesIdenticalSpecs(t *testing
 		if pod.Spec.Containers[0].Image != spec.Container.Image || pod.Spec.NodeSelector["kubernetes.io/hostname"] != spec.NodeName {
 			t.Fatalf("warm Pod does not match configured runtime Spec: %#v", pod.Spec)
 		}
+	}
+}
+
+func TestWarmPoolPublishesPerNodeSnapshotWithCapacityAndConfiguredResources(t *testing.T) {
+	ctx := context.Background()
+	r, f, w := fixture(t)
+	w.Spec.Container.Resources = core.ResourceRequirements{Requests: core.ResourceList{core.ResourceCPU: resource.MustParse("500m"), core.ResourceMemory: resource.MustParse("128Mi")}, Limits: core.ResourceList{core.ResourceCPU: resource.MustParse("1"), core.ResourceMemory: resource.MustParse("256Mi")}}
+	setWarmTemplate(t, r, w, "revision-one")
+	w.Status.SpecHash = fingerprint(w)
+	backend := &poolRuntime{fakeRuntime: f, deadlines: map[string]time.Time{}}
+	r.Runtime = backend
+	pool := &WarmPool{Reconciler: r, Namespace: w.Namespace, Size: 2}
+	for i := 0; i < 1; i++ {
+		pod := warmExecutionPod(w, "warm-observed")
+		pod.UID = "warm-observed-uid"
+		pod.Spec.SchedulingGates = nil
+		pod.Labels = map[string]string{warmLabel: "true"}
+		pod.Annotations = map[string]string{warmSpec: w.Status.SpecHash}
+		if err := r.Create(ctx, pod); err != nil {
+			t.Fatal(err)
+		}
+		backend.deadlines[string(pod.UID)] = time.Now().Add(time.Minute)
+	}
+	if err := pool.publishSnapshot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cm := &core.ConfigMap{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: warmtemplates.StatusConfigMapName(r.NodeName)}, cm); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot warmtemplates.Snapshot
+	if err := json.Unmarshal([]byte(cm.Data["snapshot.json"]), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.NodeName != r.NodeName || len(snapshot.Pools) != 1 {
+		t.Fatalf("unexpected snapshot: %#v", snapshot)
+	}
+	got := snapshot.Pools[0]
+	if got.PoolID == "" || got.DesiredHash != snapshot.DesiredHash || len(got.TemplateIDs) != 1 || got.TemplateIDs[0] != "revision-one" || got.RequestedSlots != 1 || got.AllocatedSlots != 1 || got.ReadySlots != 1 || got.PreparingSlots != 0 || got.FailedSlots != 0 || got.Resources.CPURequestMilli <= 0 || got.Resources.MemoryRequestBytes <= 0 || got.ObservedAt.IsZero() {
+		t.Fatalf("incomplete pool observation: %#v", got)
+	}
+}
+
+func TestWarmPoolScaleDownKeepsClaimedPodAndPublishesAllocatedBudget(t *testing.T) {
+	ctx := context.Background()
+	r, f, w := fixture(t)
+	setWarmTemplate(t, r, w, "revision-one")
+	cm := &core.ConfigMap{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: warmtemplates.ConfigMapName}, cm); err != nil {
+		t.Fatal(err)
+	}
+	var configured warmtemplates.Template
+	if err := json.Unmarshal([]byte(cm.Data["revision-one"]), &configured); err != nil {
+		t.Fatal(err)
+	}
+	configured.Slots = 3
+	encoded, err := json.Marshal(configured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm.Data["revision-one"] = string(encoded)
+	if err := r.Update(ctx, cm); err != nil {
+		t.Fatal(err)
+	}
+	w.Status.SpecHash = fingerprint(w)
+	backend := &poolRuntime{fakeRuntime: f, deadlines: map[string]time.Time{}}
+	r.Runtime = backend
+	claimed := warmExecutionPod(w, "warm-claimed")
+	claimed.UID = "warm-claimed-uid"
+	claimed.Spec.SchedulingGates = nil
+	claimed.Labels = map[string]string{warmLabel: "true"}
+	claimed.Annotations = map[string]string{warmSpec: w.Status.SpecHash}
+	if err := controllerutil.SetControllerReference(w, claimed, r.Scheme()); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Create(ctx, claimed); err != nil {
+		t.Fatal(err)
+	}
+	backend.deadlines[string(claimed.UID)] = time.Now().Add(time.Minute)
+	for i := 0; i < 2; i++ {
+		pod := warmExecutionPod(w, fmt.Sprintf("warm-idle-%d", i))
+		pod.UID = types.UID(fmt.Sprintf("warm-idle-uid-%d", i))
+		pod.Spec.SchedulingGates = nil
+		pod.Labels = map[string]string{warmLabel: "true"}
+		pod.Annotations = map[string]string{warmSpec: w.Status.SpecHash}
+		if err := r.Create(ctx, pod); err != nil {
+			t.Fatal(err)
+		}
+		backend.deadlines[string(pod.UID)] = time.Now().Add(time.Minute)
+	}
+	pool := &WarmPool{Reconciler: r, Namespace: w.Namespace, Size: 1}
+	if err := pool.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(claimed), claimed); err != nil {
+		t.Fatalf("claimed Pod was removed during idle scale-down: %v", err)
+	}
+	var pods core.PodList
+	if err := r.List(ctx, &pods, client.MatchingLabels{warmLabel: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	idle := 0
+	for i := range pods.Items {
+		if meta.GetControllerOf(&pods.Items[i]) == nil {
+			idle++
+		}
+	}
+	if idle != 1 {
+		t.Fatalf("idle pool after scale-down = %d, want 1", idle)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: warmtemplates.StatusConfigMapName(r.NodeName)}, cm); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot warmtemplates.Snapshot
+	if err := json.Unmarshal([]byte(cm.Data["snapshot.json"]), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Pools) != 1 || snapshot.Pools[0].RequestedSlots != 3 || snapshot.Pools[0].AllocatedSlots != 1 || snapshot.Pools[0].ReadySlots != 1 {
+		t.Fatalf("scale-down snapshot = %#v", snapshot.Pools)
 	}
 }
 
