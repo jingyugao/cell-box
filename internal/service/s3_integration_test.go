@@ -118,7 +118,8 @@ func TestS3IntegrationAPIRestartWithoutLocalDataAndArchiveRestore(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	create, source := f.createBox(t, "source-create")
+	templateID := f.template(t)
+	create, source := f.createBoxWithTemplate(t, "source-create", templateID)
 	payload := makeArchiveTestData(t, archiveTestEntry{"main.go", tar.TypeReg, "package main\nfunc main() {}\n"})
 	var restored atomic.Bool
 	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -180,7 +181,7 @@ func TestS3IntegrationAPIRestartWithoutLocalDataAndArchiveRestore(t *testing.T) 
 
 	status, body = f.call(t, "GET", "/v1/boxes/"+source.ID, testClientToken, "", nil)
 	wantStatus(t, status, 200, body)
-	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "source-create", map[string]string{"profileId": "profile-a", "ownerKey": "owner-a"})
+	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "source-create", map[string]string{"templateId": templateID, "ownerKey": "owner-a"})
 	wantStatus(t, status, 202, body)
 	replay := decodeResponse[Operation](t, body)
 	if replay.ID != create.ID {
@@ -193,7 +194,7 @@ func TestS3IntegrationAPIRestartWithoutLocalDataAndArchiveRestore(t *testing.T) 
 	if !bytes.Equal(body, payload) {
 		t.Fatal("S3 archive changed after API restart")
 	}
-	status, body = f.call(t, "POST", "/v1/boxes:restore", testClientToken, "restore-once", map[string]string{"profileId": "profile-a", "ownerKey": "restored", "archiveId": archiveID})
+	status, body = f.call(t, "POST", "/v1/boxes:restore", testClientToken, "restore-once", map[string]string{"templateId": templateID, "ownerKey": "restored", "archiveId": archiveID})
 	wantStatus(t, status, 202, body)
 	restore := decodeResponse[Operation](t, body)
 	f.waitOperation(t, restore.ID, "succeeded")

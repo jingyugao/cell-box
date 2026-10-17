@@ -1,4 +1,4 @@
-// Run with CELLBOX_API_URL, CELLBOX_PROFILE_ID, and optionally CELLBOX_CLIENT_ID
+// Run with CELLBOX_API_URL, CELLBOX_TEMPLATE_ID, and optionally CELLBOX_CLIENT_ID
 // and CELLBOX_CLIENT_TOKEN set. The token is only needed by authenticated gateways.
 package main
 
@@ -25,9 +25,13 @@ func run() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	templateID := os.Getenv("CELLBOX_TEMPLATE_ID")
+	if templateID == "" {
+		return fmt.Errorf("CELLBOX_TEMPLATE_ID is required")
+	}
 	sandbox, err := client.Create(ctx, cellbox.CreateOptions{
-		ProfileID: os.Getenv("CELLBOX_PROFILE_ID"),
-		OwnerKey:  "go-sdk-example",
+		TemplateID: templateID,
+		OwnerKey:   "go-sdk-example",
 	})
 	if err != nil {
 		return err

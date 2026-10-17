@@ -194,6 +194,7 @@ func (s *Service) releaseFailedUpgrade(id string) {
 		}
 		current.Box.OperationID = ""
 		current.UpgradeImageID = ""
+		current.UpgradeTemplateID = ""
 		current.Upgrade = nil
 		current.Box.Version++
 		st.Boxes[id] = current

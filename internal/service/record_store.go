@@ -15,9 +15,8 @@ import (
 	"cellbox.local/cellbox/internal/objectstorage"
 )
 
-// Head schema 4 fences binaries that do not understand permanent retirement.
-// Resource/local state schema remains 3; opening an existing head migrates it.
-const recordHeadSchema = 4
+// Template-era metadata has no migration from pre-release ledgers.
+const recordHeadSchema = stateSchema
 
 const recordPrefix = "metadata/records"
 const profilePrefix = "metadata/profiles"
@@ -65,7 +64,7 @@ func validRecordKey(key string) bool {
 	if len(parts) != 4 || parts[0]+"/"+parts[1] != recordPrefix {
 		return false
 	}
-	if parts[2] != "boxes" && parts[2] != "operations" && parts[2] != "archives" && parts[2] != "keys" && parts[2] != "purges" {
+	if parts[2] != "boxes" && parts[2] != "operations" && parts[2] != "archives" && parts[2] != "keys" && parts[2] != "purges" && parts[2] != "templates" {
 		return false
 	}
 	name := strings.TrimSuffix(parts[3], ".json")
@@ -75,7 +74,7 @@ func validRecordKey(key string) bool {
 
 func decodeRecordHead(data []byte) (recordHead, error) {
 	var head recordHead
-	if json.Unmarshal(data, &head) != nil || (head.Schema != stateSchema && head.Schema != recordHeadSchema) || head.Revision == "" {
+	if json.Unmarshal(data, &head) != nil || head.Schema != recordHeadSchema || head.Revision == "" {
 		return head, errors.New("invalid core metadata head")
 	}
 	retired := map[string]bool{}
@@ -292,7 +291,7 @@ func mergeRecordState(dst *State, src State) error {
 		}
 		dst.Keys[id] = fence
 	}
-	for _, err := range []error{mergeMap(dst.Boxes, src.Boxes), mergeMap(dst.Operations, src.Operations), mergeMap(dst.Executions, src.Executions), mergeMap(dst.Leases, src.Leases), mergeMap(dst.Archives, src.Archives), mergeMap(dst.Purges, src.Purges)} {
+	for _, err := range []error{mergeMap(dst.Templates, src.Templates), mergeMap(dst.Boxes, src.Boxes), mergeMap(dst.Operations, src.Operations), mergeMap(dst.Executions, src.Executions), mergeMap(dst.Leases, src.Leases), mergeMap(dst.Archives, src.Archives), mergeMap(dst.Purges, src.Purges)} {
 		if err != nil {
 			return err
 		}
@@ -350,6 +349,9 @@ func (s *Store) projectRecords(ctx context.Context, state *State) (map[string][]
 			return recordKey("boxes", op.Operation.TargetID)
 		}
 		return recordKey("operations", op.Operation.ID)
+	}
+	for id, template := range state.Templates {
+		group(recordKey("templates", id)).Templates[id] = template
 	}
 	for id, box := range state.Boxes {
 		digest, err := s.profileReference(ctx, box.Profile)

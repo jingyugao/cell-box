@@ -138,12 +138,13 @@ func TestImageImportCreateIsolationAndRestart(t *testing.T) {
 	input.BuildCommand = buildCommand
 	status, raw = f.call(t, "GET", "/v1/images/"+id, otherClientToken, "", nil)
 	wantStatus(t, status, 404, raw)
-	status, raw = f.call(t, "POST", "/v1/boxes", otherClientToken, "foreign-image", createRequest{ProfileID: "profile-a", OwnerKey: "foreign", ImportedImageID: id})
+	templateID := f.templateFor(t, f.service.config.Profiles[0], "imported", "v1", id, 0)
+	status, raw = f.call(t, "POST", "/v1/boxes", otherClientToken, "foreign-image", createRequest{TemplateID: templateID, OwnerKey: "foreign"})
 	wantStatus(t, status, 404, raw)
 	input.RunCommand = "docker run --privileged " + ref.Name()
 	status, raw = f.call(t, "POST", "/v1/images:import", testClientToken, "unsafe", input)
 	wantStatus(t, status, 400, raw)
-	status, raw = f.call(t, "POST", "/v1/boxes", testClientToken, "create-imported", createRequest{ProfileID: "profile-a", OwnerKey: "import-demo", ImportedImageID: id})
+	status, raw = f.call(t, "POST", "/v1/boxes", testClientToken, "create-imported", createRequest{TemplateID: templateID, OwnerKey: "import-demo"})
 	wantStatus(t, status, 202, raw)
 	created := f.waitOperation(t, decodeResponse[Operation](t, raw).ID, "succeeded")
 	b, err := f.service.rawBox(created.TargetID)
@@ -369,8 +370,9 @@ func TestAutoTrustImportedImagesIsOwnedScopedAndCaptured(t *testing.T) {
 	boxProfile.Guest.Tools = []guestapi.Tool{tool}
 	f.config.Profiles[0] = boxProfile
 	f.reopen(t)
+	autoTrustTemplate := f.templateFor(t, f.service.config.Profiles[0], "auto-trust", "v1", ownedID, 0)
 	status, body := f.call(t, "POST", "/v1/boxes", testClientToken, "auto-trust-box", createRequest{
-		ProfileID: "profile-a", OwnerKey: "auto-trust", ImportedImageID: ownedID,
+		TemplateID: autoTrustTemplate, OwnerKey: "auto-trust",
 	})
 	wantStatus(t, status, http.StatusAccepted, body)
 	op := decodeResponse[Operation](t, body)
@@ -404,11 +406,12 @@ func TestImportedImageUsageBlocksPausedAndHidesForeignOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.service.config.ImageBuild = ImageBuildConfig{Repository: "registry.example/prepared"}
+	f.templateFor(t, f.service.config.Profiles[0], "usage", "v1", id, 0)
 	status, body := f.call(t, "GET", "/v1/images/"+id+"/usage", testClientToken, "", nil)
 	wantStatus(t, status, 200, body)
 	usage := decodeResponse[imageUsage](t, body)
-	if usage.Deletable || len(usage.Blockers) != 1 || usage.Blockers[0] != "boxes-reference-image" {
-		t.Fatalf("paused box was not reported as blocker: %+v", usage)
+	if usage.Deletable || !slices.Contains(usage.Blockers, "boxes-reference-image") || !slices.Contains(usage.Blockers, "templates-reference-image") {
+		t.Fatalf("paused box or template reference was not reported as blocker: %+v", usage)
 	}
 	status, body = f.call(t, "GET", "/v1/images/"+id+"/usage", otherClientToken, "", nil)
 	wantStatus(t, status, 404, body)
@@ -599,7 +602,15 @@ func TestImportedImageDeleteRetryAfterRestartAndBlocksCreates(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	status, body := f.call(t, "DELETE", "/v1/images/"+id, testClientToken, "delete-first", nil)
+	templateID := f.templateFor(t, f.service.config.Profiles[0], "delete-race", "v1", id, 0)
+	status, body := f.call(t, "GET", "/v1/images/"+id+"/usage", testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	if usage := decodeResponse[imageUsage](t, body); usage.Deletable || !slices.Contains(usage.Blockers, "templates-reference-image") {
+		t.Fatalf("template did not block imported image deletion: %+v", usage)
+	}
+	status, body = f.call(t, "DELETE", "/v1/templates/"+templateID, testClientToken, "", nil)
+	wantStatus(t, status, http.StatusNoContent, body)
+	status, body = f.call(t, "DELETE", "/v1/images/"+id, testClientToken, "delete-first", nil)
 	wantStatus(t, status, 202, body)
 	failed := f.waitOperation(t, decodeResponse[Operation](t, body).ID, "failed")
 	if failed.Error == nil || failed.Error.Code != "IMAGE_DELETE_FAILED" {
@@ -635,13 +646,36 @@ func TestImportedImageDeleteRetryAfterRestartAndBlocksCreates(t *testing.T) {
 	if got := decodeResponse[Operation](t, body); got.Status != "failed" {
 		t.Fatalf("interrupted deletion operation status: %+v", got)
 	}
-	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "blocked-create", createRequest{ProfileID: "profile-a", OwnerKey: "blocked", ImportedImageID: id})
+	const raceTemplateID = "tpl-image-delete-race"
+	if err := f.service.store.Update(func(st *State) error {
+		st.Templates[raceTemplateID] = templateRecord{
+			Template: Template{ID: raceTemplateID, Name: "image-delete-race", Version: "v1", ProfileID: "profile-a", ImportedImageID: id, Image: imageRef},
+			ClientID: "client-a", Profile: f.service.config.Profiles[0],
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "blocked-create", createRequest{TemplateID: raceTemplateID, OwnerKey: "blocked"})
 	wantStatus(t, status, 409, body)
+	status, body = f.call(t, "DELETE", "/v1/templates/"+raceTemplateID, testClientToken, "", nil)
+	wantStatus(t, status, http.StatusNoContent, body)
 	status, body = f.call(t, "DELETE", "/v1/images/"+id, testClientToken, "delete-retry", nil)
 	wantStatus(t, status, 202, body)
 	retry := decodeResponse[Operation](t, body)
-	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "blocked-during-delete", createRequest{ProfileID: "profile-a", OwnerKey: "blocked-during-delete", ImportedImageID: id})
+	if err := f.service.store.Update(func(st *State) error {
+		st.Templates[raceTemplateID] = templateRecord{
+			Template: Template{ID: raceTemplateID, Name: "image-delete-race", Version: "v1", ProfileID: "profile-a", ImportedImageID: id, Image: imageRef},
+			ClientID: "client-a", Profile: f.service.config.Profiles[0],
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "blocked-during-delete", createRequest{TemplateID: raceTemplateID, OwnerKey: "blocked-during-delete"})
 	wantStatus(t, status, 409, body)
+	status, body = f.call(t, "DELETE", "/v1/templates/"+raceTemplateID, testClientToken, "", nil)
+	wantStatus(t, status, http.StatusNoContent, body)
 	close(allowDelete)
 	done := f.waitOperation(t, retry.ID, "succeeded")
 	if done.Error != nil {

@@ -17,6 +17,7 @@ base, profile, source = sys.argv[1:]
 base = base.rstrip('/')
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 boxes, archives = [], []
+template_id = None
 
 def call(method, path, data=None):
     headers = {'Authorization': 'Bearer ' + os.environ['CELLBOX_CLIENT_TOKEN']}
@@ -67,7 +68,10 @@ try:
     assert any(x['id'] == imported_id for x in call('GET', '/v1/images'))
     print('PASS: source tag resolved, guest image published, startup parameters retained', flush=True)
 
-    box_id = create('/v1/boxes', {'profileId': profile, 'ownerKey': 'image-import-e2e-' + str(uuid.uuid4()), 'importedImageId': imported_id})
+    template = call('POST', '/v1/templates', {'name': 'image-import-e2e-' + str(uuid.uuid4()), 'version': 'v1', 'profileId': profile, 'importedImageId': imported_id})
+    template_id = template['id']
+    assert template['importedImageId'] == imported_id and template['profileId'] == profile
+    box_id = create('/v1/boxes', {'templateId': template_id, 'ownerKey': 'image-import-e2e-' + str(uuid.uuid4())})
     for _ in range(30):
         try:
             if call('GET', f'/v1/boxes/{box_id}/files?path=imported-proof.txt') == b'image-import-ok':
@@ -100,7 +104,7 @@ try:
     # Free the source's resources so restoration also works on a small test node.
     wait(call('POST', f'/v1/boxes/{box_id}:destroy'))
     boxes.remove(box_id)
-    restored_id = create('/v1/boxes:restore', {'profileId': profile, 'ownerKey': 'image-import-restore-' + str(uuid.uuid4()), 'archiveId': archive})
+    restored_id = create('/v1/boxes:restore', {'templateId': template_id, 'ownerKey': 'image-import-restore-' + str(uuid.uuid4()), 'archiveId': archive})
     restored = call('GET', '/v1/boxes/' + restored_id)
     assert restored['phase'] == 'staged' and restored['image'] == imported['image']
     assert restored['importedImageId'] == imported_id
@@ -125,6 +129,12 @@ finally:
         except Exception as error:
             failed = True
             print(f'Could not delete test archive {archive}: {error}', file=sys.stderr)
+    if template_id:
+        try:
+            call('DELETE', '/v1/templates/' + template_id)
+        except Exception as error:
+            failed = True
+            print(f'Could not delete test template {template_id}: {error}', file=sys.stderr)
     if failed:
         raise RuntimeError('Test resource cleanup incomplete; inspect the IDs above')
 print('PASS: image import lifecycle E2E completed; test sandboxes and archives removed')

@@ -74,15 +74,15 @@ type ImageCacheProvider interface {
 	CacheImage(context.Context, string, string, string) error // image, node, namespace
 }
 
-// WarmDefaultImage selects the only image eligible for a profile's warm pool.
-type WarmDefaultImage struct {
-	ProfileID string `json:"profileId"`
-	NodeName  string `json:"nodeName"`
-	Image     string `json:"image"`
+// WarmTemplate describes a reusable runtime configuration and its share of
+// the node-wide warm capacity.
+type WarmTemplate struct {
+	ID    string `json:"id"`
+	Slots int    `json:"slots"`
+	Spec  Spec   `json:"spec"`
 }
-type WarmDefaultImageProvider interface {
-	SetWarmDefaultImage(context.Context, string, WarmDefaultImage) error
-	GetWarmDefaultImages(context.Context, string) ([]WarmDefaultImage, error)
+type WarmTemplateProvider interface {
+	SetWarmTemplates(context.Context, string, []WarmTemplate) error
 }
 
 // FencedGuestProvider validates the execution while resolving its

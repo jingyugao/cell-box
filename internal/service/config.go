@@ -84,6 +84,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid client namespace")
 	}
 	profiles := map[string]bool{}
+	var node, namespace string
 	for i := range c.Profiles {
 		p := &c.Profiles[i]
 		if !validName.MatchString(p.ID) || profiles[p.ID] {
@@ -128,6 +129,12 @@ func (c *Config) Validate() error {
 		}
 		if p.Provider == "resumable-k8s-pod" && (p.Namespace == "" || p.NodeName == "") {
 			return fmt.Errorf("resumable profile requires namespace and nodeName")
+		}
+		if p.Provider == "resumable-k8s-pod" {
+			if node != "" && (p.NodeName != node || p.Namespace != namespace) {
+				return fmt.Errorf("one Cellbox instance manages one node and namespace; profiles must share that location")
+			}
+			node, namespace = p.NodeName, p.Namespace
 		}
 		if p.SharedReadOnlyHostPath != "" {
 			if p.Provider != "resumable-k8s-pod" || !path.IsAbs(p.SharedReadOnlyHostPath) ||

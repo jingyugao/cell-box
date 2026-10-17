@@ -361,7 +361,7 @@ func preparedImageIdentity(value, repository, insecureRegistry string) (string, 
 	return digest.Name(), true
 }
 
-func (s *Service) imageUsage(st State, id string, warmImages ...string) imageUsage {
+func (s *Service) imageUsage(st State, id string) imageUsage {
 	out := imageUsage{Blockers: []string{}}
 	target, ok := st.ImportedImages[id]
 	if !ok {
@@ -406,9 +406,9 @@ func (s *Service) imageUsage(st State, id string, warmImages ...string) imageUsa
 			break
 		}
 	}
-	for _, image := range warmImages {
-		if matchesPrepared(image) {
-			out.Blockers = append(out.Blockers, "warm-default-reference-image")
+	for _, rec := range st.Templates {
+		if rec.Template.ImportedImageID == id || matchesPrepared(rec.Profile.Image) {
+			out.Blockers = append(out.Blockers, "templates-reference-image")
 			break
 		}
 	}
@@ -427,20 +427,13 @@ func (s *Service) imageUsage(st State, id string, warmImages ...string) imageUsa
 }
 
 func (s *Service) imageUsageHandler(w http.ResponseWriter, r *http.Request) {
-	s.warmDefaultMu.Lock()
-	defer s.warmDefaultMu.Unlock()
-	warmImages, err := s.warmDefaultImages(r.Context())
-	if err != nil {
-		fail(w, cloneError(err))
-		return
-	}
 	var usage imageUsage
-	err = s.store.View(func(st State) error {
+	err := s.store.View(func(st State) error {
 		rec, ok := st.ImportedImages[r.PathValue("id")]
 		if !ok || rec.ClientID != clientID(r) {
 			return apiError("NOT_FOUND", "Imported image not found")
 		}
-		usage = s.imageUsage(st, r.PathValue("id"), warmImages...)
+		usage = s.imageUsage(st, r.PathValue("id"))
 		return nil
 	})
 	if err != nil {
@@ -451,18 +444,11 @@ func (s *Service) imageUsageHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) deleteImportedImage(w http.ResponseWriter, r *http.Request) {
-	s.warmDefaultMu.Lock()
-	defer s.warmDefaultMu.Unlock()
 	if s.config.ImageBuild == (ImageBuildConfig{}) {
 		fail(w, apiError("UNSUPPORTED_CAPABILITY", "Image building is not configured"))
 		return
 	}
 	client, id := clientID(r), r.PathValue("id")
-	warmImages, err := s.warmDefaultImages(r.Context())
-	if err != nil {
-		fail(w, cloneError(err))
-		return
-	}
 	var imported ImportedImage
 	op, fresh, err := s.prepareOperation(client, r.Header.Get("Idempotency-Key"), "image-delete", id, nil, func(st *State, op *Operation) error {
 		record, ok := st.ImportedImages[id]
@@ -472,7 +458,7 @@ func (s *Service) deleteImportedImage(w http.ResponseWriter, r *http.Request) {
 		if err := imageBuildBusy(st); err != nil {
 			return err
 		}
-		usage := s.imageUsage(*st, id, warmImages...)
+		usage := s.imageUsage(*st, id)
 		for _, blocker := range usage.Blockers {
 			if blocker != "deletion-pending" {
 				return apiError("CONFLICT", "Imported image is still in use")

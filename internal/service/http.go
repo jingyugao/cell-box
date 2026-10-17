@@ -96,7 +96,11 @@ func decodeOptionalLimit(w http.ResponseWriter, r *http.Request, target any, lim
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/profiles", s.listProfiles)
-	mux.HandleFunc("PUT /v1/profiles/{id}/warm-default", s.setWarmDefaultImage)
+	mux.HandleFunc("POST /v1/templates", s.createTemplate)
+	mux.HandleFunc("GET /v1/templates", s.listTemplates)
+	mux.HandleFunc("GET /v1/templates/{id}", s.getTemplate)
+	mux.HandleFunc("PUT /v1/templates/{id}/prewarm", s.setTemplateWarmSlots)
+	mux.HandleFunc("DELETE /v1/templates/{id}", s.deleteTemplate)
 	mux.HandleFunc("POST /v1/images", s.buildImage)
 	mux.HandleFunc("POST /v1/images:import", s.importImage)
 	mux.HandleFunc("GET /v1/images", s.listImportedImages)

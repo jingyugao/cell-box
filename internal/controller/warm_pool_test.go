@@ -10,7 +10,7 @@ import (
 	"time"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/warmdefaults"
+	"cellbox.local/cellbox/internal/warmtemplates"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	core "k8s.io/api/core/v1"
@@ -52,22 +52,31 @@ func (*poolRuntime) ActivateWarm(context.Context, *api.ResumablePod, *core.Pod) 
 }
 func (*poolRuntime) ReapWarm(context.Context, string, map[string]bool) error { return nil }
 
-func setWarmDefault(t *testing.T, r *Reconciler, w *api.ResumablePod, profileID string) {
+func setWarmTemplate(t *testing.T, r *Reconciler, w *api.ResumablePod, templateID string) {
 	t.Helper()
-	image := "registry.example.invalid/cellbox@sha256:" + strings.Repeat("a", 64)
-	w.Spec.Container.Image = image
-	if err := r.Update(context.Background(), w); err != nil {
-		t.Fatal(err)
-	}
-	w.Status.SpecHash = fingerprint(w)
-	if err := r.Status().Update(context.Background(), w); err != nil {
-		t.Fatal(err)
-	}
-	encoded, err := json.Marshal(warmdefaults.Image{ProfileID: profileID, NodeName: r.NodeName, Image: image})
+	templateSpec := w.Spec
+	template := warmtemplates.Template{ID: templateID, Slots: 1, Spec: templateSpec}
+	encoded, err := json.Marshal(template)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = r.Create(context.Background(), &core.ConfigMap{ObjectMeta: meta.ObjectMeta{Namespace: w.Namespace, Name: warmdefaults.ConfigMapName}, Data: map[string]string{profileID: string(encoded)}}); err != nil {
+	if err = r.Create(context.Background(), &core.ConfigMap{ObjectMeta: meta.ObjectMeta{Namespace: w.Namespace, Name: warmtemplates.ConfigMapName}, Data: map[string]string{templateID: string(encoded)}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func replaceWarmTemplateSpec(t *testing.T, r *Reconciler, namespace, templateID string, spec api.Spec) {
+	t.Helper()
+	cm := &core.ConfigMap{}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: warmtemplates.ConfigMapName}, cm); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(warmtemplates.Template{ID: templateID, Slots: 1, Spec: spec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm.Data[templateID] = string(encoded)
+	if err = r.Update(context.Background(), cm); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -81,8 +90,8 @@ func TestWarmPoolConcurrentAdoptionRestartAndTemplateMiss(t *testing.T) {
 func testWarmPoolConcurrentAdoption(t *testing.T, persistent bool) {
 	ctx := context.Background()
 	r, f, w := fixture(t)
-	setWarmDefault(t, r, w, "default")
 	w.Spec.PersistentHome = persistent
+	setWarmTemplate(t, r, w, "template-a")
 	w.Status.SpecHash = fingerprint(w)
 	backend := &poolRuntime{fakeRuntime: f, deadlines: map[string]time.Time{}}
 	r.Runtime = backend
@@ -129,7 +138,13 @@ func testWarmPoolConcurrentAdoption(t *testing.T, persistent bool) {
 	seen := map[types.UID]bool{}
 	for x := range out {
 		if x.err != nil || x.pod == nil {
-			t.Fatalf("adopt: %v", x.err)
+			configured, readErr := warmtemplates.Read(ctx, r, w.Namespace)
+			var configuredHashes []string
+			for _, template := range configured {
+				candidate := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{Name: template.ID, Namespace: w.Namespace}, Spec: template.Spec}
+				configuredHashes = append(configuredHashes, fingerprint(candidate)+" valid="+fmt.Sprint(validate(candidate)))
+			}
+			t.Fatalf("adopt: err=%v pod=%v read=%v configured=%v actualHash=%s valid=%v", x.err, x.pod, readErr, configuredHashes, w.Status.SpecHash, validate(w))
 		}
 		if seen[x.pod.UID] {
 			t.Fatal("same Pod assigned twice")
@@ -160,10 +175,10 @@ func testWarmPoolConcurrentAdoption(t *testing.T, persistent bool) {
 	}
 }
 
-func TestWarmPoolUsesOnlyConfiguredDefaultImagesAndSwitchDrainsUnusedSlots(t *testing.T) {
+func TestWarmPoolUsesIndependentTemplatesAndDrainsRemovedSlots(t *testing.T) {
 	ctx := context.Background()
 	r, f, w := fixture(t)
-	setWarmDefault(t, r, w, "default")
+	setWarmTemplate(t, r, w, "template-a")
 	w.Spec.PersistentHome = false
 	w.Status.SpecHash = fingerprint(w)
 	backend := &poolRuntime{fakeRuntime: f, deadlines: map[string]time.Time{}}
@@ -199,20 +214,24 @@ func TestWarmPoolUsesOnlyConfiguredDefaultImagesAndSwitchDrainsUnusedSlots(t *te
 	}
 	backend.deadlines[string(otherWarm.UID)] = time.Now().Add(time.Minute)
 	if pod, err := pool.acquire(ctx, other); err != nil || pod != nil {
-		t.Fatalf("nondefault image slot was adopted: pod=%v err=%v", pod, err)
+		t.Fatalf("unconfigured template slot was adopted: pod=%v err=%v", pod, err)
 	}
 
-	// Switch the target to a new immutable image while keeping the old CR alive.
+	// Replace the target with a different complete runtime template.
 	cm := &core.ConfigMap{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: warmdefaults.ConfigMapName}, cm); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: warmtemplates.ConfigMapName}, cm); err != nil {
 		t.Fatal(err)
 	}
-	cm.Data["default"] = `{"profileId":"default","nodeName":"node","image":"` + newImage + `"}`
+	newSpec := w.Spec
+	newSpec.Container.Image = newImage
+	newTemplate := warmtemplates.Template{ID: "new-template", Slots: 1, Spec: newSpec}
+	encoded, _ := json.Marshal(newTemplate)
+	cm.Data = map[string]string{"new-template": string(encoded)}
 	if err := r.Update(ctx, cm); err != nil {
 		t.Fatal(err)
 	}
 	if pod, err := pool.acquire(ctx, w); err != nil || pod != nil {
-		t.Fatalf("stale image slot was adopted after default switch: pod=%v err=%v", pod, err)
+		t.Fatalf("removed template slot was adopted: pod=%v err=%v", pod, err)
 	}
 	if err := pool.reconcile(ctx); err != nil {
 		t.Fatal(err)
@@ -221,15 +240,152 @@ func TestWarmPoolUsesOnlyConfiguredDefaultImagesAndSwitchDrainsUnusedSlots(t *te
 	if err := r.List(ctx, &pods, client.MatchingLabels{warmLabel: "true"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(pods.Items) != 1 || pods.Items[0].Annotations[warmSpec] != other.Status.SpecHash {
-		t.Fatalf("pool did not switch exclusively to the new default image: %#v", pods.Items)
+	if len(pods.Items) != 1 || pods.Items[0].Spec.Containers[0].Image != newImage {
+		t.Fatalf("pool did not switch exclusively to the new template: %#v", pods.Items)
+	}
+}
+
+func TestWarmPoolPreparesTemplateWithoutAnyBoxAndSharesIdenticalSpecs(t *testing.T) {
+	ctx := context.Background()
+	r, f, w := fixture(t)
+	if err := r.Delete(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Delete(ctx, &core.Pod{ObjectMeta: meta.ObjectMeta{Namespace: w.Namespace, Name: "old"}}); err != nil {
+		t.Fatal(err)
+	}
+	backend := &poolRuntime{fakeRuntime: f, deadlines: map[string]time.Time{}}
+	r.Runtime = backend
+	pool := &WarmPool{Reconciler: r, Namespace: w.Namespace, Size: 2}
+	w.Spec.DesiredState = "Running"
+	spec := w.Spec
+	first := warmtemplates.Template{ID: "template-a", Slots: 1, Spec: spec}
+	second := warmtemplates.Template{ID: "template-b", Slots: 1, Spec: spec}
+	data := map[string]string{}
+	for _, template := range []warmtemplates.Template{first, second} {
+		encoded, _ := json.Marshal(template)
+		data[template.ID] = string(encoded)
+	}
+	if err := r.Create(ctx, &core.ConfigMap{ObjectMeta: meta.ObjectMeta{Namespace: w.Namespace, Name: warmtemplates.ConfigMapName}, Data: data}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 8; i++ {
+		if err := pool.reconcile(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var pods core.PodList
+	if err := r.List(ctx, &pods, client.MatchingLabels{warmLabel: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 2 {
+		t.Fatalf("two templates with one identical Spec should share two node slots; got %d", len(pods.Items))
+	}
+	for _, pod := range pods.Items {
+		if pod.Spec.Containers[0].Image != spec.Container.Image || pod.Spec.NodeSelector["kubernetes.io/hostname"] != spec.NodeName {
+			t.Fatalf("warm Pod does not match configured runtime Spec: %#v", pod.Spec)
+		}
+	}
+}
+
+func TestWarmPoolFairlyDistributesConfiguredNodeBudget(t *testing.T) {
+	ctx := context.Background()
+	r, f, w := fixture(t)
+	if err := r.Delete(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Delete(ctx, &core.Pod{ObjectMeta: meta.ObjectMeta{Namespace: w.Namespace, Name: "old"}}); err != nil {
+		t.Fatal(err)
+	}
+	backend := &poolRuntime{fakeRuntime: f, deadlines: map[string]time.Time{}}
+	r.Runtime = backend
+	pool := &WarmPool{Reconciler: r, Namespace: w.Namespace, Size: 6}
+	first := w.Spec
+	first.Container.Image = "registry.example.invalid/first@sha256:" + strings.Repeat("a", 64)
+	first.Container.ImagePullPolicy = core.PullIfNotPresent
+	second := first
+	second.Container = *first.Container.DeepCopy()
+	second.Container.Image = "registry.example.invalid/second@sha256:" + strings.Repeat("b", 64)
+	data := map[string]string{}
+	for _, template := range []warmtemplates.Template{
+		{ID: "template-a", Slots: 3, Spec: first},
+		{ID: "template-b", Slots: 3, Spec: second},
+	} {
+		encoded, _ := json.Marshal(template)
+		data[template.ID] = string(encoded)
+	}
+	if err := r.Create(ctx, &core.ConfigMap{ObjectMeta: meta.ObjectMeta{Namespace: w.Namespace, Name: warmtemplates.ConfigMapName}, Data: data}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 30; i++ {
+		if err := pool.reconcile(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var current core.PodList
+		if err := r.List(ctx, &current, client.MatchingLabels{warmLabel: "true"}); err != nil {
+			t.Fatal(err)
+		}
+		for _, pod := range current.Items {
+			backend.deadlines[string(pod.UID)] = time.Now().Add(time.Minute)
+		}
+	}
+	var pods core.PodList
+	if err := r.List(ctx, &pods, client.MatchingLabels{warmLabel: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	var hashes []string
+	for _, pod := range pods.Items {
+		counts[pod.Spec.Containers[0].Image]++
+		hashes = append(hashes, pod.Annotations[warmSpec]+"="+pod.Spec.Containers[0].Image)
+	}
+	if len(pods.Items) != 6 || counts[first.Container.Image] != 3 || counts[second.Container.Image] != 3 {
+		t.Fatalf("node budget should be max-min distributed across distinct templates: total=%d counts=%v pods=%v", len(pods.Items), counts, hashes)
+	}
+
+	// Shrinking the node budget must promptly retire the excess slots from both
+	// templates so the fair share is represented by the actual pool.
+	pool.Size = 4
+	for i := 0; i < 12; i++ {
+		if err := pool.reconcile(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var current core.PodList
+		if err := r.List(ctx, &current, client.MatchingLabels{warmLabel: "true"}); err != nil {
+			t.Fatal(err)
+		}
+		for _, pod := range current.Items {
+			backend.deadlines[string(pod.UID)] = time.Now().Add(time.Minute)
+		}
+	}
+	if err := r.List(ctx, &pods, client.MatchingLabels{warmLabel: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	counts = map[string]int{}
+	for _, pod := range pods.Items {
+		counts[pod.Spec.Containers[0].Image]++
+	}
+	if len(pods.Items) != 4 || counts[first.Container.Image] != 2 || counts[second.Container.Image] != 2 {
+		t.Fatalf("shrunk budget did not retire excess slots while preserving fair shares: total=%d counts=%v", len(pods.Items), counts)
+	}
+}
+
+func TestAllocateWarmSlotsUsesFairNodeBudget(t *testing.T) {
+	if got := allocateWarmSlots(map[string]int{"a": 3, "b": 3}, 4); got["a"] != 2 || got["b"] != 2 {
+		t.Fatalf("equal demands should share budget equally: %v", got)
+	}
+	if got := allocateWarmSlots(map[string]int{"a": 1, "b": 5}, 4); got["a"] != 1 || got["b"] != 3 {
+		t.Fatalf("unused demand should flow to the other template: %v", got)
+	}
+	if got := allocateWarmSlots(map[string]int{"a": 4, "b": 4, "c": 4}, 2); got["a"]+got["b"]+got["c"] != 2 {
+		t.Fatalf("allocation exceeded node budget: %v", got)
 	}
 }
 
 func TestWarmPoolMissingDefaultDrainsUnclaimedAndKeepsClaimed(t *testing.T) {
 	ctx := context.Background()
 	r, f, w := fixture(t)
-	setWarmDefault(t, r, w, "default")
+	setWarmTemplate(t, r, w, "template-a")
 	backend := &poolRuntime{fakeRuntime: f, deadlines: map[string]time.Time{}}
 	r.Runtime = backend
 	pool := &WarmPool{Reconciler: r, Namespace: w.Namespace, Size: 1}
@@ -255,7 +411,7 @@ func TestWarmPoolMissingDefaultDrainsUnclaimedAndKeepsClaimed(t *testing.T) {
 	backend.deadlines[string(claimed.UID)] = time.Now().Add(time.Minute)
 	backend.deadlines[string(unclaimed.UID)] = time.Now().Add(time.Minute)
 	cm := &core.ConfigMap{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: warmdefaults.ConfigMapName}, cm); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: warmtemplates.ConfigMapName}, cm); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Delete(ctx, cm); err != nil {

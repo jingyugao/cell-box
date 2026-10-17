@@ -34,8 +34,48 @@ components:
             $ref: '#/components/schemas/Error'
       description: 'Structured error: 400 invalid input, 401 unauthenticated, 403
         denied, 404 missing or not owned, 409 conflict/busy/stale generation, 410 expired result or operation, 422
-        unsupported, 502 runtime failure, 504 timeout.'
+        unsupported, 502 runtime failure, 504 timeout or UNKNOWN_OUTCOME when a template desired state was saved but publishing has not yet been confirmed.'
   schemas:
+    Template:
+      additionalProperties: false
+      description: Immutable, client-owned sandbox configuration version. IDs are stable tpl- prefixed identifiers.
+      properties:
+        id:
+          type: string
+          pattern: '^tpl-[0-9a-f]+$'
+        name:
+          type: string
+          pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$'
+          maxLength: 80
+        version:
+          type: string
+          pattern: '^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$'
+          maxLength: 80
+        profileId:
+          type: string
+        importedImageId:
+          type: string
+        image:
+          type: string
+          description: Resolved immutable image reference pinned by this template.
+        cpu:
+          type: number
+          exclusiveMinimum: 0
+        memoryMiB:
+          type: integer
+          minimum: 1
+        warmSlots:
+          type: integer
+          minimum: 0
+          maximum: 1024
+        createdAt:
+          type: string
+          format: date-time
+        deleting:
+          type: boolean
+          description: Present as true after deletion is requested and until the template record is removed.
+      required: [id, name, version, profileId, image, cpu, memoryMiB, warmSlots, createdAt]
+      type: object
     Archive:
       additionalProperties: false
       properties:
@@ -52,7 +92,7 @@ components:
         imageId:
           type: string
         importedImageId:
-          description: Imported image required by default when restoring this archive.
+          description: Imported image dependency captured by the archive. Restore always requires an explicit target template.
           type: string
         preparedImage:
           description: Prepared image reference captured independently of the source box.
@@ -64,6 +104,12 @@ components:
           type: boolean
         profileId:
           type: string
+        templateId:
+          type: string
+        templateName:
+          type: string
+        templateVersion:
+          type: string
         sha256:
           type: string
         size:
@@ -73,6 +119,9 @@ components:
       required:
       - id
       - sourceBoxId
+      - templateId
+      - templateName
+      - templateVersion
       - profileId
       - imageId
       - portable
@@ -118,6 +167,13 @@ components:
           type: string
         profileId:
           type: string
+          description: Read-only resolved provenance from the pinned template.
+        templateId:
+          type: string
+        templateName:
+          type: string
+        templateVersion:
+          type: string
         resourceVersion:
           type: integer
         observedAt:
@@ -152,6 +208,9 @@ components:
       - id
       - ownerKey
       - profileId
+      - templateId
+      - templateName
+      - templateVersion
       - phase
       - generation
       - resourceVersion
@@ -234,13 +293,11 @@ components:
           maxLength: 256
           minLength: 1
           type: string
-        profileId:
+        templateId:
           type: string
-        importedImageId:
-          type: string
-          description: ID of a successful import owned by this client. Omit to use the profile image.
+          minLength: 1
       required:
-      - profileId
+      - templateId
       - ownerKey
       type: object
     Error:
@@ -489,6 +546,7 @@ components:
       type: object
     RestoreBox:
       additionalProperties: false
+      description: Restore always uses the explicitly selected template. acceptImageChange is required when its resolved image differs from the archive image; the archive must be portable and agent UID/GID must still match.
       properties:
         archiveId:
           type: string
@@ -496,18 +554,14 @@ components:
           maxLength: 256
           minLength: 1
           type: string
-        profileId:
+        templateId:
           type: string
-        importedImageId:
-          type: string
-          description: ID of a successful import owned by this client. Archive restore
-            reuses the source imported image when omitted, unless acceptImageChange is
-            true, in which case the target profile image is used.
+          minLength: 1
         acceptImageChange:
           type: boolean
           description: Explicitly allow a validated portable workspace archive to restore into a different immutable image. Agent UID/GID must still match.
       required:
-      - profileId
+      - templateId
       - ownerKey
       - archiveId
       type: object
@@ -1415,9 +1469,9 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [importedImageId]
+              required: [templateId]
               properties:
-                importedImageId:
+                templateId:
                   type: string
                   minLength: 1
       responses:
@@ -1687,11 +1741,117 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       summary: List configured profiles without authentication
-  /v1/profiles/{id}/warm-default:
+  /v1/templates:
+    get:
+      operationId: listTemplates
+      summary: List templates owned by the caller, including those being deleted
+      description: Templates remain visible with deleting=true after deletion is requested and until their records are removed.
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Template'
+        default:
+          $ref: '#/components/responses/Error'
+    post:
+      operationId: createTemplate
+      summary: Create an immutable template version
+      description: |
+        Repeating the same client/name/version and original creation request returns the same template. Reusing that name and version with different creation configuration returns 409. A later prewarm update does not change the original request identity or get rolled back by a repeated create.
+        The desired template state is persisted before warm publication. If publication cannot be confirmed, the API returns 504 UNKNOWN_OUTCOME; the desired state remains saved and publication retries in the background. Retry the same request or GET the template to inspect its state.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, version, profileId]
+              properties:
+                name:
+                  type: string
+                  pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$'
+                  maxLength: 80
+                version:
+                  type: string
+                  pattern: '^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$'
+                  maxLength: 80
+                profileId:
+                  type: string
+                  minLength: 1
+                importedImageId:
+                  type: string
+                warmSlots:
+                  type: integer
+                  minimum: 0
+                  maximum: 1024
+                  default: 0
+      responses:
+        "200":
+          description: Existing matching template returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Template'
+        "201":
+          description: Template created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Template'
+        "504":
+          description: UNKNOWN_OUTCOME. Desired template state is saved; warm publication retries in the background. Retry the same request or GET the template.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/templates/{id}:
+    parameters:
+    - in: path
+      name: id
+      required: true
+      schema:
+        type: string
+    get:
+      operationId: getTemplate
+      summary: Get a template
+      description: Returns deleting=true while deletion is pending, until the template record is removed.
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Template'
+        default:
+          $ref: '#/components/responses/Error'
+    delete:
+      operationId: deleteTemplate
+      summary: Delete an unreferenced template
+      description: |
+        Returns 409 while any non-deleted Box, Archive, or upgrade operation references the template. Deletion first persists deleting=true and revokes warm publication, then removes the template record. If publication revocation cannot be confirmed, the API returns 504 UNKNOWN_OUTCOME; the deleting desired state is saved and reconciliation retries. Retry DELETE or GET the template to inspect progress.
+      responses:
+        "204":
+          description: Template deleted
+        "504":
+          description: UNKNOWN_OUTCOME. Deleting state is saved; warm publication revocation retries in the background. Retry DELETE or GET the template.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/templates/{id}/prewarm:
     put:
-      operationId: setWarmDefaultImage
-      summary: Select the profile image eligible for speculative warm slots
-      description: Uses a client-owned imported image, or the configured base image when omitted. Existing Boxes retain their pinned images.
+      operationId: setTemplateWarmSlots
+      summary: Set the desired warm slot count for a template
+      description: The desired slot count is saved before publication. If publication cannot be confirmed, the API returns 504 UNKNOWN_OUTCOME and retries reconciliation in the background; retry this PUT or GET the template to inspect state.
       parameters:
       - in: path
         name: id
@@ -1705,21 +1865,25 @@ paths:
             schema:
               type: object
               additionalProperties: false
+              required: [warmSlots]
               properties:
-                importedImageId:
-                  type: string
+                warmSlots:
+                  type: integer
+                  minimum: 0
+                  maximum: 1024
       responses:
         "200":
-          description: Warm target persisted
+          description: Updated template
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: false
-                properties:
-                  image:
-                    type: string
-                required: [image]
+                $ref: '#/components/schemas/Template'
+        "504":
+          description: UNKNOWN_OUTCOME. Desired slot count is saved; publication retries in the background. Retry this PUT or GET the template.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         default:
           $ref: '#/components/responses/Error'
   /v1/routes:

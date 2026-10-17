@@ -113,8 +113,10 @@ func (c *Client) do(ctx context.Context, method, path, key string, body, out any
 	if len(data) > maxResponse {
 		return fmt.Errorf("cellbox: response exceeds %d bytes", maxResponse)
 	}
-	if err := json.Unmarshal(data, out); err != nil {
-		return fmt.Errorf("cellbox: decode response: %w", err)
+	if out != nil {
+		if err := json.Unmarshal(data, out); err != nil {
+			return fmt.Errorf("cellbox: decode response: %w", err)
+		}
 	}
 	return nil
 }
@@ -152,6 +154,71 @@ func (c *Client) ListProfiles(ctx context.Context) ([]Profile, error) {
 	var profiles []Profile
 	err := c.do(ctx, http.MethodGet, "/v1/profiles", "", nil, &profiles)
 	return profiles, err
+}
+
+// CreateTemplate registers an immutable template version. The server treats an
+// identical name, version, and specification as idempotent and rejects conflicts.
+func (c *Client) CreateTemplate(ctx context.Context, opts CreateTemplateOptions) (*Template, error) {
+	if strings.TrimSpace(opts.Name) == "" || strings.TrimSpace(opts.Version) == "" || strings.TrimSpace(opts.ProfileID) == "" {
+		return nil, fmt.Errorf("cellbox: template name, version, and profile ID are required")
+	}
+	if opts.WarmSlots < 0 || opts.WarmSlots > 1024 {
+		return nil, fmt.Errorf("cellbox: warm slots must be 0..1024")
+	}
+	var template Template
+	if err := c.do(ctx, http.MethodPost, "/v1/templates", "", opts, &template); err != nil {
+		return nil, err
+	}
+	return &template, nil
+}
+
+// ListTemplates lists templates in the client's namespace.
+func (c *Client) ListTemplates(ctx context.Context) ([]Template, error) {
+	var templates []Template
+	err := c.do(ctx, http.MethodGet, "/v1/templates", "", nil, &templates)
+	return templates, err
+}
+
+// GetTemplate returns a registered template by its immutable ID.
+func (c *Client) GetTemplate(ctx context.Context, id string) (*Template, error) {
+	path, err := resourcePath("/v1/templates/", id)
+	if err != nil {
+		return nil, err
+	}
+	var template Template
+	if err := c.do(ctx, http.MethodGet, path, "", nil, &template); err != nil {
+		return nil, err
+	}
+	return &template, nil
+}
+
+// SetTemplateWarmSlots updates the template's desired shared prewarm capacity.
+func (c *Client) SetTemplateWarmSlots(ctx context.Context, id string, slots int) (*Template, error) {
+	if slots < 0 || slots > 1024 {
+		return nil, fmt.Errorf("cellbox: warm slots must be 0..1024")
+	}
+	path, err := resourcePath("/v1/templates/", id)
+	if err != nil {
+		return nil, err
+	}
+	var template Template
+	err = c.do(ctx, http.MethodPut, path+"/prewarm", "", struct {
+		WarmSlots int `json:"warmSlots"`
+	}{slots}, &template)
+	if err != nil {
+		return nil, err
+	}
+	return &template, nil
+}
+
+// DeleteTemplate removes an unused template. The server rejects templates still
+// referenced by active sandboxes or archives.
+func (c *Client) DeleteTemplate(ctx context.Context, id string) error {
+	path, err := resourcePath("/v1/templates/", id)
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, http.MethodDelete, path, "", nil, nil)
 }
 
 func (c *Client) GetOperation(ctx context.Context, id string) (*Operation, error) {

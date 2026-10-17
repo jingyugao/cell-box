@@ -86,6 +86,9 @@ type Capabilities struct {
 	PersistentHome     bool   `json:"persistentHome,omitempty"`
 }
 type Box struct {
+	TemplateID      string       `json:"templateId"`
+	TemplateName    string       `json:"templateName"`
+	TemplateVersion string       `json:"templateVersion"`
 	ID              string       `json:"id"`
 	OwnerKey        string       `json:"ownerKey"`
 	ProfileID       string       `json:"profileId"`
@@ -104,11 +107,13 @@ type Box struct {
 	CreatedAt       time.Time    `json:"createdAt"`
 }
 type upgradeIntent struct {
+	PreviousTemplateID      string `json:"previousTemplateId,omitempty"`
 	Nonce                   string `json:"nonce"`
 	PreviousImportedImageID string `json:"previousImportedImageId,omitempty"`
 	RuntimeCommitted        bool   `json:"runtimeCommitted,omitempty"`
 }
 type boxRecord struct {
+	UpgradeTemplateID          string             `json:"upgradeTemplateId,omitempty"`
 	UpgradeImageID             string             `json:"upgradeImageId,omitempty"`
 	Upgrade                    *upgradeIntent     `json:"upgrade,omitempty"`
 	Box                        Box                `json:"box"`
@@ -165,6 +170,9 @@ type Route struct {
 	URL   string `json:"url"`
 }
 type Archive struct {
+	TemplateID      string `json:"templateId"`
+	TemplateName    string `json:"templateName"`
+	TemplateVersion string `json:"templateVersion"`
 	// Recovery and image deletion must not depend on a retained source Box.
 	ImportedImageID string            `json:"importedImageId,omitempty"`
 	PreparedImage   string            `json:"preparedImage,omitempty"`
@@ -201,6 +209,7 @@ type purgeRecord struct {
 }
 
 type State struct {
+	Templates      map[string]templateRecord      `json:"templates"`
 	Purges         map[string]purgeRecord         `json:"purges,omitempty"`
 	ImportedImages map[string]importedImageRecord `json:"importedImages"`
 	Schema         int                            `json:"schema"`
@@ -213,8 +222,8 @@ type State struct {
 	Keys           map[string]keyRecord           `json:"keys"`
 }
 
-const stateSchema = 3
+const stateSchema = 5
 
 func newState() State {
-	return State{Purges: map[string]purgeRecord{}, ImportedImages: map[string]importedImageRecord{}, Schema: stateSchema, Boxes: map[string]boxRecord{}, Operations: map[string]operationRecord{}, Executions: map[string]executionRecord{}, Leases: map[string]Lease{}, Routes: map[string]Route{}, Archives: map[string]archiveRecord{}, Keys: map[string]keyRecord{}}
+	return State{Templates: map[string]templateRecord{}, Purges: map[string]purgeRecord{}, ImportedImages: map[string]importedImageRecord{}, Schema: stateSchema, Boxes: map[string]boxRecord{}, Operations: map[string]operationRecord{}, Executions: map[string]executionRecord{}, Leases: map[string]Lease{}, Routes: map[string]Route{}, Archives: map[string]archiveRecord{}, Keys: map[string]keyRecord{}}
 }

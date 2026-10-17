@@ -51,7 +51,7 @@ func TestCreateWaitsForOperationAndConnects(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Error(err)
 			}
-			if body.ProfileID != "python" || body.OwnerKey != "job-7" {
+			if body.TemplateID != "tpl-python-v1" || body.OwnerKey != "job-7" {
 				t.Errorf("create body = %+v", body)
 			}
 			if got := r.Header.Get("Idempotency-Key"); got != "create-key" {
@@ -74,7 +74,7 @@ func TestCreateWaitsForOperationAndConnects(t *testing.T) {
 	defer server.Close()
 
 	client := testClient(t, server, "/gateway")
-	sandbox, err := client.Create(context.Background(), CreateOptions{ProfileID: "python", OwnerKey: "job-7", IdempotencyKey: "create-key"})
+	sandbox, err := client.Create(context.Background(), CreateOptions{TemplateID: "tpl-python-v1", OwnerKey: "job-7", IdempotencyKey: "create-key"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,6 +83,86 @@ func TestCreateWaitsForOperationAndConnects(t *testing.T) {
 	}
 	if got := postCount.Load(); got != 1 {
 		t.Fatalf("create requests = %d, want 1", got)
+	}
+}
+
+func TestTemplateLifecycleUsesVersionedTemplateEndpoints(t *testing.T) {
+	templateBody := `{"id":"tpl-1","name":"python","version":"v1","profileId":"small","image":"python:3","cpu":1,"memoryMiB":512,"warmSlots":2,"createdAt":"2026-01-02T03:04:05Z"}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertHeaders(t, r)
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/templates":
+			var body CreateTemplateOptions
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			if body.Name != "python" || body.Version != "v1" || body.ProfileID != "small" || body.ImportedImageID != "image-1" || body.WarmSlots != 2 {
+				t.Errorf("create template body = %+v", body)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(templateBody))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/templates":
+			writeJSONTest(w, []Template{{ID: "tpl-1", Name: "python", Version: "v1"}})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/templates/tpl-1":
+			_, _ = w.Write([]byte(templateBody))
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/templates/tpl-1/prewarm":
+			var body struct {
+				WarmSlots int `json:"warmSlots"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			if body.WarmSlots != 0 {
+				t.Errorf("warmSlots = %d, want 0", body.WarmSlots)
+			}
+			_, _ = w.Write([]byte(templateBody))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/templates/tpl-1":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := testClient(t, server, "")
+
+	template, err := client.CreateTemplate(context.Background(), CreateTemplateOptions{Name: "python", Version: "v1", ProfileID: "small", ImportedImageID: "image-1", WarmSlots: 2})
+	if err != nil || template.ID != "tpl-1" || template.MemoryMiB != 512 {
+		t.Fatalf("CreateTemplate = %+v, %v", template, err)
+	}
+	listed, err := client.ListTemplates(context.Background())
+	if err != nil || len(listed) != 1 || listed[0].ID != "tpl-1" {
+		t.Fatalf("ListTemplates = %+v, %v", listed, err)
+	}
+	got, err := client.GetTemplate(context.Background(), "tpl-1")
+	if err != nil || got.Version != "v1" {
+		t.Fatalf("GetTemplate = %+v, %v", got, err)
+	}
+	updated, err := client.SetTemplateWarmSlots(context.Background(), "tpl-1", 0)
+	if err != nil || updated.ID != "tpl-1" {
+		t.Fatalf("SetTemplateWarmSlots = %+v, %v", updated, err)
+	}
+	if err := client.DeleteTemplate(context.Background(), "tpl-1"); err != nil {
+		t.Fatalf("DeleteTemplate: %v", err)
+	}
+}
+
+func TestCreateRequiresTemplateIDAndWarmSlotsCannotBeNegative(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests.Add(1); http.NotFound(w, r) }))
+	defer server.Close()
+	client := testClient(t, server, "")
+	if _, err := client.CreateAsync(context.Background(), CreateOptions{OwnerKey: "owner"}); err == nil {
+		t.Fatal("CreateAsync accepted missing template ID")
+	}
+	if _, err := client.CreateTemplate(context.Background(), CreateTemplateOptions{Name: "python", Version: "v1", ProfileID: "small", WarmSlots: -1}); err == nil {
+		t.Fatal("CreateTemplate accepted negative warm slots")
+	}
+	if _, err := client.SetTemplateWarmSlots(context.Background(), "tpl", -1); err == nil {
+		t.Fatal("SetTemplateWarmSlots accepted negative slots")
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("invalid requests sent %d requests", requests.Load())
 	}
 }
 
@@ -305,7 +385,7 @@ func TestSubmitErrorRetainsIdempotencyKey(t *testing.T) {
 	}))
 	defer server.Close()
 	client := testClient(t, server, "")
-	_, err := client.CreateAsync(context.Background(), CreateOptions{ProfileID: "p", OwnerKey: "o", IdempotencyKey: "recover-this"})
+	_, err := client.CreateAsync(context.Background(), CreateOptions{TemplateID: "tpl", OwnerKey: "o", IdempotencyKey: "recover-this"})
 	var requestErr *RequestError
 	if !errors.As(err, &requestErr) || requestErr.IdempotencyKey != "recover-this" {
 		t.Fatalf("error = %#v", err)

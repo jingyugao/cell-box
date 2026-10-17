@@ -26,23 +26,24 @@ import (
 )
 
 type Service struct {
-	objects       objectstorage.Objects
-	config        Config
-	store         *Store
-	providers     map[string]boxprovider.Provider
-	http          *http.Client
-	toolHTTP      *http.Client
-	ctx           context.Context
-	cancel        context.CancelFunc
-	wg            sync.WaitGroup
-	mu            sync.Mutex
-	warmDefaultMu sync.Mutex
-	admissions    keyedLocks
-	observerMu    sync.Mutex
-	observers     map[string]bool
-	runtimeFeeds  map[string]*runtimeFeed
-	gcMu          sync.Mutex
-	streams       map[string]activeStream
+	objects      objectstorage.Objects
+	config       Config
+	store        *Store
+	providers    map[string]boxprovider.Provider
+	http         *http.Client
+	toolHTTP     *http.Client
+	ctx          context.Context
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	mu           sync.Mutex
+	templateMu   sync.Mutex
+	templateWake chan struct{}
+	admissions   keyedLocks
+	observerMu   sync.Mutex
+	observers    map[string]bool
+	runtimeFeeds map[string]*runtimeFeed
+	gcMu         sync.Mutex
+	streams      map[string]activeStream
 }
 type activeStream struct {
 	boxID  string
@@ -109,7 +110,12 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 	s := &Service{objects: objects, config: config, store: store, providers: providers,
 		http:     &http.Client{Transport: &http.Transport{Proxy: nil, ResponseHeaderTimeout: 35 * time.Second}, CheckRedirect: noRedirect},
 		toolHTTP: &http.Client{Transport: &http.Transport{Proxy: nil, ResponseHeaderTimeout: 5*time.Minute + 5*time.Second}, CheckRedirect: noRedirect},
-		ctx:      ctx, cancel: cancel, streams: map[string]activeStream{}}
+		ctx:      ctx, cancel: cancel, streams: map[string]activeStream{}, templateWake: make(chan struct{}, 1)}
+	if err = s.validateTemplateLocations(); err != nil {
+		cancel()
+		store.Close()
+		return nil, err
+	}
 	if err = s.cleanupStartupTemps(); err != nil {
 		cancel()
 		store.Close()
@@ -159,6 +165,7 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 					if b.Box.OperationID == id {
 						b.Box.OperationID = ""
 						b.UpgradeImageID = ""
+						b.UpgradeTemplateID = ""
 						b.Box.Version++
 						st.Boxes[bid] = b
 					}
@@ -222,6 +229,7 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 		store.Close()
 		return nil, err
 	}
+	s.startTemplateSync()
 	s.startRetention()
 	s.recoverResumeOperations()
 	s.recoverUpgradeOperations()
@@ -414,6 +422,9 @@ func (s *Service) launchWithCommitContext(request context.Context, op Operation,
 }
 
 func (s *Service) launchWithCompletion(request context.Context, op Operation, work func(context.Context) (map[string]string, error), commit func(*State) error, completed func(error)) {
+	if op.Kind == "create" || op.Kind == "restore" || op.Kind == "upgrade" || op.Kind == "destroy" {
+		s.notifyTemplateSync()
+	}
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -472,6 +483,7 @@ func (s *Service) launchWithCompletion(request context.Context, op Operation, wo
 				if !preserveUpgradeIntent {
 					b.Box.OperationID = ""
 					b.UpgradeImageID = ""
+					b.UpgradeTemplateID = ""
 					if op.Kind == "upgrade" && err == nil {
 						b.Upgrade = nil
 					}
@@ -498,6 +510,9 @@ func (s *Service) launchWithCompletion(request context.Context, op Operation, wo
 		}
 		if saveErr == nil {
 			operationSpan.AddEvent("cellbox.operation.published")
+			if op.Kind == "create" || op.Kind == "restore" || op.Kind == "upgrade" || op.Kind == "destroy" {
+				s.notifyTemplateSync()
+			}
 		}
 		runtimeTiming(op.TargetID, "cellbox.persist_completion", saveStarted, saveErr)
 		if saveErr != nil && !errors.Is(saveErr, boxprovider.ErrStaleTransition) {
@@ -929,39 +944,20 @@ func (s *Service) provision(ctx context.Context, id string) (Box, error) {
 }
 
 type createRequest struct {
-	ProfileID       string `json:"profileId"`
-	OwnerKey        string `json:"ownerKey"`
-	ImportedImageID string `json:"importedImageId,omitempty"`
-	Staged          bool   `json:"staged,omitempty"`
+	TemplateID string `json:"templateId"`
+	OwnerKey   string `json:"ownerKey"`
+	Staged     bool   `json:"staged,omitempty"`
 }
 
 func (s *Service) create(client, key string, input createRequest, archiveID string, acceptImageChange bool) (Operation, error) {
 	if input.OwnerKey == "" || len(input.OwnerKey) > 256 {
 		return Operation{}, apiError("INVALID_REQUEST", "ownerKey must contain 1..256 bytes")
 	}
-	profile, err := s.profile(client, input.ProfileID)
-	if err != nil {
-		return Operation{}, err
+	if input.TemplateID == "" {
+		return Operation{}, apiError("INVALID_REQUEST", "templateId is required")
 	}
-	if archiveID != "" && input.ImportedImageID == "" && !acceptImageChange {
-		err := s.store.View(func(st State) error {
-			a, ok := st.Archives[archiveID]
-			if !ok || a.ClientID != client || a.Deleting {
-				return apiError("NOT_FOUND", "Archive not found")
-			}
-			input.ImportedImageID = a.Archive.ImportedImageID
-			return nil
-		})
-		if err != nil {
-			return Operation{}, err
-		}
-	}
-	if input.ImportedImageID != "" {
-		profile, err = s.importedProfile(client, input.ImportedImageID, profile)
-		if err != nil {
-			return Operation{}, err
-		}
-	}
+	var profile Profile
+	var template Template
 	kind := "create"
 	if archiveID != "" {
 		kind = "restore"
@@ -972,13 +968,18 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 		ArchiveID         string
 		AcceptImageChange bool
 	}{input, archiveID, acceptImageChange}, func(st *State, op *Operation) error {
-		if input.ImportedImageID != "" {
-			record, ok := st.ImportedImages[input.ImportedImageID]
-			if !ok || record.ClientID != client {
-				return apiError("NOT_FOUND", "Imported image not found")
+		tmpl, err := ownedTemplate(*st, client, input.TemplateID)
+		if err != nil {
+			return err
+		}
+		profile, template = tmpl.Profile, tmpl.Template
+		if template.ImportedImageID != "" {
+			image, ok := st.ImportedImages[template.ImportedImageID]
+			if !ok || image.ClientID != client {
+				return apiError("NOT_FOUND", "Template image not found")
 			}
-			if record.ImportedImage.Deleting {
-				return apiError("CONFLICT", "Imported image is being deleted")
+			if image.ImportedImage.Deleting {
+				return apiError("CONFLICT", "Template image is being deleted")
 			}
 		}
 		if archiveID != "" {
@@ -1003,9 +1004,9 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 		if archiveID != "" {
 			state = "restoring"
 		}
-		st.Boxes[id] = boxRecord{Box: Box{ID: id, OwnerKey: input.OwnerKey, ProfileID: profile.ID, Phase: state, Version: 1, Image: profile.Image, Workspace: profile.Guest.Workspace, Capabilities: profileCapabilities(profile), OperationID: op.ID, CreatedAt: time.Now().UTC()}, ClientID: client, Profile: profile, Staged: archiveID != "" || input.Staged, RestoreComplete: input.Staged && archiveID == "", RestoreArchiveID: archiveID, AcceptImageChange: acceptImageChange}
+		st.Boxes[id] = boxRecord{Box: Box{ID: id, TemplateID: template.ID, TemplateName: template.Name, TemplateVersion: template.Version, OwnerKey: input.OwnerKey, ProfileID: profile.ID, Phase: state, Version: 1, Image: profile.Image, Workspace: profile.Guest.Workspace, Capabilities: profileCapabilities(profile), OperationID: op.ID, CreatedAt: time.Now().UTC()}, ClientID: client, Profile: profile, Staged: archiveID != "" || input.Staged, RestoreComplete: input.Staged && archiveID == "", RestoreArchiveID: archiveID, AcceptImageChange: acceptImageChange}
 		record := st.Boxes[id]
-		record.Box.ImportedImageID = input.ImportedImageID
+		record.Box.ImportedImageID = template.ImportedImageID
 		st.Boxes[id] = record
 		return nil
 	})

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Import test/counter's ordinary image and verify it through the public REST API.
-# Keeps its source sandbox suspended and restored sandbox running for inspection.
+# Saves evidence under EVIDENCE_DIR and removes all test resources on exit.
 set -euo pipefail
 [[ $# == 3 ]] || { echo "Usage: $0 API_URL PROFILE_ID SOURCE_IMAGE" >&2; exit 2; }
 uv run python - "$@" <<'PY'
@@ -21,6 +21,8 @@ opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 evidence = Path(os.environ.get('EVIDENCE_DIR', 'tmp/validation/counter-import'))
 evidence.mkdir(parents=True, exist_ok=True)
 report = {'source': source, 'profileId': profile}
+boxes, archives = [], []
+template_id = None
 
 def save(name, value):
     (evidence / (name + '.json')).write_text(json.dumps(value, indent=2) + '\n')
@@ -60,6 +62,7 @@ def wait(op):
 def create(path, body, name):
     op = call('POST', path, body)
     report[name] = op['targetId']
+    boxes.append(op['targetId'])
     save('report', report)
     return wait(op)['targetId']
 
@@ -110,6 +113,8 @@ try:
     report['importedImageId'] = imported_id
     report['image'] = imported['image']
     save('imported', imported)
+    template = call('POST', '/v1/templates', {'name': 'counter-import-' + str(uuid.uuid4()), 'version': 'v1', 'profileId': profile, 'importedImageId': imported_id})
+    template_id = template['id']
     assert '@sha256:' in imported['resolvedSource'] and '@sha256:' in imported['image']
     expected_digest = os.environ.get('COUNTER_SOURCE_DIGEST')
     if expected_digest:
@@ -118,7 +123,7 @@ try:
     assert imported['env']['COUNTER_MARKER_PATH'] == workspace + '/marker' and imported['ports'] == [8000]
     print('PASS: registry image imported, entrypoint retained, guest injected, idempotency verified', flush=True)
 
-    box = create('/v1/boxes', {'profileId': profile, 'ownerKey': 'counter-import-' + str(uuid.uuid4()), 'importedImageId': imported_id}, 'boxId')
+    box = create('/v1/boxes', {'templateId': template_id, 'ownerKey': 'counter-import-' + str(uuid.uuid4())}, 'boxId')
     route = route_for(box)
     report['sourceRouteId'] = route
     ready(route)
@@ -158,10 +163,11 @@ try:
     print('PASS: suspend/resume preserved count, process identity and 32 MiB of memory; counter continues at 11', flush=True)
 
     archive = wait(call('POST', f'/v1/boxes/{box}/archives'))['result']['archiveId']
+    archives.append(archive)
     report['archiveId'] = archive
     # Keep the source checkpoint, freeing running resources for archive restore.
     wait(call('POST', f'/v1/boxes/{box}:suspend'))
-    restored = create('/v1/boxes:restore', {'profileId': profile, 'ownerKey': 'counter-restore-' + str(uuid.uuid4()), 'archiveId': archive}, 'restoredBoxId')
+    restored = create('/v1/boxes:restore', {'templateId': template_id, 'ownerKey': 'counter-restore-' + str(uuid.uuid4()), 'archiveId': archive}, 'restoredBoxId')
     restored_box = call('GET', '/v1/boxes/' + restored)
     assert restored_box['phase'] == 'staged' and restored_box['importedImageId'] == imported_id
     assert call('GET', f'/v1/boxes/{restored}/files?path=marker') == before['instance'].encode()
@@ -179,4 +185,25 @@ try:
     print(json.dumps(report, indent=2), flush=True)
 finally:
     save('report', report)
+    failed = False
+    for box_id in reversed(boxes):
+        try:
+            wait(call('POST', f'/v1/boxes/{box_id}:destroy'))
+        except Exception as error:
+            failed = True
+            print(f'Could not destroy test sandbox {box_id}: {error}', file=sys.stderr)
+    for archive in archives:
+        try:
+            call('DELETE', '/v1/archives/' + archive)
+        except Exception as error:
+            failed = True
+            print(f'Could not delete test archive {archive}: {error}', file=sys.stderr)
+    if template_id:
+        try:
+            call('DELETE', '/v1/templates/' + template_id)
+        except Exception as error:
+            failed = True
+            print(f'Could not delete test template {template_id}: {error}', file=sys.stderr)
+    if failed:
+        raise RuntimeError('Test resource cleanup incomplete; inspect the IDs above')
 PY

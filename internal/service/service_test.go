@@ -247,7 +247,12 @@ func wantStatus(t *testing.T, got, want int, body []byte) {
 }
 func (f *coreFixture) createBox(t *testing.T, key string) (Operation, Box) {
 	t.Helper()
-	status, body := f.call(t, "POST", "/v1/boxes", testClientToken, key, map[string]string{"profileId": "profile-a", "ownerKey": "owner-a"})
+	return f.createBoxWithTemplate(t, key, f.template(t))
+}
+
+func (f *coreFixture) createBoxWithTemplate(t *testing.T, key, templateID string) (Operation, Box) {
+	t.Helper()
+	status, body := f.call(t, "POST", "/v1/boxes", testClientToken, key, map[string]string{"templateId": templateID, "ownerKey": "owner-a"})
 	wantStatus(t, status, 202, body)
 	op := decodeResponse[Operation](t, body)
 	f.waitOperation(t, op.ID, "succeeded")
@@ -260,9 +265,28 @@ func (f *coreFixture) createBox(t *testing.T, key string) (Operation, Box) {
 	return op, box
 }
 
+// template registers a snapshot of the fixture's current profile. Each call
+// creates a distinct immutable version so tests can change fixture profiles.
+func (f *coreFixture) template(t *testing.T) string {
+	t.Helper()
+	return f.templateFor(t, f.service.config.Profiles[0], fmt.Sprintf("test-%d", time.Now().UnixNano()), "v1", "", 0)
+}
+
+func (f *coreFixture) templateFor(t *testing.T, profile Profile, name, version, importedImageID string, warmSlots int) string {
+	t.Helper()
+	status, body := f.call(t, "POST", "/v1/templates", testClientToken, "", map[string]any{
+		"name": name, "version": version, "profileId": profile.ID,
+		"importedImageId": importedImageID, "warmSlots": warmSlots,
+	})
+	if status != http.StatusCreated && status != http.StatusOK {
+		t.Fatalf("register template: HTTP %d: %s", status, body)
+	}
+	return decodeResponse[Template](t, body).ID
+}
+
 func TestStagedCreateHoldsWorkloadUntilActivation(t *testing.T) {
 	f := newCoreFixture(t)
-	input := map[string]any{"profileId": "profile-a", "ownerKey": "staged-owner", "staged": true}
+	input := map[string]any{"templateId": f.template(t), "ownerKey": "staged-owner", "staged": true}
 	status, body := f.call(t, "POST", "/v1/boxes", testClientToken, "staged-create", input)
 	wantStatus(t, status, 202, body)
 	op := decodeResponse[Operation](t, body)
@@ -284,6 +308,25 @@ func TestStagedCreateHoldsWorkloadUntilActivation(t *testing.T) {
 	wantStatus(t, status, 200, body)
 	if decodeResponse[Box](t, body).Phase != "running" || f.activateCalls.Load() != 1 {
 		t.Fatal("activation did not start workload exactly once")
+	}
+}
+
+func TestCreateAndRestoreRequireTemplateAndRejectLegacyImageFields(t *testing.T) {
+	f := newCoreFixture(t)
+	templateID := f.template(t)
+	for _, tc := range []struct {
+		name, path string
+		body       map[string]any
+	}{
+		{name: "create missing template", path: "/v1/boxes", body: map[string]any{"profileId": "profile-a", "ownerKey": "old"}},
+		{name: "create legacy fields", path: "/v1/boxes", body: map[string]any{"templateId": templateID, "profileId": "profile-a", "importedImageId": "img-old", "ownerKey": "old"}},
+		{name: "restore missing template", path: "/v1/boxes:restore", body: map[string]any{"profileId": "profile-a", "archiveId": "archive", "ownerKey": "old"}},
+		{name: "restore legacy fields", path: "/v1/boxes:restore", body: map[string]any{"templateId": templateID, "profileId": "profile-a", "importedImageId": "img-old", "archiveId": "archive", "ownerKey": "old"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := f.call(t, "POST", tc.path, testClientToken, tc.name, tc.body)
+			wantStatus(t, status, http.StatusBadRequest, body)
+		})
 	}
 }
 
@@ -374,7 +417,8 @@ func TestRESTWithoutClientCredentialsOrProfileAdmission(t *testing.T) {
 	f.reopen(t)
 	status, body := f.call(t, "GET", "/v1/profiles", "", "", nil)
 	wantStatus(t, status, 200, body)
-	status, body = f.call(t, "POST", "/v1/boxes", "", "anonymous-create", map[string]string{"profileId": "profile-a", "ownerKey": "owner"})
+	templateID := f.template(t)
+	status, body = f.call(t, "POST", "/v1/boxes", "", "anonymous-create", map[string]string{"templateId": templateID, "ownerKey": "owner"})
 	wantStatus(t, status, 202, body)
 	op := decodeResponse[Operation](t, body)
 	f.waitOperation(t, op.ID, "succeeded")
@@ -383,7 +427,7 @@ func TestRESTWithoutClientCredentialsOrProfileAdmission(t *testing.T) {
 	if f.service.config.ClientID != "internal" {
 		t.Fatal("unexpected default data namespace")
 	}
-	status, body = f.call(t, "POST", "/v1/boxes", "", "anonymous-create", map[string]string{"profileId": "profile-a", "ownerKey": "owner"})
+	status, body = f.call(t, "POST", "/v1/boxes", "", "anonymous-create", map[string]string{"templateId": templateID, "ownerKey": "owner"})
 	wantStatus(t, status, 202, body)
 	if decodeResponse[Operation](t, body).ID != op.ID {
 		t.Fatal("anonymous retries lost their idempotency namespace")
@@ -516,13 +560,21 @@ func TestResumeCompletesWithUnhealthyGuestAndCancelsBackgroundProbe(t *testing.T
 
 func TestRESTIdempotencyPersistsAcrossReopen(t *testing.T) {
 	f := newCoreFixture(t)
-	createOp, box := f.createBox(t, "create-persist")
-	status, body := f.call(t, "POST", "/v1/boxes", testClientToken, "create-persist", map[string]string{"profileId": "profile-a", "ownerKey": "owner-a"})
+	templateID := f.template(t)
+	createRequest := map[string]string{"templateId": templateID, "ownerKey": "owner-a"}
+	status, body := f.call(t, "POST", "/v1/boxes", testClientToken, "create-persist", createRequest)
+	wantStatus(t, status, 202, body)
+	createOp := decodeResponse[Operation](t, body)
+	f.waitOperation(t, createOp.ID, "succeeded")
+	status, body = f.call(t, "GET", "/v1/boxes/"+createOp.TargetID, testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	box := decodeResponse[Box](t, body)
+	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "create-persist", createRequest)
 	wantStatus(t, status, 202, body)
 	if op := decodeResponse[Operation](t, body); op.ID != createOp.ID {
 		t.Fatalf("create replay returned %s, want %s", op.ID, createOp.ID)
 	}
-	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "create-persist", map[string]string{"profileId": "profile-a", "ownerKey": "changed"})
+	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "create-persist", map[string]string{"templateId": templateID, "ownerKey": "changed"})
 	wantStatus(t, status, 409, body)
 	input := map[string]any{"argv": []string{"echo", "ok"}, "expectedGeneration": box.Generation, "timeoutMs": 30000}
 	status, body = f.call(t, "POST", "/v1/boxes/"+box.ID+"/execs", testClientToken, "exec-persist", input)
@@ -533,7 +585,7 @@ func TestRESTIdempotencyPersistsAcrossReopen(t *testing.T) {
 		t.Fatalf("guest exec calls = %d, want 1", f.execCalls.Load())
 	}
 	f.reopen(t)
-	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "create-persist", map[string]string{"profileId": "profile-a", "ownerKey": "owner-a"})
+	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "create-persist", createRequest)
 	wantStatus(t, status, 202, body)
 	if op := decodeResponse[Operation](t, body); op.ID != createOp.ID {
 		t.Fatalf("reopened create replay returned %s", op.ID)

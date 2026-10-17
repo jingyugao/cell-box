@@ -9,11 +9,10 @@ import (
 	"time"
 )
 
-// CreateOptions selects a configured profile and an application-owned label.
+// CreateOptions selects an immutable template version and an application-owned label.
 type CreateOptions struct {
-	ProfileID       string `json:"profileId"`
-	OwnerKey        string `json:"ownerKey"`
-	ImportedImageID string `json:"importedImageId,omitempty"`
+	TemplateID string `json:"templateId"`
+	OwnerKey   string `json:"ownerKey"`
 	// Staged holds the configured workload until explicitly activated via the API.
 	Staged         bool   `json:"staged,omitempty"`
 	IdempotencyKey string `json:"-"`
@@ -23,6 +22,9 @@ type CreateOptions struct {
 type SandboxInfo struct {
 	ID              string       `json:"id"`
 	OwnerKey        string       `json:"ownerKey"`
+	TemplateID      string       `json:"templateId"`
+	TemplateName    string       `json:"templateName"`
+	TemplateVersion string       `json:"templateVersion"`
 	ProfileID       string       `json:"profileId"`
 	Phase           string       `json:"phase"`
 	Generation      uint64       `json:"generation"`
@@ -60,6 +62,31 @@ type Profile struct {
 	CPU          float64      `json:"cpu"`
 	MemoryMiB    int64        `json:"memoryMiB"`
 	Capabilities Capabilities `json:"capabilities"`
+}
+
+// Template is an immutable, versioned sandbox configuration. WarmSlots is the
+// desired number of compatible prewarmed slots shared by sandboxes using it.
+type Template struct {
+	ID              string    `json:"id"`
+	Name            string    `json:"name"`
+	Version         string    `json:"version"`
+	ProfileID       string    `json:"profileId"`
+	ImportedImageID string    `json:"importedImageId,omitempty"`
+	Image           string    `json:"image"`
+	CPU             float64   `json:"cpu"`
+	MemoryMiB       int64     `json:"memoryMiB"`
+	WarmSlots       int       `json:"warmSlots"`
+	Deleting        bool      `json:"deleting,omitempty"`
+	CreatedAt       time.Time `json:"createdAt"`
+}
+
+// CreateTemplateOptions defines a new immutable template version.
+type CreateTemplateOptions struct {
+	Name            string `json:"name"`
+	Version         string `json:"version"`
+	ProfileID       string `json:"profileId"`
+	ImportedImageID string `json:"importedImageId,omitempty"`
+	WarmSlots       int    `json:"warmSlots,omitempty"`
 }
 
 // Operation records durable server work. IdempotencyKey is populated locally

@@ -113,7 +113,11 @@ func TestDockerREST(t *testing.T) {
 		}
 		return op
 	}
-	createRaw := call("POST", "/v1/boxes", map[string]string{"profileId": "smoke", "ownerKey": "source"}, 202)
+	var template service.Template
+	if err := json.Unmarshal(call("POST", "/v1/templates", map[string]string{"name": "smoke", "version": "v1", "profileId": "smoke"}, 201), &template); err != nil {
+		t.Fatal(err)
+	}
+	createRaw := call("POST", "/v1/boxes", map[string]string{"templateId": template.ID, "ownerKey": "source"}, 202)
 	var creating service.Operation
 	json.Unmarshal(createRaw, &creating)
 	t.Cleanup(func() {
@@ -130,7 +134,7 @@ func TestDockerREST(t *testing.T) {
 		return b
 	}
 	b := getBox(source)
-	if b.Phase != "running" || b.Generation != 1 {
+	if b.Phase != "running" || b.Generation != 1 || b.TemplateID != template.ID {
 		t.Fatalf("unexpected box %+v", b)
 	}
 	execCheck := func(argv []string, want string) {
@@ -165,7 +169,7 @@ func TestDockerREST(t *testing.T) {
 	}
 	wait(call("POST", "/v1/boxes/"+source+":unfreeze", nil, 202))
 	archive := wait(call("POST", "/v1/boxes/"+source+"/archives", nil, 202)).Result["archiveId"]
-	restoreRaw := call("POST", "/v1/boxes:restore", map[string]string{"profileId": "smoke", "ownerKey": "candidate", "archiveId": archive}, 202)
+	restoreRaw := call("POST", "/v1/boxes:restore", map[string]string{"templateId": template.ID, "ownerKey": "candidate", "archiveId": archive}, 202)
 	var restoring service.Operation
 	json.Unmarshal(restoreRaw, &restoring)
 	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", "cellbox-"+restoring.TargetID).Run() })
@@ -181,5 +185,6 @@ func TestDockerREST(t *testing.T) {
 	call("GET", "/v1/archives/"+archive, nil, 200)
 	wait(call("POST", "/v1/boxes/"+candidate+":destroy", nil, 202))
 	call("DELETE", "/v1/archives/"+archive, nil, 204)
+	call("DELETE", "/v1/templates/"+template.ID, nil, 204)
 	t.Log("agent/debug isolation, local tool, files, anonymous loopback forwarding, freeze, archive restore and cleanup passed")
 }

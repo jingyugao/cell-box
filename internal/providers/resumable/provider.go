@@ -52,38 +52,37 @@ func crName(boxID string) (string, error) {
 	return "cellbox-" + boxID, nil
 }
 
-func (p *Provider) Create(ctx context.Context, spec boxprovider.Spec) (boxprovider.Handle, error) {
-	if p == nil || p.Client == nil {
-		return boxprovider.Handle{}, errors.New("Kubernetes client is required")
-	}
+// buildWanted is shared by normal Box creation and warm-template preparation
+// so both paths produce the same execution Spec.
+func buildWanted(spec boxprovider.Spec) (*api.ResumablePod, error) {
 	crname, err := crName(spec.BoxID)
 	if err != nil {
-		return boxprovider.Handle{}, err
+		return nil, err
 	}
 	if spec.Namespace == "" || spec.NodeName == "" {
-		return boxprovider.Handle{}, errors.New("namespace and node name are required")
+		return nil, errors.New("namespace and node name are required")
 	}
 	if !validImage.MatchString(spec.Image) {
-		return boxprovider.Handle{}, errors.New("immutable image repository@sha256:<digest> is required")
+		return nil, errors.New("immutable image repository@sha256:<digest> is required")
 	}
 	if host := spec.SharedReadOnlyHostPath; host != "" &&
 		(!path.IsAbs(host) || path.Clean(host) != host || host == "/" || len(host) > 4096 || strings.ContainsAny(host, "\x00\r\n")) {
-		return boxprovider.Handle{}, errors.New("invalid sharedReadOnlyHostPath")
+		return nil, errors.New("invalid sharedReadOnlyHostPath")
 	}
 	if host := spec.DebugReadOnlyHostPath; host != "" &&
 		(!path.IsAbs(host) || path.Clean(host) != host || host == "/" || len(host) > 4096 || strings.ContainsAny(host, "\x00\r\n")) {
-		return boxprovider.Handle{}, errors.New("debug read-only host path must be a clean absolute directory path other than /")
+		return nil, errors.New("debug read-only host path must be a clean absolute directory path other than /")
 	}
 	if host := spec.DebugReadWriteHostPath; host != "" &&
 		(spec.DebugReadOnlyHostPath != "" || !path.IsAbs(host) || path.Clean(host) != host || host == "/" || len(host) > 4096 || strings.ContainsAny(host, "\x00\r\n")) {
-		return boxprovider.Handle{}, errors.New("debug read-write host path must be a clean absolute directory path other than /")
+		return nil, errors.New("debug read-write host path must be a clean absolute directory path other than /")
 	}
 	if math.IsNaN(spec.CPU) || math.IsInf(spec.CPU, 0) || spec.CPU <= 0 || spec.CPU > 1024 || spec.MemoryMiB <= 0 || spec.MemoryMiB > 1<<40 {
-		return boxprovider.Handle{}, errors.New("positive bounded CPU and memory are required")
+		return nil, errors.New("positive bounded CPU and memory are required")
 	}
 	config, err := json.Marshal(spec.Config)
 	if err != nil {
-		return boxprovider.Handle{}, fmt.Errorf("encode guest configuration: %w", err)
+		return nil, fmt.Errorf("encode guest configuration: %w", err)
 	}
 	argv := []string{"serve", "--config-base64", base64.StdEncoding.EncodeToString(config)}
 	if spec.Staged {
@@ -99,7 +98,6 @@ func (p *Provider) Create(ctx context.Context, spec boxprovider.Spec) (boxprovid
 		Command: []string{guestapi.Binary}, Args: argv,
 		Ports: []core.ContainerPort{{Name: "guest", ContainerPort: guestapi.Port, Protocol: core.ProtocolTCP}},
 		Resources: core.ResourceRequirements{
-			// Explicit zeros prevent Kubernetes from defaulting requests to limits.
 			Requests: core.ResourceList{core.ResourceCPU: resource.MustParse("0"), core.ResourceMemory: resource.MustParse("0")},
 			Limits:   resources,
 		},
@@ -111,19 +109,28 @@ func (p *Provider) Create(ctx context.Context, spec boxprovider.Spec) (boxprovid
 		TypeMeta:   meta.TypeMeta{APIVersion: api.GroupVersion.String(), Kind: api.Kind},
 		ObjectMeta: meta.ObjectMeta{Name: crname, Namespace: spec.Namespace, Labels: map[string]string{managedLabel: "true", boxLabel: spec.BoxID}},
 		Spec: api.Spec{NodeName: spec.NodeName, DesiredState: "Running", Container: container,
-			SharedReadOnlyHostPath: spec.SharedReadOnlyHostPath,
-			DebugReadOnlyHostPath:  spec.DebugReadOnlyHostPath,
-			DebugReadWriteHostPath: spec.DebugReadWriteHostPath,
-			PersistentHome:         spec.PersistentHome,
-			ServicePorts:           []core.ServicePort{{Name: "guest", Port: guestapi.Port, TargetPort: intstr.FromInt32(guestapi.Port), Protocol: core.ProtocolTCP}}},
+			SharedReadOnlyHostPath: spec.SharedReadOnlyHostPath, DebugReadOnlyHostPath: spec.DebugReadOnlyHostPath,
+			DebugReadWriteHostPath: spec.DebugReadWriteHostPath, PersistentHome: spec.PersistentHome,
+			ServicePorts: []core.ServicePort{{Name: "guest", Port: guestapi.Port, TargetPort: intstr.FromInt32(guestapi.Port), Protocol: core.ProtocolTCP}}},
 	}
 	if len(spec.Inventory) > 0 {
 		var record inventory.Record
 		if err = json.Unmarshal(spec.Inventory, &record); err != nil || record.ClientID == "" {
-			return boxprovider.Handle{}, errors.New("invalid inventory metadata")
+			return nil, errors.New("invalid inventory metadata")
 		}
 		wanted.Annotations = map[string]string{inventory.Annotation: string(spec.Inventory)}
 		wanted.Labels[inventory.ClientLabel] = inventory.ClientValue(record.ClientID)
+	}
+	return wanted, nil
+}
+
+func (p *Provider) Create(ctx context.Context, spec boxprovider.Spec) (boxprovider.Handle, error) {
+	if p == nil || p.Client == nil {
+		return boxprovider.Handle{}, errors.New("Kubernetes client is required")
+	}
+	wanted, err := buildWanted(spec)
+	if err != nil {
+		return boxprovider.Handle{}, err
 	}
 
 	err = p.Client.Create(ctx, wanted)
