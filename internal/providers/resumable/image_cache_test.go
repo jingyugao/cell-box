@@ -31,6 +31,28 @@ type cachePull func(context.Context, string) error
 
 func (f cachePull) CacheImage(ctx context.Context, image string) error { return f(ctx, image) }
 
+func TestEmbeddedImageCacheCallsBackendWithoutKubernetes(t *testing.T) {
+	_, spec, _ := fixture(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	called := false
+	// A nil Kubernetes client makes any old ConfigMap transport fail the test.
+	p := &Provider{CacheImageLocal: func(received context.Context, image, node, namespace string) error {
+		called = true
+		if image != spec.Image || node != spec.NodeName || namespace != spec.Namespace {
+			t.Fatal("wrong cache target")
+		}
+		return received.Err()
+	}}
+	if err := p.CacheImage(ctx, spec.Image, spec.NodeName, spec.Namespace); !errors.Is(err, context.Canceled) || !called {
+		t.Fatalf("direct cancellation lost: %v", err)
+	}
+	called = false
+	if err := p.CacheImage(t.Context(), "image:latest", spec.NodeName, spec.Namespace); err == nil || called {
+		t.Fatal("mutable image reached runtime")
+	}
+}
+
 func TestCacheImageWaitsForNodeResultAndCleansRequest(t *testing.T) {
 	for _, outcome := range []string{"success", "failure", "cancel"} {
 		t.Run(outcome, func(t *testing.T) {

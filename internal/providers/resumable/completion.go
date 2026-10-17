@@ -28,6 +28,9 @@ const observationBuffer = 8
 // Events carry their complete CR state, with no follow-up CR or Pod read.
 // Reconnects take one fresh filtered LIST snapshot and watch from its version.
 func (p *Provider) WatchObservations(ctx context.Context, h boxprovider.Handle) (<-chan boxprovider.Observation, error) {
+	if p.Local != nil {
+		return p.watchLocalObservations(ctx, h)
+	}
 	c, ok := p.Client.(client.WithWatch)
 	if !ok {
 		return nil, errors.New("Kubernetes client does not support watches")
@@ -38,6 +41,47 @@ func (p *Provider) WatchObservations(ctx context.Context, h boxprovider.Handle) 
 	}
 	out := make(chan boxprovider.Observation, observationBuffer)
 	go p.runObservationWatch(ctx, c, h, out, initial, stream)
+	return out, nil
+}
+
+// The embedded runtime publishes complete, committed snapshots directly. Only
+// the initial subscription reads Kubernetes; completions need no watch or GET.
+func (p *Provider) watchLocalObservations(ctx context.Context, h boxprovider.Handle) (<-chan boxprovider.Observation, error) {
+	if err := validateHandle(h); err != nil {
+		return nil, err
+	}
+	snapshots, stop, err := p.Local.Subscribe(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name})
+	if apierrors.IsNotFound(err) {
+		return nil, boxprovider.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := make(chan boxprovider.Observation, observationBuffer)
+	go func() {
+		defer stop()
+		defer close(out)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case snapshot := <-snapshots:
+				deleted := snapshot.Deleted || !validObservationIdentity(snapshot.Resource, h)
+				observation := boxprovider.Observation{Phase: "deleted"}
+				if !deleted {
+					observation = observationFromResource(snapshot.Resource, false)
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case out <- observation:
+				}
+				if deleted {
+					return
+				}
+			}
+		}
+	}()
 	return out, nil
 }
 

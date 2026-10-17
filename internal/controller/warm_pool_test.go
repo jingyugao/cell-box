@@ -31,6 +31,51 @@ type cachedCandidates struct {
 	reads    int
 }
 
+type noConfigMapClient struct {
+	client.Client
+	touched bool
+}
+
+func (c *noConfigMapClient) Get(ctx context.Context, key types.NamespacedName, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*core.ConfigMap); ok {
+		c.touched = true
+		return fmt.Errorf("unexpected ConfigMap Get")
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+func (c *noConfigMapClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if _, ok := obj.(*core.ConfigMap); ok {
+		c.touched = true
+		return fmt.Errorf("unexpected ConfigMap Create")
+	}
+	return c.Client.Create(ctx, obj, opts...)
+}
+
+func (c *noConfigMapClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if _, ok := obj.(*core.ConfigMap); ok {
+		c.touched = true
+		return fmt.Errorf("unexpected ConfigMap Update")
+	}
+	return c.Client.Update(ctx, obj, opts...)
+}
+
+func (c *noConfigMapClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	if _, ok := obj.(*core.ConfigMap); ok {
+		c.touched = true
+		return fmt.Errorf("unexpected ConfigMap Delete")
+	}
+	return c.Client.Delete(ctx, obj, opts...)
+}
+
+func (c *noConfigMapClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*core.ConfigMapList); ok {
+		c.touched = true
+		return fmt.Errorf("unexpected ConfigMap List")
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
 func (c *cachedCandidates) List(ctx context.Context, list client.ObjectList, options ...client.ListOption) error {
 	opts := &client.ListOptions{}
 	for _, option := range options {
@@ -347,6 +392,84 @@ func TestWarmPoolPublishesPerNodeSnapshotWithCapacityAndConfiguredResources(t *t
 	}
 	if snapshot.Pools[0].ReadySlots != 1 || snapshot.Pools[0].PreparingSlots != 1 {
 		t.Fatalf("unregistered Pod counted as ready: %+v", snapshot.Pools[0])
+	}
+}
+
+func TestLocalWarmPoolWaitsForInitialConfigurationWithoutKubernetesConfigMaps(t *testing.T) {
+	ctx := context.Background()
+	r, f, w := fixture(t)
+	originalClient := r.Client
+	configMapGuard := &noConfigMapClient{Client: originalClient}
+	r.Client = configMapGuard
+	backend := &poolRuntime{fakeRuntime: f, deadlines: map[string]time.Time{}}
+	r.Runtime = backend
+	store := warmtemplates.NewLocalStore()
+	pool := &WarmPool{Reconciler: r, Namespace: w.Namespace, Size: 2, LocalStore: store}
+	warm := warmExecutionPod(w, "warm-existing")
+	warm.UID = "warm-existing-uid"
+	warm.Spec.SchedulingGates = nil
+	warm.Labels = map[string]string{warmLabel: "true"}
+	if err := r.Create(ctx, warm); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var pods core.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(w.Namespace), client.MatchingLabels{warmLabel: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 1 || pods.Items[0].UID != warm.UID {
+		t.Fatalf("uninitialized store cleared existing warm slot: %#v", pods.Items)
+	}
+	if err := store.Set(w.Namespace, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if configMapGuard.touched {
+		t.Fatal("local warm pool performed ConfigMap I/O")
+	}
+	r.Client = originalClient
+	if err := r.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: warmtemplates.StatusConfigMapName(r.NodeName)}, &core.ConfigMap{}); err == nil {
+		t.Fatal("local empty-demand acknowledgement was written to Kubernetes instead of the local store")
+	}
+	if snapshot, ok := store.Snapshot(w.Namespace, r.NodeName); !ok || snapshot.DesiredHash == "" || snapshot.ObservedGeneration == 0 || len(snapshot.Pools) != 0 {
+		t.Fatalf("initialized empty config was not acknowledged locally: %#v exists=%v", snapshot, ok)
+	}
+}
+
+func TestLocalWarmPoolAcquireUsesConfiguredSlotWithoutConfigMapIO(t *testing.T) {
+	ctx := context.Background()
+	r, f, w := fixture(t)
+	w.Status.SpecHash = fingerprint(w)
+	store := warmtemplates.NewLocalStore()
+	if err := store.Set(w.Namespace, []warmtemplates.Template{{ID: "revision-one", Slots: 1, Spec: w.Spec}}); err != nil {
+		t.Fatal(err)
+	}
+	backend := &poolRuntime{fakeRuntime: f, deadlines: map[string]time.Time{}}
+	r.Runtime = backend
+	warm := warmExecutionPod(w, "warm-local-acquire")
+	warm.UID = types.UID("warm-local-acquire-uid")
+	warm.Spec.SchedulingGates = nil
+	warm.Labels = map[string]string{warmLabel: "true"}
+	warm.Annotations = map[string]string{warmSpec: w.Status.SpecHash}
+	if err := r.Create(ctx, warm); err != nil {
+		t.Fatal(err)
+	}
+	backend.deadlines[string(warm.UID)] = time.Now().Add(time.Minute)
+	originalClient := r.Client
+	guard := &noConfigMapClient{Client: originalClient}
+	r.Client = guard
+	pool := &WarmPool{Reconciler: r, Namespace: w.Namespace, Size: 1, LocalStore: store}
+	got, err := pool.acquire(ctx, w)
+	r.Client = originalClient
+	if err != nil || got == nil || got.UID != warm.UID || meta.GetControllerOf(got) == nil || meta.GetControllerOf(got).UID != w.UID {
+		t.Fatalf("local configured warm slot was not adopted: pod=%#v err=%v", got, err)
+	}
+	if guard.touched {
+		t.Fatal("warm-slot acquisition performed Kubernetes ConfigMap I/O")
 	}
 }
 

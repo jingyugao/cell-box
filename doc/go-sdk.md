@@ -272,9 +272,11 @@ go -C sdk/go run ./examples/lifecycle
 
 ## 预热池和运行时状态
 
+SDK 仍通过 `cellbox-api` Service 调用 HTTP API；单机部署在 Service 后面运行一个 `cellbox-server`，由同一进程处理 API 和节点运行时。生命周期请求通过进程内 key queue 交给 runtime worker，CR 提交后的状态快照会直接唤醒等待者。Cellbox CR 与 Pod ownership 保留在 Kubernetes 中，因此这条路径仍包含 CR 写入及必要的 Pod/CRI 操作。
+
 Revision 构建成功且状态为 `active`、`warmSlots > 0` 时，服务端后台会发布预热需求；`warmSlots` 为 `0` 或 revision 退休时会撤回需求。创建 template 只保存默认值，不会单独创建预热池；构建 revision 时 `warmSlots == nil` 才继承模板默认值。stable 指针切换不会改变旧 revision 的预热需求。后台发布失败会继续重试。
 
-预热 Pod 按兼容的运行配置共享池，节点总容量受 Controller 限额约束（默认最多 2 个，配置上限 32 个）。同一个 `poolId` 的槽位数是共享池汇总值，会在关联的每个 revision 状态中重复出现；`allocatedSlots` 可能因节点容量小于 `requestedSlots`，统计多 revision 时按 `poolId` 去重。`resources` 是当前分配的空闲预热 Pod 的 Kubernetes requests/limits 配置，不是实际 CPU/内存使用量。`failedSlots` 统计当前处于失败态的预热 Pod，以及 Controller 最近 15 秒内记录、但对应 Pod 已清理的创建失败。预热 Pod 用于 resumable sandbox 的恢复路径，不能据此承诺首次冷创建会更快。撤回需求只清理空闲预热 Pod，不会杀掉已经领用的 sandbox。
+预热 Pod 按兼容的运行配置共享池，节点总容量受 server 内运行时循环限额约束（默认最多 2 个，配置上限 32 个）。同一个 `poolId` 的槽位数是共享池汇总值，会在关联的每个 revision 状态中重复出现；`allocatedSlots` 可能因节点容量小于 `requestedSlots`，统计多 revision 时按 `poolId` 去重。`resources` 是当前分配的空闲预热 Pod 的 Kubernetes requests/limits 配置，不是实际 CPU/内存使用量。`failedSlots` 统计当前处于失败态的预热 Pod，以及运行时循环最近 15 秒内记录、但对应 Pod 已清理的创建失败。预热 Pod 用于 resumable sandbox 的恢复路径，不能据此承诺首次冷创建会更快。撤回需求只清理空闲预热 Pod，不会杀掉已经领用的 sandbox。
 
 ```go
 runtime, err := client.GetTemplateRuntime(ctx, templateID)
@@ -295,4 +297,4 @@ if err != nil { return err }
 log.Printf("sync=%s desired=%d applied-generation=%d current=%t", warm.SyncStatus, warm.DesiredSlots, warm.ObservedGeneration, !warm.Stale)
 ```
 
-服务端约每 2 秒在后台同步需求并读取 Controller 快照；查询不会在请求内调用 Kubernetes。`observedAt` 是快照采集时间，超过约 15 秒或未完成首次同步时 `stale` 为 true。同步失败时检查 `error` / `syncStatus`；`sandboxCount == nil` 表示未知。预热池不存在时 `pool` 为 null。
+服务端约每 2 秒在后台同步需求并刷新本地运行时快照；查询不会在请求内调用 Kubernetes。单进程部署中 warm pool 与镜像预热通过共享组件直接协调，不经 ConfigMap 传递进程间消息。`observedAt` 是快照采集时间，超过约 15 秒或未完成首次同步时 `stale` 为 true。同步失败时检查 `error` / `syncStatus`；`sandboxCount == nil` 表示未知。预热池不存在时 `pool` 为 null。

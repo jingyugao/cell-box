@@ -70,17 +70,17 @@ export REVISION_ID='<成功 operation 的 result.revisionId>'
 
 模板、revision、构建 operation 和日志接口使用本地 catalog，不查询 Kubernetes。解析或构建镜像时会访问镜像仓库和 BuildKit。选择 profile 后，系统会把当时配置快照保存到 revision。构建成功不会自动切换 stable revision。
 
-切换 stable 只影响之后新建的沙箱，不会撤回旧 revision 的预热需求。兼容的 revision 可以共用预热池，且每个节点有共享容量上限（Controller 默认最多 2 个，配置上限 32 个）。同一 `poolId` 的槽位数是共享池汇总值，会在关联 revision 的状态中重复出现；节点容量可能使 `allocatedSlots` 小于 `requestedSlots`。汇总多 revision 时按 `poolId` 去重。撤回需求只清理空闲预热 Pod；已被 sandbox 领用的 Pod 不会因此删除。当前预热 Pod 服务于 resumable sandbox 的恢复路径，不能假定它会加速首次冷创建。
+切换 stable 只影响之后新建的沙箱，不会撤回旧 revision 的预热需求。兼容的 revision 可以共用预热池，且每个节点有共享容量上限（默认最多 2 个，配置上限 32 个）。同一 `poolId` 的槽位数是共享池汇总值，会在关联 revision 的状态中重复出现；节点容量可能使 `allocatedSlots` 小于 `requestedSlots`。汇总多 revision 时按 `poolId` 去重。撤回需求只清理空闲预热 Pod；已被 sandbox 领用的 Pod 不会因此删除。当前预热 Pod 服务于 resumable sandbox 的恢复路径，不能假定它会加速首次冷创建。
 
 ## 查询预热与模板运行状态
 
-这些接口返回服务端后台采集的快照，不会在 HTTP 请求中直接查询 Kubernetes。同步器约每 2 秒发布配置并读取 Controller 状态，采集时间超过约 15 秒后会标记为过期。查看某个 revision 的预热同步和池状态：
+这些接口返回单进程 server 后台采集的快照，不会在 HTTP 请求中直接查询 Kubernetes。后台约每 2 秒刷新运行时状态，采集时间超过约 15 秒后会标记为过期。warm pool 和镜像缓存由 API 与节点运行时共享组件直接协调，不通过 ConfigMap 发送进程间消息。查看某个 revision 的预热同步和池状态：
 
 ```sh
 curl --fail-with-body -sS "$CELLBOX_API_URL/v1/template-revisions/$REVISION_ID/warm-pool"
 ```
 
-响应包括 `desiredSlots`、`syncStatus`、`generation` / `observedGeneration`、`observedAt`、`stale` 和可空的 `pool`。当 `stale` 为 true 时不要把计数当成当前状态；`pool: null` 表示当前没有关联到预热池。池中的 `requestedSlots`、`allocatedSlots`、`readySlots`、`preparingSlots`、`failedSlots` 用于区分需求和实际准备进度。`failedSlots` 包含当前仍处于失败态的 Pod，以及 Controller 最近 15 秒内记录但已清理的创建失败。
+响应包括 `desiredSlots`、`syncStatus`、`generation` / `observedGeneration`、`observedAt`、`stale` 和可空的 `pool`。当 `stale` 为 true 时不要把计数当成当前状态；`pool: null` 表示当前没有关联到预热池。池中的 `requestedSlots`、`allocatedSlots`、`readySlots`、`preparingSlots`、`failedSlots` 用于区分需求和实际准备进度。`failedSlots` 包含当前仍处于失败态的 Pod，以及运行时循环最近 15 秒内记录但已清理的创建失败。
 
 查询模板全部 revision 的沙箱数量、生命周期阶段和预热状态：
 
@@ -142,7 +142,7 @@ curl --fail-with-body -sS -X POST "$CELLBOX_API_URL/v1/boxes/$BOX_ID:destroy" \
 
 ## 行为说明
 
-- 模板与 revision 元数据操作使用本地 catalog；成功构建或修改预热目标后，后台同步器会将需求发布到 Kubernetes。预热状态查询读取后台快照，不直接查询集群。沙箱创建、检查、命令、文件和生命周期操作使用所选 runtime provider；使用 Kubernetes provider 时会访问 Kubernetes。沙箱列表接口也直接读取运行时 inventory。
+- 模板与 revision 元数据操作使用本地 catalog；成功构建或修改预热目标后，单进程 server 的运行时循环直接协调预热池。预热状态查询读取后台快照，不直接查询集群。沙箱创建和生命周期操作会写入 Kubernetes Cellbox CR，再通过进程内队列通知 runtime worker；Cellbox CR 继续作为持久期望/运行状态并拥有实际 Pod/Service。命令、文件和清单操作仍按所选 runtime provider 执行。
 - 模板 stable revision 只影响之后新建的沙箱。已有沙箱继续使用创建时绑定的不可变 revision。
 - 构建成功后，active 状态且 `warmSlots > 0` 会自动进入后台预热池同步；stable 指针切换不改变旧 revision 的需求。状态接口返回后台快照，`stale` / `observedAt` 用于判断新鲜度。
 - 只有没有 revision 且没有待处理构建的空模板族才能删除。本期不提供 revision 删除接口；将 revision 标记为 retired 可阻止新选择，同时保留历史记录。

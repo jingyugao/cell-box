@@ -17,6 +17,12 @@
 
 API 不内置客户端身份认证。对外开放时，应由前置 Gateway 校验身份并控制可使用的 Client 数据命名空间。SDK 中的 Token 仅作为 Bearer 请求头发送给前置网关。
 
+## 单进程运行方式
+
+部署形态是固定到一个 Kubernetes 节点的 `cellbox-server`。HTTP API 与节点运行时在同一进程内通过函数调用协作：API 将 sandbox 变更提交到共享的按 key 排队器，运行时 worker 处理后把完成状态写回，并发布完整状态快照唤醒等待者。这样省去 API 与独立 controller 之间的通知链路。
+
+Kubernetes 中的 Cellbox 自定义资源仍是 sandbox 的持久记录，也是实际 Pod 和 Service 的 owner。进程重启后可根据 CR 和其 owner 关系继续 reconcile、清理或恢复；Pod 调度、Pod 创建/删除、CRI 操作和 checkpoint I/O 仍经过 Kubernetes 与节点运行时。预热池配置、观察状态和镜像缓存请求在单进程路径中直接调用共享运行时组件，不靠 ConfigMap 在 API 与 controller 之间传消息。合并进程减少通知环节，不代表所有创建或恢复耗时都会消失；没有测量数据时不对延迟收益作数值承诺。
+
 ## 从镜像到沙箱
 
 1. 创建 template，设置描述和默认预热数。此时没有具体运行镜像，也没有预热池。
@@ -42,7 +48,7 @@ API 不内置客户端身份认证。对外开放时，应由前置 Gateway 校�
 
 ## 预热池何时创建与回收
 
-构建成功且 active 的 revision，如果 `warmSlots > 0`，后台会自动发布预热需求。Controller 在配置的节点准备槽位，不需要先创建 sandbox，也不需要手动调用“应用配置”。Kubernetes 暂时不可用时，配置仍保存在 SQLite 中，后台会重试；API 重启后从 catalog 恢复需求。
+构建成功且 active 的 revision，如果 `warmSlots > 0`，后台会自动发布预热需求。server 内的节点运行时循环在配置节点准备槽位，不需要先创建 sandbox，也不需要手动调用“应用配置”。需求持久保存在 SQLite catalog；server 重启后从 catalog 恢复。节点 Pod 等实际运行时操作仍依赖 Kubernetes 可用。
 
 `defaultWarmSlots` 是构建新 revision 时的默认值。构建请求省略 `warmSlots` 时复制该默认值，显式传 `0` 则关闭该 revision 的预热。修改 template 默认值不会追溯修改已有 revision。
 
@@ -68,9 +74,9 @@ API 不内置客户端身份认证。对外开放时，应由前置 Gateway 校�
 | `GET /v1/boxes/{id}` | 已保存的单个 sandbox 状态，不在请求中直接查询 Kubernetes，也不会隐式恢复 |
 | `GET /v1/boxes` | 运行时清单；Kubernetes provider 会查询集群。支持 templateId、revisionId、phase、limit、offset |
 
-两个模板运行状态接口在 HTTP 请求中不直接查询 Kubernetes。后台约每 2 秒同步，采集时间超过约 15 秒会标记为过期。使用时检查 `stale`、`observedAt`、`generation` 与 `observedGeneration`；`syncStatus=applied` 表示配置已被观察到，不保证槽位已全部就绪，仍要检查池的 `readySlots`。
+两个模板运行状态接口在 HTTP 请求中不直接查询 Kubernetes。单进程后台约每 2 秒刷新运行时快照，采集时间超过约 15 秒会标记为过期。使用时检查 `stale`、`observedAt`、`generation` 与 `observedGeneration`；`syncStatus=applied` 表示需求已应用到进程内运行时，不保证槽位已全部就绪，仍要检查池的 `readySlots`。
 
-`sandboxCount: null` 或缺少池观察结果表示未知，不能当成 0。池的 `requestedSlots`、`allocatedSlots` 和资源信息是共享池统计，同一个 `poolId` 可能在多个 revision 中出现，汇总时需去重。CPU/内存字段表示空闲 Pod 的 requests/limits 配置量，不是实时利用率；`failedSlots` 包括当前失败 Pod 和 Controller 最近 15 秒记录但已清理的失败。
+`sandboxCount: null` 或缺少池观察结果表示未知，不能当成 0。池的 `requestedSlots`、`allocatedSlots` 和资源信息是共享池统计，同一个 `poolId` 可能在多个 revision 中出现，汇总时需去重。CPU/内存字段表示空闲 Pod 的 requests/limits 配置量，不是实时利用率；`failedSlots` 包括当前失败 Pod 和运行时循环最近 15 秒记录但已清理的失败。
 
 ## 执行命令、文件与生命周期
 

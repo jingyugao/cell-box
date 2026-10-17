@@ -6,17 +6,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"cellbox.local/cellbox/internal/boxprovider"
 	"cellbox.local/cellbox/internal/objectstorage"
-	"cellbox.local/cellbox/internal/providers/docker"
-	"cellbox.local/cellbox/internal/providers/resumable"
 	"cellbox.local/cellbox/internal/service"
 	"cellbox.local/cellbox/internal/telemetry"
 	"cellbox.local/cellbox/internal/version"
@@ -29,6 +24,8 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
 func main() {
@@ -42,14 +39,20 @@ func main() {
 }
 
 func run(args []string) error {
-	flags := flag.NewFlagSet("cellbox-api", flag.ContinueOnError)
+	flags := flag.NewFlagSet("cellbox-server", flag.ContinueOnError)
 	configPath := flags.String("config", "", "path to the Cellbox JSON configuration")
 	kubeconfig := flags.String("kubeconfig", "", "explicit kubeconfig path (default: in-cluster credentials)")
 	storageConfigPath := flags.String("object-storage-config", "", "shared S3 storage JSON configuration")
 	localMetadataDir := flags.String("local-metadata-dir", "", "persistent node directory for control metadata; asset content remains in object storage")
 	catalogDir := flags.String("catalog-dir", "", "persistent local directory for the SQLite template catalog and build logs")
 	initializeLocalMetadata := flags.Bool("initialize-local-metadata", false, "one-time metadata import; stop all old API/controller writers first")
-	leaderNamespace := flags.String("leader-election-namespace", "", "API Lease namespace (required with object storage)")
+	leaderNamespace := flags.String("leader-election-namespace", "", "server Lease namespace (defaults to managed namespace)")
+	var runtime nodeOptions
+	flags.StringVar(&runtime.Node, "node", "", "single managed Kubernetes node")
+	flags.StringVar(&runtime.Namespace, "namespace", "cell-box", "managed Kubernetes namespace")
+	flags.StringVar(&runtime.Socket, "cri-socket", "/run/containerd/containerd.sock", "node CRI Unix socket")
+	flags.BoolVar(&runtime.HostMountNamespace, "host-mount-namespace", false, "run runsc in the host mount namespace (requires privileged hostPID Pod)")
+	flags.IntVar(&runtime.WarmPoolSize, "warm-pool-size", 2, "maximum idle warm Pods on this node (0 disables)")
 	dockerBinary := flags.String("docker", "docker", "Docker CLI executable")
 	buildkitAddress := flags.String("buildkit-addr", "", "Unix BuildKit socket for REST image builds")
 	imageRepository := flags.String("image-repository", "", "registry repository for prepared images")
@@ -64,7 +67,7 @@ func run(args []string) error {
 		return errors.New("unexpected positional arguments")
 	}
 	if *showVersion {
-		fmt.Println(version.String("cellbox-api"))
+		fmt.Println(version.String("cellbox-server"))
 		return nil
 	}
 	if *configPath == "" {
@@ -111,33 +114,18 @@ func run(args []string) error {
 	if *catalogDir != "" {
 		config.CatalogDir = *catalogDir
 	}
-	providers := make(map[string]boxprovider.Provider)
+	if err = runtime.validate(config); err != nil {
+		return err
+	}
+	needsKubernetes := runtime.Node != ""
 	for _, profile := range config.Profiles {
-		switch profile.Provider {
-		case "docker":
-			if providers["docker"] == nil {
-				providers["docker"] = docker.New(*dockerBinary)
-			}
-		case "resumable-k8s-pod":
-			if providers["resumable-k8s-pod"] == nil {
-				var p *resumable.Provider
-				if *kubeconfig != "" {
-					p, err = resumable.NewForKubeconfig(*kubeconfig)
-				} else {
-					p, err = resumable.NewInCluster()
-				}
-				if err != nil {
-					// REST configuration errors can include credential or cluster details.
-					return errors.New("cannot initialize Kubernetes provider")
-				}
-				providers["resumable-k8s-pod"] = p
-			}
-		}
+		needsKubernetes = needsKubernetes || profile.Provider == "resumable-k8s-pod"
 	}
 
 	signalContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	shutdownTracing, err := telemetry.Initialize(signalContext)
+	ctrl.SetLogger(zap.New())
+	shutdownTracing, err := telemetry.InitializeNamed(signalContext, "cellbox-server")
 	if err != nil {
 		return err
 	}
@@ -146,11 +134,11 @@ func run(args []string) error {
 		defer cancel()
 		_ = shutdownTracing(ctx)
 	}()
-	if config.ObjectStorage == (objectstorage.Config{}) {
-		return serve(signalContext, config, providers)
+	if !needsKubernetes && config.ObjectStorage == (objectstorage.Config{}) {
+		return serveUnified(signalContext, config, *dockerBinary, nil, runtime)
 	}
 	if *leaderNamespace == "" {
-		return errors.New("--leader-election-namespace is required with object storage")
+		*leaderNamespace = runtime.Namespace
 	}
 	var kubeConfig *rest.Config
 	if *kubeconfig != "" {
@@ -159,14 +147,14 @@ func run(args []string) error {
 		kubeConfig, err = rest.InClusterConfig()
 	}
 	if err != nil {
-		return errors.New("cannot initialize API leader election")
+		return errors.New("cannot initialize server Kubernetes credentials")
 	}
 	client, err := kubernetes.NewForConfig(kubeConfig)
 	if err != nil {
-		return errors.New("cannot initialize API leader election")
+		return errors.New("cannot initialize server leader election")
 	}
-	sum := sha256.Sum256([]byte(config.ObjectStorage.Endpoint + "\n" + config.ObjectStorage.Bucket + "\n" + config.ObjectStorage.Prefix))
-	lock := &resourcelock.LeaseLock{LeaseMeta: metav1.ObjectMeta{Namespace: *leaderNamespace, Name: "cellbox-api-" + hex.EncodeToString(sum[:8])}, Client: client.CoordinationV1(), LockConfig: resourcelock.ResourceLockConfig{Identity: string(uuid.NewUUID())}}
+	sum := sha256.Sum256([]byte(runtime.Namespace + "\n" + runtime.Node))
+	lock := &resourcelock.LeaseLock{LeaseMeta: metav1.ObjectMeta{Namespace: *leaderNamespace, Name: "cellbox-server-" + hex.EncodeToString(sum[:8])}, Client: client.CoordinationV1(), LockConfig: resourcelock.ResourceLockConfig{Identity: string(uuid.NewUUID())}}
 	electionContext, cancelElection := context.WithCancel(signalContext)
 	defer cancelElection()
 	result := make(chan error, 1)
@@ -179,14 +167,14 @@ func run(args []string) error {
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
 				close(started)
-				result <- serve(ctx, config, providers)
+				result <- serveUnified(ctx, config, *dockerBinary, kubeConfig, runtime)
 				cancelElection()
 			},
 			OnStoppedLeading: func() {},
 		},
 	})
 	if err != nil {
-		return errors.New("invalid API leader election configuration")
+		return errors.New("invalid Server leader election configuration")
 	}
 	elector.Run(electionContext)
 	select {
@@ -200,7 +188,7 @@ func run(args []string) error {
 				case err := <-result:
 					return err
 				case <-time.After(20 * time.Second):
-					return errors.New("API shutdown did not finish in time")
+					return errors.New("Server shutdown did not finish in time")
 				}
 			default:
 				return nil
@@ -208,43 +196,9 @@ func run(args []string) error {
 		}
 		select {
 		case <-result:
-			return errors.New("API leader lease was lost")
+			return errors.New("Server leader lease was lost")
 		case <-time.After(20 * time.Second):
-			return errors.New("API leader lease was lost; service did not stop in time")
+			return errors.New("Server leader lease was lost; service did not stop in time")
 		}
 	}
-}
-
-func serve(ctx context.Context, config service.Config, providers map[string]boxprovider.Provider) error {
-	app, err := service.NewContext(ctx, config, providers)
-	if err != nil {
-		return fmt.Errorf("cannot start Cellbox service: %w", err)
-	}
-	server := &http.Server{Addr: config.Listen, Handler: telemetry.HTTPHandler(app.Handler()), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 1 << 20,
-		BaseContext: func(net.Listener) context.Context { return ctx },
-	}
-	serveResult := make(chan error, 1)
-	go func() { serveResult <- server.ListenAndServe() }()
-	var serveErr error
-	select {
-	case <-app.Done():
-		shutdownContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		shutdownErr := server.Shutdown(shutdownContext)
-		cancel()
-		if shutdownErr != nil {
-			_ = server.Close()
-			serveErr = errors.New("HTTP shutdown did not finish within 15 seconds")
-		}
-		if err := <-serveResult; err != nil && !errors.Is(err, http.ErrServerClosed) && serveErr == nil {
-			serveErr = fmt.Errorf("HTTP server stopped: %w", err)
-		}
-		if ctx.Err() == nil && serveErr == nil {
-			serveErr = errors.New("Cellbox stopped after a durable state write failure")
-		}
-	case err := <-serveResult:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serveErr = fmt.Errorf("HTTP server stopped: %w", err)
-		}
-	}
-	return errors.Join(serveErr, app.Close())
 }

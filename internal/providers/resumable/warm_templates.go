@@ -20,10 +20,12 @@ import (
 )
 
 func (p *Provider) SetWarmTemplates(ctx context.Context, namespace string, templates []boxprovider.WarmTemplate) error {
-	if p == nil || p.Client == nil {
+	if p == nil || (p.Client == nil && p.WarmTemplates == nil) {
 		return errors.New("Kubernetes client is required")
 	}
 	data := make(map[string]string, len(templates))
+	records := make([]warmtemplates.Template, 0, len(templates))
+	seen := make(map[string]bool, len(templates))
 	for _, template := range templates {
 		if template.Spec.Namespace != namespace {
 			return errors.New("warm template namespace mismatch")
@@ -44,14 +46,21 @@ func (p *Provider) SetWarmTemplates(ctx context.Context, namespace string, templ
 		if err := warmtemplates.Validate(namespace, template.ID, record); err != nil {
 			return err
 		}
-		encoded, err := json.Marshal(record)
-		if err != nil {
-			return err
-		}
-		if _, exists := data[template.ID]; exists {
+		if seen[template.ID] {
 			return errors.New("duplicate warm template ID")
 		}
-		data[template.ID] = string(encoded)
+		seen[template.ID] = true
+		if p.WarmTemplates == nil {
+			encoded, err := json.Marshal(record)
+			if err != nil {
+				return err
+			}
+			data[template.ID] = string(encoded)
+		}
+		records = append(records, record)
+	}
+	if p.WarmTemplates != nil {
+		return p.WarmTemplates.Set(namespace, records)
 	}
 	return retry.OnError(retry.DefaultRetry, func(err error) bool {
 		return apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err)
@@ -89,8 +98,11 @@ var _ boxprovider.WarmTemplateProvider = (*Provider)(nil)
 // its timestamp and counters so callers can label it accurately; an absent or
 // malformed snapshot is an error and must not be presented as zero usage.
 func (p *Provider) ObserveWarmTemplates(ctx context.Context, namespace string, nodeNames []string) ([]boxprovider.WarmPoolObservation, error) {
-	if p == nil || p.Client == nil {
+	if p == nil || (p.Client == nil && p.WarmTemplates == nil) {
 		return nil, errors.New("Kubernetes client is required")
+	}
+	if p.WarmTemplates != nil {
+		return p.observeLocalWarmTemplates(namespace, nodeNames)
 	}
 	desired := &core.ConfigMap{}
 	err := p.Client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: warmtemplates.ConfigMapName}, desired)
@@ -137,6 +149,43 @@ func (p *Provider) ObserveWarmTemplates(ctx context.Context, namespace string, n
 			return nil, fmt.Errorf("warm pool snapshot %q has no observation timestamp", cm.Name)
 		}
 		stale := snapshot.DesiredHash != desiredHash || snapshot.ObservedGeneration != desired.Generation || now.Sub(observedAt) > 15*time.Second
+		if stale && len(snapshot.Pools) == 0 {
+			return nil, fmt.Errorf("empty warm pool snapshot for node %q is stale", node)
+		}
+		for _, pool := range snapshot.Pools {
+			pool.Stale = stale
+			out = append(out, pool)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].PoolID < out[j].PoolID })
+	return out, nil
+}
+
+func (p *Provider) observeLocalWarmTemplates(namespace string, nodeNames []string) ([]boxprovider.WarmPoolObservation, error) {
+	templates, desiredHash, generation, initialized := p.WarmTemplates.Read(namespace)
+	if !initialized {
+		return nil, fmt.Errorf("warm template configuration for namespace %q is not initialized", namespace)
+	}
+	nodes := map[string]bool{}
+	for _, node := range nodeNames {
+		if node != "" {
+			nodes[node] = true
+		}
+	}
+	for _, template := range templates {
+		nodes[template.Spec.NodeName] = true
+	}
+	out := []boxprovider.WarmPoolObservation{}
+	now := time.Now()
+	for node := range nodes {
+		snapshot, ok := p.WarmTemplates.Snapshot(namespace, node)
+		if !ok {
+			return nil, fmt.Errorf("warm pool observation for node %q is unavailable", node)
+		}
+		if snapshot.NodeName != node || snapshot.ObservedAt.IsZero() {
+			return nil, fmt.Errorf("warm pool snapshot for node %q is invalid", node)
+		}
+		stale := snapshot.DesiredHash != desiredHash || snapshot.ObservedGeneration != generation || now.Sub(snapshot.ObservedAt) > 15*time.Second
 		if stale && len(snapshot.Pools) == 0 {
 			return nil, fmt.Errorf("empty warm pool snapshot for node %q is stale", node)
 		}

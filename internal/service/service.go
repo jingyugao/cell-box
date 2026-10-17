@@ -57,6 +57,11 @@ type activeStream struct {
 func New(config Config, providers map[string]boxprovider.Provider) (*Service, error) {
 	return NewContext(context.Background(), config, providers)
 }
+
+// RuntimeObjects borrows the service's initialized asset/metadata store for the
+// embedded node runtime. Stop all runtime workers before closing the service.
+func (s *Service) RuntimeObjects() objectstorage.Objects { return s.objects }
+
 func NewContext(parent context.Context, config Config, providers map[string]boxprovider.Provider) (*Service, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err

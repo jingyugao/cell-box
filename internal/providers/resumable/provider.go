@@ -21,7 +21,9 @@ import (
 	"cellbox.local/cellbox/internal/boxprovider"
 	"cellbox.local/cellbox/internal/guestapi"
 	"cellbox.local/cellbox/internal/inventory"
+	"cellbox.local/cellbox/internal/runtimecontrol"
 	"cellbox.local/cellbox/internal/telemetry"
+	"cellbox.local/cellbox/internal/warmtemplates"
 	core "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -40,6 +42,11 @@ var validImage = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}
 
 type Provider struct {
 	Client client.Client
+	// Local connects the HTTP service to the embedded runtime. CRs remain the
+	// durable ledger; scheduling and completion notifications stay in process.
+	Local           *runtimecontrol.Client
+	WarmTemplates   *warmtemplates.LocalStore
+	CacheImageLocal func(context.Context, string, string, string) error
 }
 
 func New(c client.Client) *Provider { return &Provider{Client: c} }
@@ -503,12 +510,36 @@ func (p *Provider) captureWorkspaceArchive(ctx context.Context, h boxprovider.Ha
 
 	waitCtx, cancel := context.WithTimeout(ctx, 14*time.Minute)
 	defer cancel()
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		w, err = p.get(waitCtx, h)
+	var snapshots <-chan runtimecontrol.Snapshot
+	var poll <-chan time.Time
+	if p.Local != nil {
+		var stop func()
+		snapshots, stop, err = p.Local.Subscribe(waitCtx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name})
 		if err != nil {
 			return 0, "", err
+		}
+		defer stop()
+	} else {
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		poll = ticker.C
+	}
+	for {
+		if snapshots != nil {
+			select {
+			case <-waitCtx.Done():
+				return 0, "", waitCtx.Err()
+			case snapshot := <-snapshots:
+				if snapshot.Deleted || !validObservationIdentity(snapshot.Resource, h) {
+					return 0, "", boxprovider.ErrNotFound
+				}
+				w = snapshot.Resource
+			}
+		} else {
+			w, err = p.get(waitCtx, h)
+			if err != nil {
+				return 0, "", err
+			}
 		}
 		if err = validate(w, h); err != nil {
 			return 0, "", err
@@ -552,10 +583,13 @@ func (p *Provider) captureWorkspaceArchive(ctx context.Context, h boxprovider.Ha
 		if !request.ExpiresAt.IsZero() && !time.Now().Before(request.ExpiresAt) {
 			return 0, "", errors.New("workspace archive request expired")
 		}
+		if snapshots != nil {
+			continue
+		}
 		select {
 		case <-waitCtx.Done():
 			return 0, "", waitCtx.Err()
-		case <-ticker.C:
+		case <-poll:
 		}
 	}
 }

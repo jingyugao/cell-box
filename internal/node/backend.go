@@ -32,6 +32,7 @@ type Backend struct {
 	HostMountNamespace bool
 	Runtime            cri.RuntimeServiceClient
 	Images             cri.ImageServiceClient
+	connection         *grpc.ClientConn
 	// Objects stores workspace archives and inventory metadata. Memory checkpoints
 	// remain on their assigned node under Base.
 	Objects           objectstorage.Objects
@@ -53,7 +54,14 @@ func New(socket string) (*Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Backend{Base: DefaultBase, Runsc: DefaultRunsc, Root: DefaultRoot, Socket: socket, Runtime: cri.NewRuntimeServiceClient(conn), Images: cri.NewImageServiceClient(conn)}, nil
+	return &Backend{Base: DefaultBase, Runsc: DefaultRunsc, Root: DefaultRoot, Socket: socket, Runtime: cri.NewRuntimeServiceClient(conn), Images: cri.NewImageServiceClient(conn), connection: conn}, nil
+}
+
+func (b *Backend) Close() error {
+	if b.connection != nil {
+		return b.connection.Close()
+	}
+	return nil
 }
 func (b *Backend) command(ctx context.Context, args ...string) error {
 	commandName := "unknown"

@@ -18,6 +18,9 @@ func (p *Provider) CacheImage(ctx context.Context, image, node, namespace string
 	if !validImage.MatchString(image) || node == "" || namespace == "" {
 		return errors.New("image caching requires an immutable image, node and namespace")
 	}
+	if p.CacheImageLocal != nil {
+		return p.CacheImageLocal(ctx, image, node, namespace)
+	}
 	var id [16]byte
 	if _, err := rand.Read(id[:]); err != nil {
 		return err

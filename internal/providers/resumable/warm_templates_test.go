@@ -158,3 +158,47 @@ func TestWarmSnapshotWireShape(t *testing.T) {
 		t.Fatalf("wire snapshot = %#v, err=%v", got, err)
 	}
 }
+
+func TestLocalWarmTemplatesAvoidKubernetesAndRequireAcknowledgement(t *testing.T) {
+	p, spec, ctx := fixture(t)
+	store := warmtemplates.NewLocalStore()
+	p.Client = nil
+	p.WarmTemplates = store
+	if _, err := p.ObserveWarmTemplates(ctx, spec.Namespace, []string{spec.NodeName}); err == nil {
+		t.Fatal("uninitialized local catalog must not look like an empty pool")
+	}
+	if err := p.SetWarmTemplates(ctx, spec.Namespace, []boxprovider.WarmTemplate{{ID: "rev-one", Slots: 1, Spec: spec}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.ObserveWarmTemplates(ctx, spec.Namespace, []string{spec.NodeName}); err == nil {
+		t.Fatal("configured templates without a controller acknowledgement must remain unknown")
+	}
+	templates, hash, generation, initialized := store.Read(spec.Namespace)
+	if !initialized || len(templates) != 1 {
+		t.Fatalf("local configuration = %#v initialized=%v", templates, initialized)
+	}
+	pool := boxprovider.WarmPoolObservation{PoolID: "pool", TemplateIDs: []string{"rev-one"}, DesiredHash: hash, ReadySlots: 1, ObservedAt: time.Now().UTC()}
+	store.Publish(spec.Namespace, warmtemplates.Snapshot{NodeName: spec.NodeName, DesiredHash: hash, ObservedGeneration: generation, ObservedAt: time.Now().UTC(), Pools: []boxprovider.WarmPoolObservation{pool}})
+	got, err := p.ObserveWarmTemplates(ctx, spec.Namespace, nil)
+	if err != nil || len(got) != 1 || got[0].Stale || got[0].ReadySlots != 1 {
+		t.Fatalf("local observation = %#v err=%v", got, err)
+	}
+	if err := p.SetWarmTemplates(ctx, spec.Namespace, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.Snapshot(spec.Namespace, spec.NodeName); ok {
+		t.Fatal("configuration update left a stale snapshot visible")
+	}
+	if _, err := p.ObserveWarmTemplates(ctx, spec.Namespace, []string{spec.NodeName}); err == nil {
+		t.Fatal("withdrawal must wait for a fresh empty acknowledgement")
+	}
+	if err := store.Set(spec.Namespace, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, emptyHash, emptyGeneration, _ := store.Read(spec.Namespace)
+	store.Publish(spec.Namespace, warmtemplates.Snapshot{NodeName: spec.NodeName, DesiredHash: emptyHash, ObservedGeneration: emptyGeneration, ObservedAt: time.Now().UTC(), Pools: []boxprovider.WarmPoolObservation{}})
+	got, err = p.ObserveWarmTemplates(ctx, spec.Namespace, []string{spec.NodeName})
+	if err != nil || len(got) != 0 {
+		t.Fatalf("fresh empty acknowledgement = %#v err=%v", got, err)
+	}
+}
