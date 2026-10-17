@@ -13,6 +13,7 @@ type Sandbox struct {
 	ID         string
 	Generation uint64
 	Commands   *Commands
+	Files      *Files
 	client     *Client
 }
 
@@ -57,6 +58,7 @@ func (c *Client) Connect(ctx context.Context, id string) (*Sandbox, error) {
 func (c *Client) sandbox(info SandboxInfo) *Sandbox {
 	s := &Sandbox{ID: info.ID, Generation: info.Generation, client: c}
 	s.Commands = &Commands{sandbox: s}
+	s.Files = &Files{sandbox: s}
 	return s
 }
 
@@ -72,6 +74,14 @@ func (c *Client) GetSandbox(ctx context.Context, id string) (*SandboxInfo, error
 	return &info, nil
 }
 
+// ListSandboxes returns current lifecycle snapshots in the client's namespace.
+// Unlike template catalog reads, this runtime endpoint may contact Kubernetes.
+func (c *Client) ListSandboxes(ctx context.Context) ([]SandboxInfo, error) {
+	var sandboxes []SandboxInfo
+	err := c.do(ctx, http.MethodGet, "/v1/boxes", "", nil, &sandboxes)
+	return sandboxes, err
+}
+
 // Info retrieves current lifecycle state without changing the handle's generation.
 func (s *Sandbox) Info(ctx context.Context) (*SandboxInfo, error) {
 	return s.client.GetSandbox(ctx, s.ID)
@@ -84,21 +94,10 @@ type DestroyOptions struct {
 // Destroy waits for resource destruction. Active commands or leases may cause
 // a BUSY error. Destroy does not implicitly cancel commands.
 func (s *Sandbox) Destroy(ctx context.Context, opts *DestroyOptions) error {
-	path, err := resourcePath("/v1/boxes/", s.ID)
-	if err != nil {
-		return err
-	}
-	key := ""
+	var lifecycle LifecycleOptions
 	if opts != nil {
-		key = opts.IdempotencyKey
+		lifecycle.IdempotencyKey = opts.IdempotencyKey
 	}
-	body := struct {
-		ExpectedGeneration uint64 `json:"expectedGeneration,omitempty"`
-	}{s.Generation}
-	op, err := s.client.submit(ctx, path+":destroy", key, body)
-	if err != nil {
-		return err
-	}
-	_, err = s.client.wait(ctx, op)
+	_, err := s.action(ctx, "destroy", &lifecycle)
 	return err
 }

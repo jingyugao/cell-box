@@ -234,6 +234,155 @@ func TestCreateRequiresTemplateIDAndWarmSlotsCannotBeNegative(t *testing.T) {
 	}
 }
 
+func TestWaitBuildRevisionRequiresRevisionResultAndPreservesOperationOnGetFailure(t *testing.T) {
+	t.Run("family ID is not revision ID", func(t *testing.T) {
+		var revisionGets atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/operations/op-build" {
+				writeJSONTest(w, Operation{ID: "op-build", Kind: "template-build", TargetID: "tpl-family", Status: "succeeded"})
+				return
+			}
+			if strings.HasPrefix(r.URL.Path, "/v1/template-revisions/") {
+				revisionGets.Add(1)
+			}
+			http.NotFound(w, r)
+		}))
+		defer server.Close()
+		client := testClient(t, server, "")
+		_, err := client.WaitBuildRevision(context.Background(), &Operation{ID: "op-build", Kind: "template-build", Status: "queued"})
+		var opErr *OperationError
+		if !errors.As(err, &opErr) || opErr.Operation == nil || opErr.Operation.TargetID != "tpl-family" {
+			t.Fatalf("expected operation error preserving family operation, got %#v", err)
+		}
+		if revisionGets.Load() != 0 {
+			t.Fatalf("attempted revision GET without result.revisionId")
+		}
+	})
+
+	t.Run("revision lookup failure retains completed operation", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/v1/operations/op-build":
+				writeJSONTest(w, Operation{ID: "op-build", Kind: "template-build", TargetID: "tpl-family", Status: "succeeded", Result: map[string]string{"revisionId": "rev-3"}})
+			case "/v1/template-revisions/rev-3":
+				w.WriteHeader(http.StatusNotFound)
+				writeJSONTest(w, map[string]any{"error": APIError{Code: "NOT_FOUND", Message: "not found"}})
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+		client := testClient(t, server, "")
+		_, err := client.WaitBuildRevision(context.Background(), &Operation{ID: "op-build", Kind: "template-build", Status: "queued"})
+		var opErr *OperationError
+		if !errors.As(err, &opErr) || opErr.Operation == nil || opErr.Operation.Result["revisionId"] != "rev-3" {
+			t.Fatalf("expected operation error preserving revision result, got %#v", err)
+		}
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.Code != "NOT_FOUND" {
+			t.Fatalf("expected wrapped API error, got %#v", err)
+		}
+	})
+
+	t.Run("rejects non-build operation", func(t *testing.T) {
+		var gets atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { gets.Add(1) }))
+		defer server.Close()
+		client := testClient(t, server, "")
+		if _, err := client.WaitBuildRevision(context.Background(), &Operation{ID: "op-runtime", Kind: "create"}); err == nil {
+			t.Fatal("accepted runtime operation")
+		}
+		if gets.Load() != 0 {
+			t.Fatal("made request for runtime operation")
+		}
+	})
+}
+
+func TestTemplateBuildOperationDecodesPublicFields(t *testing.T) {
+	var op Operation
+	body := `{"id":"op-1","kind":"template-build","targetId":"tpl-1","status":"running","version":4,"input":{"userVersion":"1.01","baseImage":"alpine:3","profileId":"small","buildCommand":"npm i -g codex"},"createdAt":"2026-01-02T03:04:05Z","startedAt":"2026-01-02T03:05:05Z","updatedAt":"2026-01-02T03:06:05Z"}`
+	if err := json.Unmarshal([]byte(body), &op); err != nil {
+		t.Fatal(err)
+	}
+	if op.Input == nil || op.Input.UserVersion != "1.01" || op.Input.BuildCommand != "npm i -g codex" || op.StartedAt == nil || op.UpdatedAt.IsZero() {
+		t.Fatalf("operation fields were not decoded: %+v", op)
+	}
+	var capabilities Capabilities
+	if err := json.Unmarshal([]byte(`{"diskArchives":true,"protectedTools":true,"credentialBatch":true,"internalServices":true,"rootDebug":true,"sharedDirectory":true,"mountedToolRuntime":true,"mountedDebugHome":true,"persistentHome":true}`), &capabilities); err != nil {
+		t.Fatal(err)
+	}
+	if !capabilities.DiskArchives || !capabilities.ProtectedTools || !capabilities.CredentialBatch || !capabilities.InternalServices || !capabilities.RootDebug || !capabilities.SharedDirectory || !capabilities.MountedToolRuntime || !capabilities.MountedDebugHome || !capabilities.PersistentHome {
+		t.Fatalf("capability fields missing: %+v", capabilities)
+	}
+}
+
+func TestManagementValidationRejectsInvalidOptionsWithoutRequests(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests.Add(1); http.NotFound(w, r) }))
+	defer server.Close()
+	client := testClient(t, server, "")
+	badLimit := TemplateListOptions{Limit: 501}
+	badOffset := RevisionListOptions{Offset: -1}
+	if _, err := client.ListTemplates(context.Background(), badLimit); err == nil {
+		t.Fatal("accepted limit above 500")
+	}
+	if _, err := client.ListTemplateRevisions(context.Background(), "tpl", badOffset); err == nil {
+		t.Fatal("accepted negative offset")
+	}
+	if _, err := client.ListOperations(context.Background(), OperationListOptions{}, OperationListOptions{}); err == nil {
+		t.Fatal("accepted multiple list options")
+	}
+	if _, err := client.GetOperationLogs(context.Background(), "op", -1, 100); err == nil {
+		t.Fatal("accepted negative log offset")
+	}
+	if _, err := client.GetOperationLogs(context.Background(), "op", 0, 1<<20+1); err == nil {
+		t.Fatal("accepted oversized log limit")
+	}
+	emptyDescription := ""
+	if _, err := client.UpdateTemplate(context.Background(), "tpl", UpdateTemplateOptions{ExpectedGeneration: 1}); err == nil {
+		t.Fatal("accepted empty template patch")
+	}
+	if _, err := client.UpdateTemplate(context.Background(), "tpl", UpdateTemplateOptions{Description: &emptyDescription}); err == nil {
+		t.Fatal("accepted template patch without generation")
+	}
+	if _, err := client.UpdateTemplateRevision(context.Background(), "rev", UpdateRevisionOptions{ExpectedGeneration: 1}); err == nil {
+		t.Fatal("accepted empty revision patch")
+	}
+	badStatus := "deleted"
+	if _, err := client.UpdateTemplateRevision(context.Background(), "rev", UpdateRevisionOptions{Status: &badStatus, ExpectedGeneration: 1}); err == nil {
+		t.Fatal("accepted invalid revision status")
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("invalid requests sent %d requests", requests.Load())
+	}
+}
+
+func TestSetTemplateStableRevisionCanClearStableRevision(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Method != http.MethodPatch || r.URL.Path != "/v1/templates/tpl" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL)
+		}
+		var body UpdateTemplateOptions
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if body.ExpectedGeneration != 7 || body.StableRevisionID == nil || *body.StableRevisionID != "" {
+			t.Errorf("stable clear patch = %+v", body)
+		}
+		writeJSONTest(w, Template{ID: "tpl", Generation: 8})
+	}))
+	defer server.Close()
+	client := testClient(t, server, "")
+	if _, err := client.SetTemplateStableRevision(context.Background(), "tpl", "", 7); err != nil {
+		t.Fatal(err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("requests = %d, want 1", requests.Load())
+	}
+}
+
 func TestRunAndRunArgvSendDistinctCommandContracts(t *testing.T) {
 	tests := []struct {
 		name string

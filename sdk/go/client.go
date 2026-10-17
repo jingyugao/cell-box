@@ -70,41 +70,17 @@ func (c *Client) do(ctx context.Context, method, path, key string, body, out any
 			return fmt.Errorf("cellbox: encode request: %w", err)
 		}
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(data))
+	var reader io.Reader
+	contentType := ""
+	if body != nil {
+		reader = bytes.NewReader(data)
+		contentType = "application/json"
+	}
+	res, err := c.request(ctx, method, path, key, reader, contentType)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if c.clientID != "" {
-		req.Header.Set("X-Cellbox-Client-ID", c.clientID)
-	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-	if key != "" {
-		req.Header.Set("Idempotency-Key", key)
-		// net/http may retry requests carrying an idempotency key on a stale
-		// reused connection. Disable body replay: callers control recovery.
-		req.GetBody = nil
-	}
-	res, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("cellbox: %s request: %w", method, err)
-	}
 	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		var envelope struct {
-			Error *APIError `json:"error"`
-		}
-		if json.NewDecoder(io.LimitReader(res.Body, 64<<10)).Decode(&envelope) == nil && envelope.Error != nil {
-			envelope.Error.StatusCode = res.StatusCode
-			return envelope.Error
-		}
-		return &APIError{StatusCode: res.StatusCode, Code: "HTTP_ERROR", Message: http.StatusText(res.StatusCode)}
-	}
 	// Two bounded 1 MiB command streams can expand sixfold in JSON escaping.
 	const maxResponse = 16 << 20
 	data, err = io.ReadAll(io.LimitReader(res.Body, maxResponse+1))
@@ -120,6 +96,46 @@ func (c *Client) do(ctx context.Context, method, path, key string, body, out any
 		}
 	}
 	return nil
+}
+
+// request applies the shared Cellbox headers and transport rules for JSON and
+// raw file endpoints. The caller owns the body on success; errors close it.
+func (c *Client) request(ctx context.Context, method, path, key string, body io.Reader, contentType string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if c.clientID != "" {
+		req.Header.Set("X-Cellbox-Client-ID", c.clientID)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	if key != "" {
+		req.Header.Set("Idempotency-Key", key)
+		// Callers control recovery. Prevent transport-level body replay.
+		req.GetBody = nil
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("cellbox: %s request: %w", method, err)
+	}
+	if res.StatusCode >= 200 && res.StatusCode < 300 {
+		return res, nil
+	}
+	defer res.Body.Close()
+	var envelope struct {
+		Error *APIError `json:"error"`
+	}
+	if json.NewDecoder(io.LimitReader(res.Body, 64<<10)).Decode(&envelope) == nil && envelope.Error != nil {
+		envelope.Error.StatusCode = res.StatusCode
+		return nil, envelope.Error
+	}
+	return nil, &APIError{StatusCode: res.StatusCode, Code: "HTTP_ERROR", Message: http.StatusText(res.StatusCode)}
 }
 
 func (c *Client) submit(ctx context.Context, path, key string, body any) (*Operation, error) {
@@ -151,6 +167,19 @@ func resourcePath(prefix, id string) (string, error) {
 	return prefix + url.PathEscape(id), nil
 }
 
+func validateListOptions(count, limit, offset int) error {
+	if count > 1 {
+		return fmt.Errorf("cellbox: at most one list options value is allowed")
+	}
+	if limit < 0 || limit > 500 {
+		return fmt.Errorf("cellbox: list limit must be 0..500")
+	}
+	if offset < 0 {
+		return fmt.Errorf("cellbox: list offset must be nonnegative")
+	}
+	return nil
+}
+
 func (c *Client) ListProfiles(ctx context.Context) ([]Profile, error) {
 	var profiles []Profile
 	err := c.do(ctx, http.MethodGet, "/v1/profiles", "", nil, &profiles)
@@ -174,6 +203,13 @@ func (c *Client) CreateTemplate(ctx context.Context, opts CreateTemplateOptions)
 
 // ListTemplates lists template families in the client's namespace.
 func (c *Client) ListTemplates(ctx context.Context, opts ...TemplateListOptions) ([]Template, error) {
+	var option TemplateListOptions
+	if len(opts) > 0 {
+		option = opts[0]
+	}
+	if err := validateListOptions(len(opts), option.Limit, option.Offset); err != nil {
+		return nil, err
+	}
 	q := url.Values{}
 	if len(opts) > 0 {
 		if opts[0].Name != "" {
@@ -210,6 +246,15 @@ func (c *Client) GetTemplate(ctx context.Context, id string) (*Template, error) 
 
 // UpdateTemplate updates mutable family settings using optimistic concurrency.
 func (c *Client) UpdateTemplate(ctx context.Context, id string, opts UpdateTemplateOptions) (*Template, error) {
+	if opts.ExpectedGeneration == 0 {
+		return nil, fmt.Errorf("cellbox: expected generation is required")
+	}
+	if opts.Description == nil && opts.DefaultWarmSlots == nil && opts.StableRevisionID == nil {
+		return nil, fmt.Errorf("cellbox: at least one template field is required")
+	}
+	if opts.DefaultWarmSlots != nil && (*opts.DefaultWarmSlots < 0 || *opts.DefaultWarmSlots > 1024) {
+		return nil, fmt.Errorf("cellbox: default warm slots must be 0..1024")
+	}
 	path, err := resourcePath("/v1/templates/", id)
 	if err != nil {
 		return nil, err
@@ -224,6 +269,12 @@ func (c *Client) UpdateTemplate(ctx context.Context, id string, opts UpdateTempl
 
 func (c *Client) SetTemplateWarmSlots(ctx context.Context, id string, slots int, expectedGeneration uint64) (*Template, error) {
 	return c.UpdateTemplate(ctx, id, UpdateTemplateOptions{DefaultWarmSlots: &slots, ExpectedGeneration: expectedGeneration})
+}
+
+// SetTemplateStableRevision selects the default immutable revision for new
+// sandboxes. Pass an empty revisionID to clear the stable revision.
+func (c *Client) SetTemplateStableRevision(ctx context.Context, id, revisionID string, expectedGeneration uint64) (*Template, error) {
+	return c.UpdateTemplate(ctx, id, UpdateTemplateOptions{StableRevisionID: &revisionID, ExpectedGeneration: expectedGeneration})
 }
 
 // BuildRevision submits an asynchronous build and returns its durable operation.
@@ -246,6 +297,9 @@ func (c *Client) WaitBuildRevision(ctx context.Context, op *Operation) (*Templat
 	if op == nil || op.ID == "" {
 		return nil, fmt.Errorf("cellbox: operation is required")
 	}
+	if op.Kind != "template-build" {
+		return nil, fmt.Errorf("cellbox: operation %s is %q, want template-build", op.ID, op.Kind)
+	}
 	completed, err := c.wait(ctx, op)
 	if err != nil {
 		return nil, err
@@ -255,15 +309,23 @@ func (c *Client) WaitBuildRevision(ctx context.Context, op *Operation) (*Templat
 		revisionID = completed.Result["revisionId"]
 	}
 	if revisionID == "" {
-		revisionID = completed.TargetID
-	}
-	if revisionID == "" {
 		return nil, &OperationError{Operation: completed, Err: fmt.Errorf("build result missing revision ID")}
 	}
-	return c.GetTemplateRevision(ctx, revisionID)
+	revision, err := c.GetTemplateRevision(ctx, revisionID)
+	if err != nil {
+		return nil, &OperationError{Operation: completed, Err: err}
+	}
+	return revision, nil
 }
 
 func (c *Client) ListTemplateRevisions(ctx context.Context, templateID string, opts ...RevisionListOptions) ([]TemplateRevision, error) {
+	var option RevisionListOptions
+	if len(opts) > 0 {
+		option = opts[0]
+	}
+	if err := validateListOptions(len(opts), option.Limit, option.Offset); err != nil {
+		return nil, err
+	}
 	path, err := resourcePath("/v1/templates/", templateID)
 	if err != nil {
 		return nil, err
@@ -306,6 +368,12 @@ func (c *Client) UpdateTemplateRevision(ctx context.Context, id string, opts Upd
 	if opts.WarmSlots != nil && (*opts.WarmSlots < 0 || *opts.WarmSlots > 1024) {
 		return nil, fmt.Errorf("cellbox: warm slots must be 0..1024")
 	}
+	if opts.Description == nil && opts.Status == nil && opts.WarmSlots == nil {
+		return nil, fmt.Errorf("cellbox: at least one revision field is required")
+	}
+	if opts.Status != nil && *opts.Status != "active" && *opts.Status != "retired" {
+		return nil, fmt.Errorf("cellbox: revision status must be active or retired")
+	}
 	path, err := resourcePath("/v1/template-revisions/", id)
 	if err != nil {
 		return nil, err
@@ -315,7 +383,16 @@ func (c *Client) UpdateTemplateRevision(ctx context.Context, id string, opts Upd
 	return &revision, err
 }
 
+// ListOperations lists template-build tasks from the local catalog. It does not
+// include runtime sandbox operations.
 func (c *Client) ListOperations(ctx context.Context, opts ...OperationListOptions) ([]Operation, error) {
+	var option OperationListOptions
+	if len(opts) > 0 {
+		option = opts[0]
+	}
+	if err := validateListOptions(len(opts), option.Limit, option.Offset); err != nil {
+		return nil, err
+	}
 	q := url.Values{}
 	if len(opts) > 0 {
 		if opts[0].TemplateID != "" {
@@ -340,7 +417,14 @@ func (c *Client) ListOperations(ctx context.Context, opts ...OperationListOption
 	return operations, err
 }
 
+// GetOperationLogs reads a template-build task's captured build output.
 func (c *Client) GetOperationLogs(ctx context.Context, id string, offset int64, limit int) (*OperationLogs, error) {
+	if offset < 0 {
+		return nil, fmt.Errorf("cellbox: log offset must be nonnegative")
+	}
+	if limit < 0 || limit > 1<<20 {
+		return nil, fmt.Errorf("cellbox: log limit must be 0..1048576")
+	}
 	path, err := resourcePath("/v1/operations/", id)
 	if err != nil {
 		return nil, err
@@ -362,6 +446,7 @@ func (c *Client) GetOperationLogs(ctx context.Context, id string, offset int64, 
 	return &logs, err
 }
 
+// CancelOperation requests cancellation of a template-build task.
 func (c *Client) CancelOperation(ctx context.Context, id string) (*Operation, error) {
 	path, err := resourcePath("/v1/operations/", id)
 	if err != nil {
@@ -372,8 +457,8 @@ func (c *Client) CancelOperation(ctx context.Context, id string) (*Operation, er
 	return &operation, err
 }
 
-// DeleteTemplate removes an unused template. The server rejects templates still
-// referenced by active sandboxes or archives.
+// DeleteTemplate removes an empty template family with no active build. Revisions
+// must first be removed through a future API; the server does not query Kubernetes.
 func (c *Client) DeleteTemplate(ctx context.Context, id string) error {
 	path, err := resourcePath("/v1/templates/", id)
 	if err != nil {

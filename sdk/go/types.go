@@ -1,6 +1,6 @@
-// Package cellbox provides a Go client for creating Cellbox sandboxes and
-// executing bounded commands. Context cancellation stops waiting; it does not
-// cancel accepted server operations. Use operation IDs or the same idempotency
+// Package cellbox provides a Go client for managing Cellbox templates, sandbox
+// lifecycles, workspace files and bounded commands. Context cancellation stops
+// waiting; it does not cancel accepted server operations. Use operation IDs or the same idempotency
 // key and identical input to recover their results without repeating work.
 package cellbox
 
@@ -44,15 +44,24 @@ type SandboxInfo struct {
 }
 
 type Capabilities struct {
-	Exec          bool   `json:"exec"`
-	Files         bool   `json:"files"`
-	HTTP          bool   `json:"http"`
-	WebSocket     bool   `json:"websocket"`
-	PTY           bool   `json:"pty"`
-	ReconnectExec bool   `json:"reconnectExec"`
-	Freeze        bool   `json:"freeze"`
-	Suspend       string `json:"suspend"`
-	Archives      string `json:"archives"`
+	DiskArchives       bool   `json:"diskArchives,omitempty"`
+	Exec               bool   `json:"exec"`
+	Files              bool   `json:"files"`
+	HTTP               bool   `json:"http"`
+	WebSocket          bool   `json:"websocket"`
+	PTY                bool   `json:"pty"`
+	ReconnectExec      bool   `json:"reconnectExec"`
+	Freeze             bool   `json:"freeze"`
+	Suspend            string `json:"suspend"`
+	Archives           string `json:"archives"`
+	ProtectedTools     bool   `json:"protectedTools"`
+	CredentialBatch    bool   `json:"credentialBatch,omitempty"`
+	InternalServices   bool   `json:"internalServices,omitempty"`
+	RootDebug          bool   `json:"rootDebug,omitempty"`
+	SharedDirectory    bool   `json:"sharedDirectory,omitempty"`
+	MountedToolRuntime bool   `json:"mountedToolRuntime,omitempty"`
+	MountedDebugHome   bool   `json:"mountedDebugHome,omitempty"`
+	PersistentHome     bool   `json:"persistentHome,omitempty"`
 }
 
 type Profile struct {
@@ -162,18 +171,21 @@ type OperationLogs struct {
 // Operation records durable server work. IdempotencyKey is populated locally
 // on submission, and is not returned by the server's GET operation endpoint.
 type Operation struct {
-	ID             string            `json:"id"`
-	Kind           string            `json:"kind"`
-	TargetID       string            `json:"targetId"`
-	Status         string            `json:"status"`
-	Stage          string            `json:"stage,omitempty"`
-	Version        uint64            `json:"version"`
-	CreatedAt      time.Time         `json:"createdAt"`
-	FinishedAt     *time.Time        `json:"finishedAt,omitempty"`
-	Result         map[string]string `json:"result,omitempty"`
-	Box            *SandboxInfo      `json:"box,omitempty"`
-	Error          *APIError         `json:"error,omitempty"`
-	IdempotencyKey string            `json:"-"`
+	ID             string                 `json:"id"`
+	Kind           string                 `json:"kind"`
+	TargetID       string                 `json:"targetId"`
+	Status         string                 `json:"status"`
+	Stage          string                 `json:"stage,omitempty"`
+	Version        uint64                 `json:"version"`
+	CreatedAt      time.Time              `json:"createdAt"`
+	StartedAt      *time.Time             `json:"startedAt,omitempty"`
+	FinishedAt     *time.Time             `json:"finishedAt,omitempty"`
+	UpdatedAt      time.Time              `json:"updatedAt"`
+	Input          *CreateRevisionOptions `json:"input,omitempty"`
+	Result         map[string]string      `json:"result,omitempty"`
+	Box            *SandboxInfo           `json:"box,omitempty"`
+	Error          *APIError              `json:"error,omitempty"`
+	IdempotencyKey string                 `json:"-"`
 }
 
 type Execution struct {
