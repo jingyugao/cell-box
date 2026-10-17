@@ -1,6 +1,6 @@
 # REST 快速开始
 
-本指南演示创建模板族、构建 revision、将其设为 stable、创建沙箱并执行命令，并说明预热状态查询。Go 客户端请参阅 [SDK 使用指南](go-sdk.md)。完整请求和响应结构见 [`api/openapi.yaml`](../../api/openapi.yaml)。
+本指南演示创建模板族、构建 revision、将其设为 stable、创建沙箱并执行命令，并说明预热状态查询。Go 客户端请参阅 [SDK 使用指南](go-sdk.md)。完整请求和响应结构见 [`api/openapi.yaml`](../api/openapi.yaml)。
 
 ## 连接服务
 

@@ -1,6 +1,6 @@
 # Go SDK 使用指南
 
-Go SDK 位于 [`sdk/go`](../../sdk/go)，使用 Go 1.22，模块路径为 `github.com/jingyugao/cell-box/sdk/go`。当前版本随 Cellbox 源码开发，尚未发布为 Go module。开发时通过本地 `replace` 引用此仓库。
+Go SDK 位于 [`sdk/go`](../sdk/go)，使用 Go 1.22，模块路径为 `github.com/jingyugao/cell-box/sdk/go`。当前版本随 Cellbox 源码开发，尚未发布为 Go module。开发时通过本地 `replace` 引用此仓库。
 
 ## 在应用中添加 SDK
 
@@ -268,7 +268,7 @@ go -C sdk/go run ./examples/lifecycle
 | `CELLBOX_BUILD_KEY`、`CELLBOX_PLATFORM` | 可选 | 构建幂等键和平台；平台默认为 `linux/amd64` |
 | `CELLBOX_CLIENT_ID`、`CELLBOX_CLIENT_TOKEN` | 可选 | 数据命名空间；仅有前置认证 Gateway 时设置 token |
 
-默认构建命令会安装示例工具 `template-tool`；如果自定义了 `CELLBOX_BUILD_COMMAND`，示例默认只打印提示并查看工作目录，不会假设自定义镜像里有该工具。可用 `CELLBOX_VERIFY_COMMAND` 指定实际验证命令。模板示例和生命周期示例创建的 sandbox 都会尝试自动销毁；模板和构建出的 revision 会保留。生命周期示例设置 `CELLBOX_TEMPLATE_ID` 或 `CELLBOX_REVISION_ID` 其中之一即可。其他示例代码位于 [`sdk/go/examples`](../../sdk/go/examples)。HTTP 契约和各 provider 的能力字段见 [OpenAPI 文档](../../api/openapi.yaml)。SDK 当前不提供 PTY/流式交互，也没有封装所有归档、路由或内部服务接口。
+默认构建命令会安装示例工具 `template-tool`；如果自定义了 `CELLBOX_BUILD_COMMAND`，示例默认只打印提示并查看工作目录，不会假设自定义镜像里有该工具。可用 `CELLBOX_VERIFY_COMMAND` 指定实际验证命令。模板示例和生命周期示例创建的 sandbox 都会尝试自动销毁；模板和构建出的 revision 会保留。生命周期示例设置 `CELLBOX_TEMPLATE_ID` 或 `CELLBOX_REVISION_ID` 其中之一即可。其他示例代码位于 [`sdk/go/examples`](../sdk/go/examples)。HTTP 契约和各 provider 的能力字段见 [OpenAPI 文档](../api/openapi.yaml)。SDK 当前不提供 PTY/流式交互，也没有封装所有归档、路由或内部服务接口。
 
 ## 预热池和运行时状态
 
