@@ -6,6 +6,7 @@ import (
 	"cellbox.local/cellbox/internal/guestapi"
 	"cellbox.local/cellbox/internal/inventory"
 	"cellbox.local/cellbox/internal/objectstorage"
+	"cellbox.local/cellbox/internal/runtimecontrol"
 	"cellbox.local/cellbox/internal/telemetry"
 	"context"
 	"crypto/rand"
@@ -59,6 +60,12 @@ func New(config Config, providers map[string]boxprovider.Provider) (*Service, er
 func (s *Service) RuntimeObjects() objectstorage.Objects { return s.objects }
 
 func (s *Service) CheckpointStore() inventory.CheckpointStore { return s.store }
+
+// RuntimeJournal borrows the same durable database as operations and metadata.
+// Stop the runtime synchronizer before closing the service.
+func (s *Service) RuntimeJournal() *runtimecontrol.Journal {
+	return runtimecontrol.NewJournal(s.store.db)
+}
 
 func NewContext(parent context.Context, config Config, providers map[string]boxprovider.Provider) (*Service, error) {
 	if err := config.Validate(); err != nil {

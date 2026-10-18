@@ -91,6 +91,7 @@ func newRuntime(kube *rest.Config, options nodeOptions, readDesired func(context
 	backend.HostMountNamespace = options.HostMountNamespace
 	local := runtimecontrol.New(p.Client)
 	p.Client, p.Local = local, local
+	p.ConfirmExecutionLocal = backend.ConfirmExecution
 	p.CacheImageLocal = func(ctx context.Context, image, nodeName, namespace string) error {
 		if nodeName != options.Node || namespace != options.Namespace {
 			return errors.New("image cache target differs from this server's node or namespace")
@@ -100,6 +101,9 @@ func newRuntime(kube *rest.Config, options nodeOptions, readDesired func(context
 		return backend.CacheImage(pull, image)
 	}
 	r := &controller.Reconciler{Client: local, Runtime: backend, NodeName: options.Node}
+	if err = mgr.Add(&runtimecontrol.Synchronizer{Client: local}); err != nil {
+		return nil, nil, nil, err
+	}
 	r.WarmPool = &controller.WarmPool{Reconciler: r, Namespace: options.Namespace, Size: options.WarmPoolSize, ReadDesired: readDesired, PublishObservation: p.SetWarmSnapshot}
 	if err = mgr.Add(r.WarmPool); err != nil {
 		return nil, nil, nil, err
@@ -163,6 +167,10 @@ func serveUnified(parent context.Context, config service.Config, dockerBinary st
 	if backend != nil {
 		backend.Objects = app.RuntimeObjects()
 		backend.Checkpoints = app.CheckpointStore()
+		provider := providers["resumable-k8s-pod"].(*resumable.Provider)
+		if err := provider.Local.SetJournal(ctx, app.RuntimeJournal()); err != nil {
+			return errors.Join(err, app.Close())
+		}
 	}
 	runtimeResult := make(chan error, 1)
 	if mgr != nil {

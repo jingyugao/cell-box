@@ -131,6 +131,14 @@ func TestResumeGuestRejectsReplacedContainerBeforeRequest(t *testing.T) {
 	}
 }
 
+func TestConfirmExecutionRejectsReplacedContainer(t *testing.T) {
+	b, w, p := resumeGuestFixture(t, true, "old-container")
+	b.Runtime.(*resumeGuestCRI).containers[0].Id = "replacement-container"
+	if _, err := b.ConfirmExecution(context.Background(), w, p); err == nil {
+		t.Fatal("ConfirmExecution() accepted a replaced container")
+	}
+}
+
 func TestResumeGuestHTTPFailureIsSanitizedAndRetryable(t *testing.T) {
 	_, _, requests := startResumeGuestServer(t, http.StatusInternalServerError, "sensitive guest response", "")
 	b, w, p := resumeGuestFixture(t, true, "current-container")
