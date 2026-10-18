@@ -48,21 +48,21 @@ type SandboxInfo struct {
 	ObservedAt      *time.Time   `json:"observedAt,omitempty"`
 }
 
-// Mount attaches one exclusive persistent volume at a fixed absolute path in a sandbox.
+// Mount attaches a persistent volume at a fixed absolute path in a sandbox.
 type Mount struct {
 	VolumeID  string `json:"volumeId"`
 	MountPath string `json:"mountPath"`
 	ReadOnly  bool   `json:"readOnly,omitempty"`
 }
 
-// CreateVolumeOptions creates a persistent HOME volume for later attachment.
+// CreateVolumeOptions creates a persistent volume for later mounting.
 type CreateVolumeOptions struct {
 	ID        string `json:"id,omitempty"`
 	OwnerKey  string `json:"ownerKey"`
 	ProfileID string `json:"profileId"`
 }
 
-// Volume describes an independently managed persistent HOME volume.
+// Volume describes an independently managed persistent volume.
 type Volume struct {
 	ID              string    `json:"id"`
 	OwnerKey        string    `json:"ownerKey"`
@@ -71,7 +71,6 @@ type Volume struct {
 	Phase           string    `json:"phase"`
 	ResourceVersion uint64    `json:"resourceVersion"`
 	CreatedAt       time.Time `json:"createdAt"`
-	BoxID           string    `json:"boxId,omitempty"`
 	OperationID     string    `json:"operationId,omitempty"`
 	Error           *APIError `json:"error,omitempty"`
 }

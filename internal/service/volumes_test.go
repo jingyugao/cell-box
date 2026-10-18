@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
@@ -13,13 +12,11 @@ import (
 	"cellbox.local/cellbox/internal/node"
 )
 
-// Exercise real disk identities and leases behind the HTTP service, while the
+// Exercise real disk identities behind the HTTP service, while the
 // process provider remains a deterministic substitute for Kubernetes/runsc.
 type diskCoreProvider struct {
 	*fakeCoreProvider
-	base  string
-	mu    sync.Mutex
-	specs map[string]boxprovider.Spec
+	base string
 }
 
 func (p *diskCoreProvider) CreateVolume(_ context.Context, spec boxprovider.VolumeSpec) error {
@@ -39,44 +36,18 @@ func (p *diskCoreProvider) Create(ctx context.Context, spec boxprovider.Spec) (b
 			continue
 		}
 		seen[mount.UID] = true
-		home, err := homevolume.Attach(p.base, mount.UID, spec.NodeName, h.ID)
-		if err != nil {
-			return h, err
-		}
-		if err := homevolume.ClaimExecution(p.base, mount.UID, home.ID, "pod-"+spec.BoxID, ""); err != nil {
+		if _, err := homevolume.Verify(p.base, mount.UID, spec.NodeName, homevolume.VolumeSpecHash, ""); err != nil {
 			return h, err
 		}
 	}
-	p.mu.Lock()
-	p.specs[h.ID] = spec
-	p.mu.Unlock()
 	return h, nil
-}
-func (p *diskCoreProvider) Destroy(ctx context.Context, h boxprovider.Handle) error {
-	if err := p.fakeCoreProvider.Destroy(ctx, h); err != nil {
-		return err
-	}
-	p.mu.Lock()
-	spec := p.specs[h.ID]
-	p.mu.Unlock()
-	seen := make(map[string]bool)
-	for _, mount := range spec.Mounts {
-		if seen[mount.UID] {
-			continue
-		}
-		seen[mount.UID] = true
-		if err := homevolume.Detach(p.base, mount.UID, spec.NodeName, h.ID); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func volumeFixture(t *testing.T) (*coreFixture, *diskCoreProvider) {
 	t.Helper()
 	f := newCoreFixture(t)
 	useK3sProfile(t, f)
-	p := &diskCoreProvider{fakeCoreProvider: f.provider, base: t.TempDir(), specs: map[string]boxprovider.Spec{}}
+	p := &diskCoreProvider{fakeCoreProvider: f.provider, base: t.TempDir()}
 	f.service.providers["resumable-k8s-pod"] = p
 	return f, p
 }
@@ -139,8 +110,8 @@ func TestVolumeSurvivesSandboxUpgradeAndExplicitDelete(t *testing.T) {
 	destroyVolumeBox(t, f, first.ID)
 	status, body = f.call(t, "GET", "/v1/volumes/"+v.ID, testClientToken, "", nil)
 	wantStatus(t, status, 200, body)
-	if got := decodeResponse[Volume](t, body); got.Phase != "available" || got.BoxID != "" {
-		t.Fatalf("destroy did not release volume: %+v", got)
+	if got := decodeResponse[Volume](t, body); got.Phase != "available" {
+		t.Fatalf("destroy changed volume readiness: %+v", got)
 	}
 	v2 := buildCatalogRevision(t, f, template, "v2", "registry.example.test/upgraded:latest")
 	second := createVolumeBox(t, f, createRequest{ID: "box-v2", OwnerKey: v.OwnerKey, RevisionID: v2.ID, HomeVolumeID: v.ID})
@@ -163,8 +134,8 @@ func TestVolumeSurvivesSandboxUpgradeAndExplicitDelete(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if current, err := f.service.store.VolumeRecord("client-a", v.ID); err != nil || current.Volume.BoxID != second.ID {
-		t.Fatalf("old terminal observation released the new owner: %+v, %v", current, err)
+	if current, err := f.service.store.VolumeRecord("client-a", v.ID); err != nil || current.Volume.Version != record.Volume.Version || current.Volume.Phase != "available" {
+		t.Fatalf("sandbox lifecycle changed volume metadata: %+v, %v", current, err)
 	}
 	destroyVolumeBox(t, f, second.ID)
 	status, body = f.call(t, "DELETE", "/v1/volumes/"+v.ID, testClientToken, "", nil)
@@ -177,7 +148,7 @@ func TestVolumeSurvivesSandboxUpgradeAndExplicitDelete(t *testing.T) {
 	wantStatus(t, status, 409, body)
 }
 
-func TestVolumeAndSandboxCreateConflictsAreAtomic(t *testing.T) {
+func TestSharedVolumeKeepsResourceIDConflicts(t *testing.T) {
 	f, _ := volumeFixture(t)
 	v := createTestVolume(t, f, "shared-disk")
 	template := f.template(t)
@@ -186,9 +157,11 @@ func TestVolumeAndSandboxCreateConflictsAreAtomic(t *testing.T) {
 	status, body := f.call(t, "POST", "/v1/boxes", testClientToken, "", input)
 	wantStatus(t, status, 409, body)
 	input.ID = "box-two"
-	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "", input)
-	wantStatus(t, status, 409, body)
-	// Failed volume admission rolls back the Box ID reservation too.
+	shared := createVolumeBox(t, f, input)
+	if shared.HomeVolumeID != v.ID {
+		t.Fatalf("second sandbox did not reference the same volume: %+v", shared)
+	}
+	input.ID = "box-default"
 	input.HomeVolumeID = ""
 	box := createVolumeBox(t, f, input)
 	if box.HomeVolumeID == "" || box.HomeVolumeID == v.ID {
@@ -204,8 +177,8 @@ func TestVolumeAndSandboxCreateConflictsAreAtomic(t *testing.T) {
 	wantStatus(t, status, 200, body)
 }
 
-func TestConcurrentVolumeReservationHasOneWinner(t *testing.T) {
-	f, _ := volumeFixture(t)
+func TestConcurrentBoxesCanShareVolume(t *testing.T) {
+	f, p := volumeFixture(t)
 	v := createTestVolume(t, f, "race-disk")
 	template := f.template(t)
 	type result struct {
@@ -215,25 +188,39 @@ func TestConcurrentVolumeReservationHasOneWinner(t *testing.T) {
 	results := make(chan result, 2)
 	for _, id := range []string{"box-race-a", "box-race-b"} {
 		go func() {
-			op, err := f.service.create("client-a", createRequest{ID: id, OwnerKey: v.OwnerKey, TemplateID: template, HomeVolumeID: v.ID}, "", false)
+			op, err := f.service.create("client-a", createRequest{ID: id, OwnerKey: v.OwnerKey, TemplateID: template, Mounts: []Mount{{VolumeID: v.ID, MountPath: "/data"}}}, "", false)
 			results <- result{op, err}
 		}()
 	}
-	accepted, rejected := 0, 0
 	for range 2 {
 		r := <-results
-		if r.err == nil {
-			accepted++
-			f.waitOperation(t, r.op.ID, "succeeded")
-		} else if cloneError(r.err).Code == "CONFLICT" {
-			rejected++
-		} else {
+		if r.err != nil {
 			t.Fatal(r.err)
 		}
+		f.waitOperation(t, r.op.ID, "succeeded")
 	}
-	if accepted != 1 || rejected != 1 {
-		t.Fatalf("accepted=%d rejected=%d", accepted, rejected)
+	record, err := f.service.store.VolumeRecord("client-a", v.ID)
+	if err != nil || record.Volume.Phase != "available" || record.Volume.Version != v.Version {
+		t.Fatalf("sharing changed volume metadata: %+v, %v", record, err)
 	}
+	root, _ := homevolume.Path(p.base, record.UID)
+	file := filepath.Join(root, "shared-data")
+	if err := os.WriteFile(file, []byte("retained"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	destroyVolumeBox(t, f, "box-race-a")
+	status, body := f.call(t, "DELETE", "/v1/volumes/"+v.ID, testClientToken, "", nil)
+	wantStatus(t, status, 409, body)
+	if data, err := os.ReadFile(file); err != nil || string(data) != "retained" {
+		t.Fatalf("destroying one sandbox changed shared storage: %q, %v", data, err)
+	}
+	if _, err := homevolume.Verify(p.base, record.UID, "test-node", homevolume.VolumeSpecHash, ""); err != nil {
+		t.Fatalf("remaining sandbox's volume became unavailable: %v", err)
+	}
+	destroyVolumeBox(t, f, "box-race-b")
+	status, body = f.call(t, "DELETE", "/v1/volumes/"+v.ID, testClientToken, "", nil)
+	wantStatus(t, status, 202, body)
+	f.waitOperation(t, decodeResponse[Operation](t, body).ID, "succeeded")
 }
 
 func TestVolumeAdmissionRejectsMissingForeignAndIncompatibleDisks(t *testing.T) {
@@ -300,17 +287,16 @@ func TestLegacySandboxDeletionRegistersRetainedVolume(t *testing.T) {
 		t.Fatalf("legacy layout was changed before termination: %+v, %v", b, err)
 	}
 	v, err := f.service.store.VolumeRecord("client-a", b.Box.HomeVolumeID)
-	if err != nil || v.UID != legacyUID || v.Volume.Phase != "available" || v.Volume.BoxID != "" {
+	if err != nil || v.UID != legacyUID || v.Volume.Phase != "available" {
 		t.Fatalf("legacy disk was not registered and retained: %+v, %v", v, err)
 	}
 }
 
-func TestDeletedObservationReleasesVolumeWithoutReplayingDestroy(t *testing.T) {
+func TestDeletedObservationPreservesVolumeMetadata(t *testing.T) {
 	f, _ := volumeFixture(t)
 	v := createTestVolume(t, f, "restart-disk")
 	box := createVolumeBox(t, f, createRequest{ID: "box-interrupted-delete", OwnerKey: v.OwnerKey, TemplateID: f.template(t), HomeVolumeID: v.ID})
-	// Terminal observation and attachment release must commit together even if
-	// the caller's destroy operation was interrupted by a process restart.
+	// Observing a deleted Box never changes an independent volume's readiness.
 	if err := f.service.store.Write(context.Background(), func(tx *storeTx) error {
 		b, err := tx.Box("client-a", box.ID)
 		if err != nil {
@@ -322,8 +308,49 @@ func TestDeletedObservationReleasesVolumeWithoutReplayingDestroy(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := f.service.store.VolumeRecord("client-a", v.ID)
-	if err != nil || got.Volume.BoxID != "" || got.Volume.Phase != "available" {
-		t.Fatalf("terminal observation retained a reservation: %+v, %v", got, err)
+	if err != nil || got.Volume.Phase != "available" || got.Volume.Version != v.Version {
+		t.Fatalf("terminal observation changed volume metadata: %+v, %v", got, err)
+	}
+}
+
+func TestLegacyVolumePromotionCompletesAfterInterruptedDestroy(t *testing.T) {
+	f := newCoreFixture(t)
+	useK3sProfile(t, f)
+	_, box := f.createBox(t, "legacy-interrupted")
+	var volumeID string
+	if err := f.service.store.Write(context.Background(), func(tx *storeTx) error {
+		b, err := tx.Box("client-a", box.ID)
+		if err != nil {
+			return err
+		}
+		b.HomeVolumeUID, b.Box.HomeVolumeID = "", ""
+		b.VolumeMounts, b.Box.Mounts = nil, nil
+		if err := f.service.registerLegacyVolume(tx, &b); err != nil {
+			return err
+		}
+		volumeID, b.Box.Phase = b.Box.HomeVolumeID, "deleting"
+		return tx.PutBox(b)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.store.InterruptOperations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	v, err := f.service.store.VolumeRecord("client-a", volumeID)
+	if err != nil || v.Volume.Phase != "failed" {
+		t.Fatalf("interrupted promotion was not surfaced: %+v, %v", v, err)
+	}
+	// The node may finish promotion while the service is restarting. Its
+	// deleted observation makes the retained volume ready for a new sandbox.
+	if err := f.service.store.ChangeBox(context.Background(), box.ID, func(b *boxRecord) error {
+		b.Box.Phase = "deleted"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	v, err = f.service.store.VolumeRecord("client-a", volumeID)
+	if err != nil || v.Volume.Phase != "available" || v.Volume.Error != nil {
+		t.Fatalf("completed promotion remained unavailable after restart: %+v, %v", v, err)
 	}
 }
 
@@ -412,8 +439,8 @@ func TestMultipleMountsSurviveSandboxReplacement(t *testing.T) {
 	}
 	for _, volume := range []Volume{home, data} {
 		record, err := f.service.store.VolumeRecord("client-a", volume.ID)
-		if err != nil || record.Volume.BoxID != second.ID {
-			t.Fatalf("disk was not transferred: %+v, %v", record, err)
+		if err != nil || record.Volume.Phase != "available" || record.Volume.Version != volume.Version {
+			t.Fatalf("replacement changed volume metadata: %+v, %v", record, err)
 		}
 		root, _ := homevolume.Path(p.base, record.UID)
 		if content, err := os.ReadFile(filepath.Join(root, "marker")); err != nil || string(content) != volume.ID {
@@ -454,25 +481,25 @@ func TestRepeatedAndNestedMountPathsArePassedThrough(t *testing.T) {
 		t.Fatalf("destroy created an unexpected legacy HOME: %+v", volumes)
 	}
 	for _, volume := range volumes {
-		if volume.Phase != "available" || volume.BoxID != "" {
-			t.Fatalf("destroy did not release each unique disk: %+v", volume)
+		if volume.Phase != "available" {
+			t.Fatalf("destroy changed volume readiness: %+v", volume)
 		}
 	}
 }
 
-func TestMultiVolumeAdmissionRollsBackAllReservations(t *testing.T) {
+func TestMultiVolumeAdmissionFailureKeepsBoxIDAvailable(t *testing.T) {
 	f, _ := volumeFixture(t)
 	a := createTestVolume(t, f, "atomic-a")
 	b := createTestVolume(t, f, "atomic-b")
 	template := f.template(t)
 	createVolumeBox(t, f, createRequest{ID: "existing-owner", OwnerKey: b.OwnerKey, TemplateID: template, Mounts: []Mount{{VolumeID: b.ID, MountPath: "/data"}}})
-	input := createRequest{ID: "atomic-box", OwnerKey: a.OwnerKey, TemplateID: template, Mounts: []Mount{{VolumeID: a.ID, MountPath: "/data"}, {VolumeID: b.ID, MountPath: "/other"}}}
+	input := createRequest{ID: "atomic-box", OwnerKey: a.OwnerKey, TemplateID: template, Mounts: []Mount{{VolumeID: a.ID, MountPath: "/data"}, {VolumeID: "missing-volume", MountPath: "/other"}}}
 	status, body := f.call(t, "POST", "/v1/boxes", testClientToken, "", input)
-	wantStatus(t, status, 409, body)
-	if record, err := f.service.store.VolumeRecord("client-a", a.ID); err != nil || record.Volume.Phase != "available" || record.Volume.BoxID != "" {
-		t.Fatalf("failed second disk claim retained the first: %+v, %v", record, err)
+	wantStatus(t, status, 404, body)
+	if record, err := f.service.store.VolumeRecord("client-a", a.ID); err != nil || record.Volume.Phase != "available" || record.Volume.Version != a.Version {
+		t.Fatalf("failed mount admission changed the first volume: %+v, %v", record, err)
 	}
-	input.Mounts = input.Mounts[:1]
+	input.Mounts[1].VolumeID = b.ID
 	createVolumeBox(t, f, input)
 }
 

@@ -218,7 +218,7 @@ func TestDeleteVolumeConflictRemainsDiscoverableThroughSDKErrorWrapping(t *testi
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
 		w.WriteHeader(http.StatusConflict)
-		writeJSONTest(w, map[string]any{"error": map[string]string{"code": "CONFLICT", "message": "Volume is in use"}})
+		writeJSONTest(w, map[string]any{"error": map[string]string{"code": "CONFLICT", "message": "A non-deleted Box references the volume"}})
 	}))
 	defer server.Close()
 	client := testClient(t, server, "")

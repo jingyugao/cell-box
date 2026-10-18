@@ -6,7 +6,7 @@ import (
 	"net/http"
 )
 
-// CreateVolumeAsync submits creation of an independently managed home volume.
+// CreateVolumeAsync submits creation of an independently managed persistent volume.
 // A supplied ID is reserved for this volume and is never reused after deletion.
 func (c *Client) CreateVolumeAsync(ctx context.Context, opts CreateVolumeOptions) (*Operation, error) {
 	if opts.OwnerKey == "" || len(opts.OwnerKey) > 256 || opts.ProfileID == "" {

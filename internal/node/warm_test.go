@@ -35,13 +35,7 @@ func TestWarmPersistentHomeAuthorization(t *testing.T) {
 			t.Fatal(err)
 		}
 		homes[owner] = h.ID
-		if _, err := homevolume.Attach(base, volumeUID, "node", owner); err != nil {
-			t.Fatal(err)
-		}
-		if err := homevolume.ClaimExecution(base, volumeUID, h.ID, "old-"+owner, ""); err != nil {
-			t.Fatal(err)
-		}
-		if err := homevolume.Checkpoint(base, volumeUID, h.ID, "old-"+owner, "snapshot"); err != nil {
+		if err := homevolume.SyncVolume(base, volumeUID, "node", h.ID); err != nil {
 			t.Fatal(err)
 		}
 		path := testCheckpoint(t, base, owner, "snapshot", "spec", "image-id", bin)
@@ -103,9 +97,6 @@ func TestWarmPersistentHomeAuthorization(t *testing.T) {
 	if ticket.HomeID != homes[ticket.OwnerUID] || ticket.HomeVolumeUID != volumes[ticket.OwnerUID] {
 		t.Fatal("warm ticket does not pin winning HOME")
 	}
-	if err := homevolume.ClaimExecution(base, ticket.HomeVolumeUID, ticket.HomeID, "pod", "snapshot"); err != nil {
-		t.Fatal(err)
-	}
 	w := testWorkload(ticket.OwnerUID, "snapshot", "spec", "image")
 	w.Spec.PersistentHome = true
 	w.Spec.NodeName = "node"
@@ -117,8 +108,8 @@ func TestWarmPersistentHomeAuthorization(t *testing.T) {
 	if ticket.OwnerUID == peer {
 		peer = "b"
 	}
-	if err := homevolume.ValidateCheckpoint(base, volumes[peer], homes[peer], "snapshot"); err != nil {
-		t.Fatalf("losing claim consumed peer HOME: %v", err)
+	if _, err := homevolume.Verify(base, volumes[peer], "node", homevolume.VolumeSpecHash, homes[peer]); err != nil {
+		t.Fatalf("losing claim damaged peer HOME identity: %v", err)
 	}
 }
 

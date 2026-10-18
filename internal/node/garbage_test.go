@@ -79,3 +79,26 @@ func TestSnapshotCleanupSurvivesRestartAndPreservesNextCheckpoint(t *testing.T) 
 		t.Fatalf("checkpoint index remains after resumed invalidation: %v", err)
 	}
 }
+
+func TestConsumeSnapshotIsOneShotAndScopedToSandbox(t *testing.T) {
+	base := t.TempDir()
+	backend := &Backend{Base: base}
+	if err := ConsumeSnapshot(base, "box-a", "snapshot-a"); err != nil {
+		t.Fatal(err)
+	}
+	if !backend.snapshotConsumed("box-a", "snapshot-a") {
+		t.Fatal("snapshot consumption marker was not recognized")
+	}
+	if err := ConsumeSnapshot(base, "box-a", "snapshot-a"); err == nil {
+		t.Fatal("snapshot consumed twice")
+	}
+	if err := ConsumeSnapshot(base, "box-b", "snapshot-a"); err != nil {
+		t.Fatalf("same snapshot label on another Box was blocked: %v", err)
+	}
+	if !backend.snapshotConsumed("box-b", "snapshot-a") {
+		t.Fatal("second Box marker was not recognized")
+	}
+	if err := ConsumeSnapshot(base, "../box-a", "snapshot-a"); err == nil {
+		t.Fatal("unsafe owner accepted")
+	}
+}

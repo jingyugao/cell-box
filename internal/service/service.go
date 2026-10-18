@@ -973,9 +973,6 @@ func (s *Service) actionContextWithGeneration(ctx context.Context, client, id, a
 		}
 		return map[string]string{"boxId": id}, nil
 	}, func(tx *storeTx) error {
-		if action == "destroy" {
-			return releaseBoxVolume(tx, b)
-		}
 		if action != "activate" {
 			return nil
 		}

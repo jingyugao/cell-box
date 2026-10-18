@@ -206,7 +206,7 @@ func (t *storeTx) PutBox(b boxRecord) error {
 		return err
 	}
 	if b.Box.Phase == "deleted" {
-		return releaseBoxVolume(t, b)
+		return finishLegacyVolume(t, b)
 	}
 	return nil
 }

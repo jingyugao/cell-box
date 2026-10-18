@@ -54,10 +54,8 @@ func (b *Backend) prepareVolumeMounts(r *api.ResumablePod, initialize bool) ([]V
 		var err error
 		if mount.Legacy {
 			identity, err = homevolume.Prepare(b.Base, mount.UID, r.Spec.NodeName, volumeSpecHash(r, mount), initialize)
-		} else if initialize {
-			identity, err = homevolume.Attach(b.Base, mount.UID, r.Spec.NodeName, string(r.UID))
 		} else {
-			identity, err = homevolume.VerifyAttachment(b.Base, mount.UID, r.Spec.NodeName, string(r.UID))
+			identity, err = homevolume.Verify(b.Base, mount.UID, r.Spec.NodeName, homevolume.VolumeSpecHash, "")
 		}
 		if err != nil {
 			return nil, fmt.Errorf("persistent volume %s: %w", mount.UID, err)
@@ -77,7 +75,9 @@ func (b *Backend) detachVolumeMounts(r *api.ResumablePod, mounts []VolumeMountAu
 		if mount.Legacy {
 			err = homevolume.PromoteLegacy(b.Base, mount.UID, r.Spec.NodeName, r.Status.SpecHash)
 		} else {
-			err = homevolume.Detach(b.Base, mount.UID, r.Spec.NodeName, string(r.UID))
+			// Independent volumes outlive their sandboxes and can be used by
+			// several sandboxes concurrently. Box deletion must leave them alone.
+			continue
 		}
 		if err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("detach persistent volume %s: %w", mount.UID, err)

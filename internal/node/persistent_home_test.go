@@ -187,15 +187,17 @@ func TestMultipleVolumeCheckpointIdentityAndReplacement(t *testing.T) {
 	}) {
 		t.Fatalf("runtime ticket lost mount identity/configuration: %+v", ticket.Mounts)
 	}
+	concurrent := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{UID: "box-concurrent"}, Spec: api.Spec{NodeName: "node", Mounts: mounts, Container: core.Container{Image: "image-b"}}, Status: api.Status{Cycle: 1, SpecHash: "image-b"}}
+	concurrentPod := &core.Pod{ObjectMeta: meta.ObjectMeta{UID: "pod-concurrent", Namespace: "test"}}
+	if err := b.Prepare(ctx, concurrent, concurrentPod); err != nil {
+		t.Fatalf("second sandbox could not prepare shared volumes: %v", err)
+	}
 	for _, mount := range ticket.Mounts {
-		if err := homevolume.ClaimAttachedExecution(base, mount.UID, "node", "box-a", mount.HomeID, "pod-a", ""); err != nil {
-			t.Fatal(err)
-		}
 		root, _ := homevolume.Path(base, mount.UID)
 		if err := os.WriteFile(filepath.Join(root, "marker"), []byte(mount.UID), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if err := homevolume.Checkpoint(base, mount.UID, mount.HomeID, "pod-a", "snapshot-a"); err != nil {
+		if err := homevolume.SyncVolume(base, mount.UID, "node", mount.HomeID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -203,6 +205,9 @@ func TestMultipleVolumeCheckpointIdentityAndReplacement(t *testing.T) {
 	manifest := &Manifest{Mounts: ticket.Mounts}
 	if err := b.verifySnapshotHome(w, manifest); err != nil {
 		t.Fatalf("matching multi-volume checkpoint rejected: %v", err)
+	}
+	if _, err := b.prepareVolumeMounts(concurrent, false); err != nil {
+		t.Fatalf("first sandbox checkpoint invalidated the concurrent sandbox: %v", err)
 	}
 	w.Spec.Mounts[1].ReadOnly = false
 	if err := b.verifySnapshotHome(w, manifest); err == nil {

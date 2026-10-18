@@ -4,137 +4,52 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 )
 
-func TestIndependentVolumeDetachAndReattachPreservesData(t *testing.T) {
+func TestIndependentVolumeSyncAndRemove(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cellbox")
-	const volumeUID = "volume-1"
-	const sandboxA = "sandbox-a"
-	const sandboxB = "sandbox-b"
+	const volumeUID = "volume-data"
 	identity, err := Prepare(base, volumeUID, "node", VolumeSpecHash, true)
 	if err != nil {
 		t.Fatal(err)
+	}
+	_, dir, data, _ := paths(base, volumeUID)
+	if _, err := os.Stat(filepath.Join(dir, stateName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("independent volume unexpectedly has execution state: %v", err)
 	}
 	oldSync := syncFS
-	syncFS = func(int) error { return nil }
+	syncCalls := 0
+	syncFS = func(int) error { syncCalls++; return nil }
 	t.Cleanup(func() { syncFS = oldSync })
-
-	if _, err := Attach(base, volumeUID, "node", sandboxA); err != nil {
+	if err := os.WriteFile(filepath.Join(data, "persisted"), []byte("durable volume data"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Attach(base, volumeUID, "node", sandboxA); err != nil {
-		t.Fatalf("same attachment was not idempotent: %v", err)
-	}
-	if err := ClaimAttachedExecution(base, volumeUID, "node", sandboxA, identity.ID, "pod-a", ""); err != nil {
+	if err := SyncVolume(base, volumeUID, "node", identity.ID); err != nil {
 		t.Fatal(err)
 	}
-	data, _ := Path(base, volumeUID)
-	if err := os.WriteFile(filepath.Join(data, "persisted"), []byte("keep across rebuild"), 0600); err != nil {
-		t.Fatal(err)
+	if syncCalls != 1 {
+		t.Fatalf("SyncVolume called syncfs %d times, want 1", syncCalls)
 	}
-	if err := Checkpoint(base, volumeUID, identity.ID, "pod-a", "snapshot-a"); err != nil {
-		t.Fatal(err)
-	}
-	if err := Detach(base, volumeUID, "node", sandboxA); err != nil {
-		t.Fatal(err)
-	}
-	if err := Detach(base, volumeUID, "node", sandboxA); err != nil {
-		t.Fatalf("same-attachment detach retry was not idempotent: %v", err)
-	}
-	if err := Detach(base, volumeUID, "node", ""); err != nil {
-		t.Fatalf("empty-attachment retry was not idempotent: %v", err)
-	}
-	if _, err := VerifyAttachment(base, volumeUID, "node", sandboxA); err == nil {
-		t.Fatal("old sandbox attachment remained authorized after detach")
-	}
-	got, err := Attach(base, volumeUID, "node", sandboxB)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.ID != identity.ID || got.Device != identity.Device || got.Inode != identity.Inode {
-		t.Fatalf("volume identity changed across detach/attach: before=%#v after=%#v", identity, got)
-	}
-	if _, err := os.Stat(filepath.Join(data, "persisted")); err != nil {
-		t.Fatalf("persisted data was lost: %v", err)
-	}
-	if err := ValidateCheckpoint(base, volumeUID, identity.ID, "snapshot-a"); err == nil {
-		t.Fatal("checkpoint survived detach and became resumable by the replacement sandbox")
-	}
-	if _, err := VerifyAttachment(base, volumeUID, "node", sandboxB); err != nil {
-		t.Fatalf("new sandbox attachment was not authorized: %v", err)
-	}
-	if err := Detach(base, volumeUID, "node", sandboxA); err == nil {
-		t.Fatal("old sandbox detached a volume attached to its replacement")
-	}
-	if err := ClaimAttachedExecution(base, volumeUID, "node", sandboxA, identity.ID, "stale-pod", ""); err == nil {
-		t.Fatal("old sandbox claimed a volume attached to its replacement")
-	}
-	state, err := readState(filepath.Join(base, "homes", volumeUID, stateName))
-	if err != nil || state.Attachment != sandboxB || state.Phase != "new" || state.Pod != "" {
-		t.Fatalf("failed stale claim changed replacement volume state: %#v, %v", state, err)
-	}
-	if err := ClaimAttachedExecution(base, volumeUID, "node", sandboxB, identity.ID, "pod-b", ""); err != nil {
-		t.Fatalf("replacement sandbox could not cold claim the volume: %v", err)
-	}
-	if err := VerifyExecution(base, volumeUID, VolumeSpecHash, identity.ID, "pod-b"); err != nil {
-		t.Fatalf("legacy execution verification stopped working: %v", err)
-	}
-}
-
-func TestIndependentVolumeAttachIsExclusiveAndRemoveRequiresDetached(t *testing.T) {
-	base := filepath.Join(t.TempDir(), "cellbox")
-	const volumeUID = "volume-exclusive"
-	identity, err := Prepare(base, volumeUID, "node", VolumeSpecHash, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := Detach(base, volumeUID, "node", "sandbox-never-attached"); err != nil {
-		t.Fatalf("detach of an unattached volume blocked deletion: %v", err)
-	}
-	var wg sync.WaitGroup
-	start := make(chan struct{})
-	results := make(chan error, 2)
-	for _, attachment := range []string{"sandbox-a", "sandbox-b"} {
-		wg.Add(1)
-		go func(attachment string) {
-			defer wg.Done()
-			<-start
-			_, err := Attach(base, volumeUID, "node", attachment)
-			results <- err
-		}(attachment)
-	}
-	close(start)
-	wg.Wait()
-	close(results)
-	successes := 0
-	var attached string
-	for err := range results {
-		if err == nil {
-			successes++
-		} else {
-			attached = "contended"
+	for _, tc := range []struct{ node, id string }{{"wrong-node", identity.ID}, {"node", "wrong-id"}} {
+		if err := SyncVolume(base, volumeUID, tc.node, tc.id); err == nil {
+			t.Fatalf("SyncVolume accepted node=%q id=%q", tc.node, tc.id)
 		}
 	}
-	if successes != 1 || attached == "" {
-		t.Fatalf("concurrent attach results: successes=%d conflict=%v", successes, attached)
+	if syncCalls != 1 {
+		t.Fatalf("invalid SyncVolume calls reached syncfs: %d", syncCalls-1)
 	}
-	state, err := readState(filepath.Join(base, "homes", volumeUID, stateName))
-	if err != nil || state.Attachment == "" {
-		t.Fatalf("winning attachment was not persisted: %#v, %v", state, err)
+	if err := RemoveVolume(base, volumeUID, "wrong-node"); err == nil {
+		t.Fatal("RemoveVolume accepted a mismatched node")
 	}
-	if err := RemoveDetached(base, volumeUID, "node"); err == nil {
-		t.Fatal("RemoveDetached removed a still-attached volume")
-	}
-	if err := Detach(base, volumeUID, "node", state.Attachment); err != nil {
+	if err := RemoveVolume(base, volumeUID, "node"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ClaimExecution(base, volumeUID, identity.ID, "pod", ""); err != nil {
-		t.Fatal(err)
+	if err := RemoveVolume(base, volumeUID, "node"); err != nil {
+		t.Fatalf("repeated RemoveVolume should be idempotent: %v", err)
 	}
-	if err := RemoveDetached(base, volumeUID, "node"); err == nil {
-		t.Fatal("RemoveDetached removed a volume with an active execution")
+	if _, err := os.Stat(data); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("RemoveVolume left data behind: %v", err)
 	}
 }
 
@@ -170,21 +85,11 @@ func TestPromoteLegacyPreservesDataAndIsIdempotent(t *testing.T) {
 	if got, err := os.ReadFile(filepath.Join(data, "user-data")); err != nil || string(got) != "preserve me" {
 		t.Fatalf("legacy data changed: data=%q err=%v", got, err)
 	}
-	state, err := readState(filepath.Join(base, "homes", "legacy-box", stateName))
-	if err != nil || state.Phase != "new" || state.Snapshot != "" || state.ConsumedSnapshot != "" || state.Attachment != "" {
-		t.Fatalf("promotion did not clear legacy execution state: %#v, %v", state, err)
+	if _, err := os.Stat(filepath.Join(base, "homes", "legacy-box", stateName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("promotion retained legacy execution state: %v", err)
 	}
 	if err := PromoteLegacy(base, "legacy-box", "node", "legacy-spec"); err != nil {
 		t.Fatalf("promotion retry failed: %v", err)
-	}
-	if _, err := Attach(base, "legacy-box", "node", "new-sandbox"); err != nil {
-		t.Fatal(err)
-	}
-	if err := PromoteLegacy(base, "legacy-box", "node", "legacy-spec"); err != nil {
-		t.Fatalf("retry after later attach was not idempotent: %v", err)
-	}
-	if _, err := VerifyAttachment(base, "legacy-box", "node", "new-sandbox"); err != nil {
-		t.Fatalf("promotion retry changed the later attachment: %v", err)
 	}
 }
 
@@ -389,10 +294,10 @@ func TestClaimCheckpointResumeConsumesSnapshot(t *testing.T) {
 
 func TestRemoveOnlyRemovesValidatedOwnerAndDoesNotFollowGuestSymlink(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cellbox")
-	if _, err := Prepare(base, "owner-a", "node", "spec", true); err != nil {
+	if _, err := Prepare(base, "owner-a", "node", VolumeSpecHash, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Prepare(base, "owner-b", "node", "spec", true); err != nil {
+	if _, err := Prepare(base, "owner-b", "node", VolumeSpecHash, true); err != nil {
 		t.Fatal(err)
 	}
 	outside := filepath.Join(t.TempDir(), "outside")
@@ -407,19 +312,19 @@ func TestRemoveOnlyRemovesValidatedOwnerAndDoesNotFollowGuestSymlink(t *testing.
 	if err := os.Symlink(outside, filepath.Join(data, "guest-link")); err != nil {
 		t.Fatal(err)
 	}
-	if err := Remove(base, "owner-a", "wrong-node", "spec"); err == nil {
-		t.Fatal("Remove accepted a mismatched node")
+	if err := RemoveVolume(base, "owner-a", "wrong-node"); err == nil {
+		t.Fatal("RemoveVolume accepted a mismatched node")
 	}
-	if err := Remove(base, "owner-a", "node", "spec"); err != nil {
+	if err := RemoveVolume(base, "owner-a", "node"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(sentinel); err != nil {
 		t.Fatalf("Remove followed a guest symlink: %v", err)
 	}
-	if _, err := Verify(base, "owner-b", "node", "spec", ""); err != nil {
+	if _, err := Verify(base, "owner-b", "node", VolumeSpecHash, ""); err != nil {
 		t.Fatalf("removing owner-a affected owner-b: %v", err)
 	}
-	if err := Remove(base, "owner-a", "node", "spec"); err != nil && !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("repeated Remove should be idempotent: %v", err)
+	if err := RemoveVolume(base, "owner-a", "node"); err != nil {
+		t.Fatalf("repeated RemoveVolume should be idempotent: %v", err)
 	}
 }

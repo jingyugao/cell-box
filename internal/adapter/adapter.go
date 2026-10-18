@@ -86,7 +86,7 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 		if t.PodUID != uid || spec.Annotations["io.kubernetes.cri.sandbox-uid"] != uid || spec.Annotations["io.kubernetes.cri.sandbox-name"] != t.PodName || spec.Annotations["io.kubernetes.cri.sandbox-namespace"] != t.Namespace {
 			return nil, fmt.Errorf("authorization Pod identity mismatch")
 		}
-		if err := a.verifyVolumeAttachments(t); err != nil {
+		if err := a.verifyVolumeIdentities(t); err != nil {
 			return nil, fmt.Errorf("persistent volume attachment: %w", err)
 		}
 		if t.Snapshot != "" {
@@ -185,6 +185,9 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 			if err := verifyTicketManifest(t, m); err != nil {
 				return nil, err
 			}
+			if err := node.ConsumeSnapshot(a.Base, t.OwnerUID, t.Snapshot); err != nil {
+				return nil, fmt.Errorf("refusing snapshot replay: %w", err)
+			}
 			if err = a.claimHome(t); err != nil {
 				return nil, err
 			}
@@ -201,28 +204,18 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 
 func (a Adapter) claimHome(t node.Ticket) error {
 	for _, mount := range uniqueTicketMounts(ticketMounts(t)) {
-		var err error
-		if mount.Legacy {
-			err = homevolume.ClaimExecution(a.Base, mount.UID, mount.HomeID, t.PodUID, t.Snapshot)
-		} else {
-			err = homevolume.ClaimAttachedExecution(a.Base, mount.UID, t.NodeName, t.OwnerUID, mount.HomeID, t.PodUID, t.Snapshot)
+		if !mount.Legacy {
+			// Volume identity is shared durable state. A sandbox's runtime/checkpoint
+			// fences belong to its ticket and manifest, not to this volume.
+			continue
 		}
+		var err error
+		err = homevolume.ClaimExecution(a.Base, mount.UID, mount.HomeID, t.PodUID, t.Snapshot)
 		if err != nil {
 			return fmt.Errorf("claim volume %s: %w", mount.UID, err)
 		}
 	}
 	return nil
-}
-
-func ticketHomeSpec(t node.Ticket) string {
-	if t.HomeVolumeUID != "" {
-		return homevolume.VolumeSpecHash
-	}
-	return t.SpecHash
-}
-
-func (a Adapter) verifyHomeAttachment(t node.Ticket) error {
-	return a.verifyVolumeAttachments(t)
 }
 
 func ticketMounts(t node.Ticket) []node.VolumeMountAuthorization {
@@ -253,7 +246,7 @@ func uniqueTicketMounts(mounts []node.VolumeMountAuthorization) []node.VolumeMou
 	return unique
 }
 
-func (a Adapter) verifyVolumeAttachments(t node.Ticket) error {
+func (a Adapter) verifyVolumeIdentities(t node.Ticket) error {
 	for _, mount := range uniqueTicketMounts(ticketMounts(t)) {
 		var identity homevolume.Identity
 		var err error
@@ -263,7 +256,7 @@ func (a Adapter) verifyVolumeAttachments(t node.Ticket) error {
 			if t.NodeName == "" || t.OwnerUID == "" {
 				return fmt.Errorf("incomplete volume authorization")
 			}
-			identity, err = homevolume.VerifyAttachment(a.Base, mount.UID, t.NodeName, t.OwnerUID)
+			identity, err = homevolume.Verify(a.Base, mount.UID, t.NodeName, homevolume.VolumeSpecHash, mount.HomeID)
 		}
 		if err != nil {
 			return fmt.Errorf("volume %s unavailable: %w", mount.UID, err)
@@ -271,7 +264,7 @@ func (a Adapter) verifyVolumeAttachments(t node.Ticket) error {
 		if identity.ID != mount.HomeID {
 			return fmt.Errorf("volume %s identity mismatch", mount.UID)
 		}
-		if t.Snapshot != "" {
+		if t.Snapshot != "" && mount.Legacy {
 			if err = homevolume.ValidateCheckpoint(a.Base, mount.UID, mount.HomeID, t.Snapshot); err != nil {
 				return fmt.Errorf("volume %s checkpoint: %w", mount.UID, err)
 			}
@@ -295,10 +288,10 @@ func verifyTicketManifest(t node.Ticket, manifest *node.Manifest) error {
 
 func verifyVolumeExecution(base string, t node.Ticket) error {
 	for _, mount := range uniqueTicketMounts(ticketMounts(t)) {
-		spec := homevolume.VolumeSpecHash
-		if mount.Legacy {
-			spec = t.SpecHash
+		if !mount.Legacy {
+			continue
 		}
+		spec := t.SpecHash
 		if err := homevolume.VerifyExecution(base, mount.UID, spec, mount.HomeID, t.PodUID); err != nil {
 			return fmt.Errorf("volume %s: %w", mount.UID, err)
 		}
@@ -355,7 +348,7 @@ func (a Adapter) childCreate(id string, annotations map[string]string, bundle st
 		return fmt.Errorf("child sandbox revoked")
 	}
 	if len(ticketMounts(t)) > 0 {
-		if err := a.verifyVolumeAttachments(t); err != nil {
+		if err := a.verifyVolumeIdentities(t); err != nil {
 			return fmt.Errorf("persistent volume attachment: %w", err)
 		}
 		if err := verifyVolumeExecution(a.Base, t); err != nil {
@@ -386,7 +379,7 @@ func (a Adapter) childStart(id string) error {
 		return fmt.Errorf("child sandbox revoked")
 	}
 	if len(ticketMounts(c.Ticket)) > 0 {
-		if err := a.verifyVolumeAttachments(c.Ticket); err != nil {
+		if err := a.verifyVolumeIdentities(c.Ticket); err != nil {
 			return fmt.Errorf("persistent volume attachment: %w", err)
 		}
 		if err := verifyVolumeExecution(a.Base, c.Ticket); err != nil {

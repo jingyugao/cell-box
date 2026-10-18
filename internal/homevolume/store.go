@@ -32,7 +32,7 @@ const (
 
 var ownerPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
-// Identity ties a home directory to one Box lifecycle and its backing inode.
+// Identity ties a HOME directory to its logical owner and backing inode.
 type Identity struct {
 	ID       string `json:"id"`
 	OwnerUID string `json:"ownerUID"`
@@ -45,122 +45,13 @@ type Identity struct {
 type executionState struct {
 	Phase            string `json:"phase"`
 	Pod              string `json:"pod,omitempty"`
-	Attachment       string `json:"attachment,omitempty"`
 	Snapshot         string `json:"snapshot,omitempty"`
 	ConsumedSnapshot string `json:"consumedSnapshot,omitempty"`
 }
 
-// Attach claims an existing independent HOME volume for one sandbox. It never
-// creates a volume or changes its identity/data inode.
-func Attach(base, volumeUID, node, attachment string) (Identity, error) {
-	if !validOwner(attachment) || strings.TrimSpace(node) == "" {
-		return Identity{}, errors.New("node and attachment are required")
-	}
-	unlock, err := lockOwner(base, volumeUID, false)
-	if err != nil {
-		return Identity{}, err
-	}
-	defer unlock()
-	identity, err := verify(base, volumeUID, node, VolumeSpecHash, "")
-	if err != nil {
-		return Identity{}, err
-	}
-	_, dir, _, _ := paths(base, volumeUID)
-	statePath := filepath.Join(dir, stateName)
-	state, err := readState(statePath)
-	if err != nil {
-		return Identity{}, err
-	}
-	if state.Attachment == attachment {
-		return identity, nil
-	}
-	if state.Attachment != "" {
-		return Identity{}, errors.New("home volume is attached to another sandbox")
-	}
-	if state.Phase != "new" || state.Pod != "" || state.Snapshot != "" || state.ConsumedSnapshot != "" {
-		return Identity{}, errors.New("home volume is not available for attachment")
-	}
-	state.Attachment = attachment
-	if err := writeJSONAtomic(statePath, state, 0600); err != nil {
-		return Identity{}, err
-	}
-	return identity, nil
-}
-
-// VerifyAttachment validates volume identity and its current sandbox attachment.
-func VerifyAttachment(base, volumeUID, node, attachment string) (Identity, error) {
-	if !validOwner(attachment) || strings.TrimSpace(node) == "" {
-		return Identity{}, errors.New("node and attachment are required")
-	}
-	unlock, err := lockOwner(base, volumeUID, false)
-	if err != nil {
-		return Identity{}, err
-	}
-	defer unlock()
-	identity, err := verify(base, volumeUID, node, VolumeSpecHash, "")
-	if err != nil {
-		return Identity{}, err
-	}
-	_, dir, _, _ := paths(base, volumeUID)
-	state, err := readState(filepath.Join(dir, stateName))
-	if err != nil {
-		return Identity{}, err
-	}
-	if state.Attachment != attachment {
-		return Identity{}, errors.New("home volume is not attached to this sandbox")
-	}
-	return identity, nil
-}
-
-// Detach releases a sandbox's attachment after its runtime has stopped. Passing
-// an empty attachment makes a retry after a successful detach idempotent.
-func Detach(base, volumeUID, node, attachment string) error {
-	if strings.TrimSpace(node) == "" || (attachment != "" && !validOwner(attachment)) {
-		return errors.New("node and a valid attachment are required")
-	}
-	unlock, err := lockOwner(base, volumeUID, false)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	if _, err := verify(base, volumeUID, node, VolumeSpecHash, ""); err != nil {
-		return err
-	}
-	_, dir, data, _ := paths(base, volumeUID)
-	statePath := filepath.Join(dir, stateName)
-	state, err := readState(statePath)
-	if err != nil {
-		return err
-	}
-	if state.Attachment == "" {
-		if state.Phase == "new" && state.Pod == "" && state.Snapshot == "" && state.ConsumedSnapshot == "" {
-			return nil
-		}
-		return errors.New("home volume is not attached to this sandbox")
-	}
-	if state.Attachment != attachment || attachment == "" {
-		return errors.New("home volume is attached to another sandbox")
-	}
-	f, err := os.Open(data)
-	if err != nil {
-		return err
-	}
-	err = syncFS(int(f.Fd()))
-	closeErr := f.Close()
-	if err != nil {
-		return fmt.Errorf("sync home filesystem: %w", err)
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	state.Phase, state.Pod, state.Attachment = "new", "", ""
-	state.Snapshot, state.ConsumedSnapshot = "", ""
-	return writeJSONAtomic(statePath, state, 0600)
-}
-
-// RemoveDetached deletes an independently managed volume only after its
-// attachment and execution state have been safely cleared.
-func RemoveDetached(base, volumeUID, node string) error {
+// RemoveVolume deletes an independently managed volume after validating its
+// immutable identity and data inode. Missing volumes are already removed.
+func RemoveVolume(base, volumeUID, node string) error {
 	if strings.TrimSpace(node) == "" {
 		return errors.New("node is required")
 	}
@@ -189,14 +80,37 @@ func RemoveDetached(base, volumeUID, node string) error {
 	if _, err := verify(base, volumeUID, node, VolumeSpecHash, ""); err != nil {
 		return err
 	}
-	state, err := readState(filepath.Join(dir, stateName))
+	return os.RemoveAll(dir)
+}
+
+// SyncVolume flushes an independently managed volume after validating its
+// immutable identity and backing inode.
+func SyncVolume(base, volumeUID, node, id string) error {
+	if strings.TrimSpace(node) == "" || id == "" {
+		return errors.New("node and volume identity are required")
+	}
+	unlock, err := lockOwner(base, volumeUID, false)
 	if err != nil {
 		return err
 	}
-	if state.Attachment != "" || state.Phase != "new" || state.Pod != "" || state.Snapshot != "" || state.ConsumedSnapshot != "" {
-		return errors.New("refusing to remove an attached or occupied home volume")
+	defer unlock()
+	_, _, data, err := paths(base, volumeUID)
+	if err != nil {
+		return err
 	}
-	return os.RemoveAll(dir)
+	if _, err := verify(base, volumeUID, node, VolumeSpecHash, id); err != nil {
+		return err
+	}
+	f, err := os.Open(data)
+	if err != nil {
+		return err
+	}
+	err = syncFS(int(f.Fd()))
+	closeErr := f.Close()
+	if err != nil {
+		return fmt.Errorf("sync home volume filesystem: %w", err)
+	}
+	return closeErr
 }
 
 // PromoteLegacy converts a legacy per-sandbox HOME into an independent HOME
@@ -253,16 +167,15 @@ func PromoteLegacy(base, owner, node, spec string) error {
 		// Empty legacy spec cannot identify a legacy marker. A marker already
 		// promoted to the independent-volume format is safe to retry.
 		if _, err := verify(base, owner, node, VolumeSpecHash, ""); err == nil {
-			return nil
+			return removeVolumeState(filepath.Join(dir, stateName))
 		}
 		return errors.New("legacy spec is required to promote an existing HOME")
 	}
 	identity, err := verify(base, owner, node, spec, "")
 	if err != nil {
-		// A successful conversion is an idempotent retry. It deliberately
-		// leaves any later attachment or execution state untouched.
+		// A successful conversion is an idempotent retry.
 		if _, promotedErr := verify(base, owner, node, VolumeSpecHash, ""); promotedErr == nil {
-			return nil
+			return removeVolumeState(filepath.Join(dir, stateName))
 		}
 		return err
 	}
@@ -283,7 +196,7 @@ func PromoteLegacy(base, owner, node, spec string) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	state.Phase, state.Pod, state.Attachment = "new", "", ""
+	state.Phase, state.Pod = "new", ""
 	state.Snapshot, state.ConsumedSnapshot = "", ""
 	// Commit the reset before changing the identity marker. If the marker write
 	// fails, retry still recognizes the legacy identity and repeats this reset;
@@ -292,7 +205,26 @@ func PromoteLegacy(base, owner, node, spec string) error {
 		return err
 	}
 	identity.SpecHash = VolumeSpecHash
-	return writeJSONAtomic(filepath.Join(dir, identityName), identity, 0600)
+	if err := writeJSONAtomic(filepath.Join(dir, identityName), identity, 0600); err != nil {
+		return err
+	}
+	return removeVolumeState(statePath)
+}
+
+func removeVolumeState(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	err = dir.Sync()
+	closeErr := dir.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
 }
 
 type initializingIdentity struct {
@@ -491,36 +423,15 @@ func ClaimExecution(base, owner, id, pod, snapshot string) error {
 	if _, err := Verify(base, owner, "", "", id); err != nil {
 		return err
 	}
-	return claimExecutionLocked(base, owner, id, pod, snapshot, "", false)
-}
-
-// ClaimAttachedExecution validates the independent volume's current sandbox
-// attachment and claims its execution under one owner lock. This prevents a
-// stale adapter from claiming a volume after it was detached and reattached.
-func ClaimAttachedExecution(base, volumeUID, node, attachment, id, pod, snapshot string) error {
-	if !validOwner(attachment) || strings.TrimSpace(node) == "" || id == "" || pod == "" {
-		return errors.New("node, attachment, home, and pod are required")
-	}
-	unlock, err := lockOwner(base, volumeUID, false)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	if _, err := verify(base, volumeUID, node, VolumeSpecHash, id); err != nil {
-		return err
-	}
-	return claimExecutionLocked(base, volumeUID, id, pod, snapshot, attachment, true)
+	return claimExecutionLocked(base, owner, id, pod, snapshot)
 }
 
 // claimExecutionLocked requires the caller to hold lockOwner for owner.
-func claimExecutionLocked(base, owner, id, pod, snapshot, attachment string, requireAttachment bool) error {
+func claimExecutionLocked(base, owner, id, pod, snapshot string) error {
 	_, dir, _, _ := paths(base, owner)
 	state, err := readState(filepath.Join(dir, stateName))
 	if err != nil {
 		return err
-	}
-	if requireAttachment && state.Attachment != attachment {
-		return errors.New("home volume is not attached to this sandbox")
 	}
 	if snapshot == "" {
 		if state.Phase != "new" || state.Snapshot != "" {
@@ -587,6 +498,15 @@ func initializeHome(dir, data, owner, node, spec string) (Identity, error) {
 		}
 		if err := verifyData(data, identity); err != nil {
 			return Identity{}, err
+		}
+		if spec == VolumeSpecHash {
+			if err := removeVolumeState(filepath.Join(dir, stateName)); err != nil {
+				return Identity{}, err
+			}
+			if err := removeMatchingInitMarker(initMarker, identity); err != nil {
+				return Identity{}, err
+			}
+			return identity, nil
 		}
 		_, stateErr := readState(filepath.Join(dir, stateName))
 		if errors.Is(stateErr, fs.ErrNotExist) {
@@ -664,8 +584,10 @@ func initializeHome(dir, data, owner, node, spec string) (Identity, error) {
 	if err := writeJSONAtomic(marker, identity, 0600); err != nil {
 		return Identity{}, err
 	}
-	if err := writeJSONAtomic(filepath.Join(dir, stateName), executionState{Phase: "new"}, 0600); err != nil {
-		return Identity{}, err
+	if spec != VolumeSpecHash {
+		if err := writeJSONAtomic(filepath.Join(dir, stateName), executionState{Phase: "new"}, 0600); err != nil {
+			return Identity{}, err
+		}
 	}
 	if err := os.Remove(initMarker); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return Identity{}, err
@@ -739,9 +661,6 @@ func readState(path string) (executionState, error) {
 	var state executionState
 	if err := readPrivateJSON(path, &state); err != nil {
 		return state, err
-	}
-	if state.Attachment != "" && !validOwner(state.Attachment) {
-		return state, errors.New("invalid home attachment identity")
 	}
 	switch state.Phase {
 	case "new":

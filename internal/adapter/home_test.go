@@ -37,10 +37,7 @@ func homeChildFixture(t *testing.T) (Adapter, node.Ticket, string, string, strin
 
 func TestBindHomeMountsAllAuthorizedPathsWithReadOnlyOptions(t *testing.T) {
 	a := Adapter{Base: t.TempDir()}
-	if _, err := homevolume.Prepare(a.Base, "data-volume", "node-a", homevolume.VolumeSpecHash, true); err != nil {
-		t.Fatal(err)
-	}
-	identity, err := homevolume.Attach(a.Base, "data-volume", "node-a", "owner")
+	identity, err := homevolume.Prepare(a.Base, "data-volume", "node-a", homevolume.VolumeSpecHash, true)
 	if err != nil {
 		t.Fatal(err)
 	}

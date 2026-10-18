@@ -24,7 +24,46 @@ func (b *Backend) snapshotConsumed(owner, snapshot string) bool {
 			return true
 		}
 	}
+	if ValidID(owner) && ValidID(snapshot) {
+		if _, err := os.Stat(filepath.Join(b.Base, "workloads", owner, "consumed", snapshot)); err == nil {
+			return true
+		}
+	}
 	return false
+}
+
+// ConsumeSnapshot permanently fences a sandbox checkpoint before runsc restore
+// is launched. The marker is independent of any mounted volume and is removed
+// with the owning Box's workloads directory.
+func ConsumeSnapshot(base, owner, snapshot string) error {
+	if !ValidID(owner) || !ValidID(snapshot) {
+		return fmt.Errorf("invalid snapshot consumption identity")
+	}
+	dir := filepath.Join(base, "workloads", owner, "consumed")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, snapshot)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if os.IsExist(err) {
+		return fmt.Errorf("snapshot already consumed")
+	}
+	if err != nil {
+		return err
+	}
+	_, writeErr := fmt.Fprintf(f, "%s\n%s\n", owner, snapshot)
+	syncErr := f.Sync()
+	closeErr := f.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	if syncErr != nil {
+		return syncErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return SyncDir(dir)
 }
 
 // InvalidateSnapshot removes replay eligibility synchronously. The durable

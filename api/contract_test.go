@@ -160,6 +160,17 @@ func TestOpenAPIResponseShapesAndReferences(t *testing.T) {
 	if volumeID["pattern"] != resourceIDPattern || volumeID["maxLength"] != float64(55) {
 		t.Error("volume id must use the lowercase 55-character resource ID rule")
 	}
+	volumeSchema := schemas["Volume"].(map[string]any)
+	volumeProperties := volumeSchema["properties"].(map[string]any)
+	if _, exposed := volumeProperties["boxId"]; exposed {
+		t.Error("Volume must not expose a singular boxId when volumes can be shared")
+	}
+	phaseEnum := volumeProperties["phase"].(map[string]any)["enum"].([]any)
+	for _, phase := range phaseEnum {
+		if phase == "in-use" {
+			t.Error("Volume phase must remain available while mounted; in-use is not a lifecycle phase")
+		}
+	}
 	if _, accepted := schemas["RestoreBox"].(map[string]any)["properties"].(map[string]any)["homeVolumeId"]; accepted {
 		t.Error("RestoreBox must not accept homeVolumeId")
 	}

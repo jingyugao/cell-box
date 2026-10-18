@@ -7,7 +7,7 @@ import (
 	"cellbox.local/cellbox/internal/homevolume"
 )
 
-// CreateVolume initializes a detached, independently managed HOME volume.
+// CreateVolume initializes an independently managed HOME volume.
 func (b *Backend) CreateVolume(uid, node string) error {
 	if strings.TrimSpace(node) == "" {
 		return fmt.Errorf("node name is required")
@@ -18,10 +18,10 @@ func (b *Backend) CreateVolume(uid, node string) error {
 	return nil
 }
 
-// DeleteVolume removes a volume only when it is detached and unoccupied.
+// DeleteVolume removes an independently managed volume after identity checks.
 func (b *Backend) DeleteVolume(uid, node string) error {
 	if strings.TrimSpace(node) == "" {
 		return fmt.Errorf("node name is required")
 	}
-	return homevolume.RemoveDetached(b.Base, uid, node)
+	return homevolume.RemoveVolume(b.Base, uid, node)
 }

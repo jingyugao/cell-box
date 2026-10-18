@@ -33,7 +33,6 @@ type Volume struct {
 	Phase       string    `json:"phase"`
 	Version     uint64    `json:"resourceVersion"`
 	CreatedAt   time.Time `json:"createdAt"`
-	BoxID       string    `json:"boxId,omitempty"`
 	OperationID string    `json:"operationId,omitempty"`
 	Error       *APIError `json:"error,omitempty"`
 }
@@ -184,8 +183,19 @@ func (s *Service) deleteVolume(client, id string) (Operation, error) {
 		if err != nil {
 			return err
 		}
-		if v.Volume.BoxID != "" || v.Volume.OperationID != "" || v.Volume.Phase != "available" && v.Volume.Phase != "failed" {
-			return apiError("CONFLICT", "Volume must be detached and idle before deletion")
+		if v.Volume.OperationID != "" || v.Volume.Phase != "available" && v.Volume.Phase != "failed" {
+			return apiError("CONFLICT", "Volume must be ready or failed before deletion")
+		}
+		boxes, err := listRecords[boxRecord](tx.ctx, tx.tx, "boxes", "AND client_id=? AND json_extract(record,'$.box.phase')!='deleted'", client)
+		if err != nil {
+			return err
+		}
+		for _, box := range boxes {
+			for _, mount := range boxVolumeMounts(box) {
+				if mount.VolumeID == id {
+					return apiError("CONFLICT", "Volume is referenced by a Box")
+				}
+			}
 		}
 		v.Volume.Phase, v.Volume.OperationID, v.Volume.Error = "deleting", op.ID, nil
 		v.Volume.Version++
@@ -248,8 +258,8 @@ func (s *Service) registerVolumes(mux *http.ServeMux) {
 	})
 }
 
-// Admission and Box creation share one transaction: a failed reservation cannot
-// leave a phantom attachment, and two concurrent creates cannot claim one disk.
+// Resolve mount identities in the Box creation transaction. Existing volumes
+// may be referenced by any number of compatible Boxes without a reservation.
 func (s *Service) admitBoxMounts(tx *storeTx, b *boxRecord, mounts []Mount, homeID string) error {
 	if !b.Profile.PersistentHome {
 		return nil
@@ -275,7 +285,7 @@ func (s *Service) admitBoxMounts(tx *storeTx, b *boxRecord, mounts []Mount, home
 		v, exists := resolved[mount.VolumeID]
 		if !exists {
 			var err error
-			v, err = s.reserveBoxVolume(tx, b, mount.VolumeID, automatic)
+			v, err = s.resolveBoxVolume(tx, b, mount.VolumeID, automatic)
 			if err != nil {
 				return err
 			}
@@ -308,31 +318,28 @@ func boxCapabilities(b boxRecord) Capabilities {
 	return c
 }
 
-func (s *Service) reserveBoxVolume(tx *storeTx, b *boxRecord, id string, automatic bool) (volumeRecord, error) {
+func (s *Service) resolveBoxVolume(tx *storeTx, b *boxRecord, id string, automatic bool) (volumeRecord, error) {
 	var v volumeRecord
 	if automatic {
 		if err := tx.reserveID("volumes", id, b.ClientID); err != nil {
 			return v, err
 		}
 		v = newVolume(id, b.Box.OwnerKey, b.ClientID, b.Profile)
-	} else {
-		var err error
-		v, err = tx.Volume(b.ClientID, id)
-		if err != nil {
-			return v, err
-		}
-		if v.Volume.Phase != "available" || v.Volume.BoxID != "" || v.Volume.OperationID != "" {
-			return v, apiError("CONFLICT", "Volume is not available")
-		}
-		if v.Volume.OwnerKey != b.Box.OwnerKey || v.Provider != b.Profile.Provider ||
-			v.Volume.NodeName != b.Profile.NodeName || v.Namespace != b.Profile.Namespace || v.Agent != b.Profile.Guest.Agent {
-			return v, apiError("CONFLICT", "Volume owner, node, namespace, or agent UID/GID differs from the target Box")
-		}
-		v.Volume.Phase = "in-use"
+		return v, tx.PutVolume(v)
 	}
-	v.Volume.BoxID = b.Box.ID
-	v.Volume.Version++
-	return v, tx.PutVolume(v)
+	var err error
+	v, err = tx.Volume(b.ClientID, id)
+	if err != nil {
+		return v, err
+	}
+	if v.Volume.Phase != "available" || v.Volume.OperationID != "" {
+		return v, apiError("CONFLICT", "Volume is not available")
+	}
+	if v.Volume.OwnerKey != b.Box.OwnerKey || v.Provider != b.Profile.Provider ||
+		v.Volume.NodeName != b.Profile.NodeName || v.Namespace != b.Profile.Namespace || v.Agent != b.Profile.Guest.Agent {
+		return v, apiError("CONFLICT", "Volume owner, node, namespace, or agent UID/GID differs from the target Box")
+	}
+	return v, nil
 }
 
 func (s *Service) prepareBoxVolume(ctx context.Context, b boxRecord) error {
@@ -358,11 +365,11 @@ func (s *Service) prepareVolumeForBox(ctx context.Context, b boxRecord, id, uid 
 	if err != nil {
 		return err
 	}
-	if v.UID != uid || v.Volume.BoxID != b.Box.ID {
-		return apiError("CONFLICT", "Box no longer owns its volume reservation")
+	if v.UID != uid {
+		return apiError("CONFLICT", "Volume identity changed")
 	}
 	if v.Volume.Phase != "creating" {
-		if v.Volume.Phase != "in-use" {
+		if v.Volume.Phase != "available" || v.Volume.OperationID != "" {
 			return apiError("CONFLICT", "Volume is not ready")
 		}
 		return nil
@@ -379,10 +386,10 @@ func (s *Service) prepareVolumeForBox(ctx context.Context, b boxRecord, id, uid 
 		if err != nil {
 			return err
 		}
-		if current.UID != v.UID || current.Volume.BoxID != b.Box.ID || current.Volume.Phase != "creating" {
+		if current.UID != v.UID || current.Volume.Phase != "creating" {
 			return boxprovider.ErrStaleTransition
 		}
-		current.Volume.Phase = "in-use"
+		current.Volume.Phase = "available"
 		if createErr != nil {
 			current.Volume.Phase, current.Volume.Error = "failed", cloneError(createErr)
 		}
@@ -403,40 +410,26 @@ func (s *Service) registerLegacyVolume(tx *storeTx, b *boxRecord) error {
 		return err
 	}
 	v := newVolume(id, b.Box.OwnerKey, b.ClientID, b.Profile)
-	v.UID, v.Volume.Phase, v.Volume.BoxID = b.Handle.ID, "in-use", b.Box.ID
+	v.UID = b.Handle.ID
 	b.Box.HomeVolumeID = id
 	return tx.PutVolume(v)
 }
 
-func releaseBoxVolume(tx *storeTx, b boxRecord) error {
-	seen := make(map[string]bool)
-	for _, mount := range boxVolumeMounts(b) {
-		if seen[mount.VolumeID] {
-			continue
-		}
-		seen[mount.VolumeID] = true
-		if err := releaseVolumeForBox(tx, b, mount.VolumeID); err != nil {
-			return err
-		}
+// Legacy storage is promoted by the node during deletion. Publish it only after
+// that conversion completes; managed volumes need no change when a Box ends.
+func finishLegacyVolume(tx *storeTx, b boxRecord) error {
+	if len(b.VolumeMounts) != 0 || b.Box.HomeVolumeID == "" || b.Handle.ID == "" {
+		return nil
 	}
-	return nil
-}
-
-func releaseVolumeForBox(tx *storeTx, b boxRecord, id string) error {
-	v, err := tx.Volume(b.ClientID, id)
+	v, err := tx.Volume(b.ClientID, b.Box.HomeVolumeID)
 	if err != nil {
 		return err
 	}
-	if v.Volume.BoxID == "" {
+	interrupted := v.Volume.Phase == "failed" && v.Volume.Error != nil && v.Volume.Error.Code == "UNKNOWN_OUTCOME"
+	if v.UID != b.Handle.ID || v.Volume.Phase != "creating" && !interrupted {
 		return nil
 	}
-	if v.Volume.BoxID != b.Box.ID {
-		return nil // A later Box owns the disk; old terminal observations cannot release it.
-	}
-	v.Volume.BoxID = ""
-	if v.Volume.Phase != "failed" {
-		v.Volume.Phase = "available"
-	}
+	v.Volume.Phase, v.Volume.Error = "available", nil
 	v.Volume.Version++
 	return tx.PutVolume(v)
 }

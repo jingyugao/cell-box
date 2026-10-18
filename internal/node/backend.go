@@ -211,15 +211,18 @@ func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.P
 	if err = b.command(ctx, "checkpoint", "--image-path="+pending, live[0].Id); err != nil {
 		return err
 	}
-	if r.Spec.Mounts != nil {
-		for _, mount := range uniqueVolumeMounts(mounts) {
-			if err = homevolume.Checkpoint(b.Base, mount.UID, mount.HomeID, string(p.UID), r.Status.Snapshot); err != nil {
-				return err
-			}
+	checkpointMounts := uniqueVolumeMounts(mounts)
+	if r.Spec.Mounts == nil && len(checkpointMounts) > 1 {
+		checkpointMounts = checkpointMounts[:1]
+	}
+	for _, mount := range checkpointMounts {
+		if mount.Legacy {
+			err = homevolume.Checkpoint(b.Base, mount.UID, mount.HomeID, string(p.UID), r.Status.Snapshot)
+		} else {
+			err = homevolume.SyncVolume(b.Base, mount.UID, r.Spec.NodeName, mount.HomeID)
 		}
-	} else if len(mounts) > 0 {
-		if err = homevolume.Checkpoint(b.Base, mounts[0].UID, mounts[0].HomeID, string(p.UID), r.Status.Snapshot); err != nil {
-			return err
+		if err != nil {
+			return fmt.Errorf("checkpoint volume %s: %w", mount.UID, err)
 		}
 	}
 	manifest := Manifest{OwnerUID: string(r.UID), SpecHash: r.Status.SpecHash, ImageID: image.Id, RunscHash: binaryHash}
@@ -271,8 +274,12 @@ func (b *Backend) verifySnapshotHome(r *api.ResumablePod, m *Manifest) error {
 			return fmt.Errorf("checkpoint volume mount identity mismatch")
 		}
 		for _, mount := range uniqueVolumeMounts(mounts) {
-			if err := homevolume.ValidateCheckpoint(b.Base, mount.UID, mount.HomeID, r.Status.Snapshot); err != nil {
-				return err
+			if mount.Legacy {
+				if err := homevolume.ValidateCheckpoint(b.Base, mount.UID, mount.HomeID, r.Status.Snapshot); err != nil {
+					return err
+				}
+			} else if _, err := homevolume.Verify(b.Base, mount.UID, r.Spec.NodeName, homevolume.VolumeSpecHash, mount.HomeID); err != nil {
+				return fmt.Errorf("checkpoint volume %s identity mismatch: %w", mount.UID, err)
 			}
 		}
 		return nil
@@ -289,7 +296,11 @@ func (b *Backend) verifySnapshotHome(r *api.ResumablePod, m *Manifest) error {
 		return fmt.Errorf("checkpoint persistent HOME identity mismatch")
 	}
 	if homeID != "" {
-		return homevolume.ValidateCheckpoint(b.Base, mounts[0].UID, homeID, r.Status.Snapshot)
+		if mounts[0].Legacy {
+			return homevolume.ValidateCheckpoint(b.Base, mounts[0].UID, homeID, r.Status.Snapshot)
+		}
+		_, err := homevolume.Verify(b.Base, mounts[0].UID, r.Spec.NodeName, homevolume.VolumeSpecHash, homeID)
+		return err
 	}
 	return nil
 }
@@ -445,7 +456,8 @@ func (b *Backend) Forget(ctx context.Context, r *api.ResumablePod) error {
 		return err
 	}
 	// Runtime/snapshot cleanup also calls Forget while the Box still exists.
-	// Independent HOME storage is detached on deletion and retained as a volume.
+	// Independent volumes are untouched on Box deletion. Legacy HOME is
+	// promoted in place after runtime cleanup so its data remains independently managed.
 	if deleting && len(configuredVolumeMounts(r)) > 0 {
 		if err := b.detachVolumeMounts(r, configuredVolumeMounts(r)); err != nil {
 			return err

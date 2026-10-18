@@ -47,12 +47,33 @@ func TestCaptureWorkspaceArchiveFromSuspendedHomeIsBoundedAndIdempotent(t *testi
 	if err = homevolume.Checkpoint(base, "owner", identity.ID, "pod", "checkpoint-1"); err != nil {
 		t.Fatal(err)
 	}
+	runsc := filepath.Join(base, "runsc")
+	if err = os.WriteFile(runsc, []byte("runsc"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	snapshotDir, err := SnapshotPath(base, "owner", "checkpoint-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(snapshotDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(snapshotDir, "checkpoint.img"), []byte("state"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runscHash, err := Digest(runsc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = Seal(snapshotDir, Manifest{OwnerUID: "owner", SpecHash: "spec", RunscHash: runscHash, HomeID: identity.ID}); err != nil {
+		t.Fatal(err)
+	}
 	config, err := json.Marshal(guestapi.Config{Workspace: "/home/agent/workspace", Agent: guestapi.Identity{UID: 1000, GID: 1000}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	objects := &memoryObjects{objects: map[string][]byte{}}
-	backend := &Backend{Base: base, Objects: objects}
+	backend := &Backend{Base: base, Runsc: runsc, Objects: objects}
 	w := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{UID: "owner"}, Spec: api.Spec{NodeName: "node-a", DesiredState: "Suspended", PersistentHome: true, Container: core.Container{Args: []string{"serve", "--config-base64", base64.StdEncoding.EncodeToString(config)}}}, Status: api.Status{Phase: "Suspended", Snapshot: "checkpoint-1", SpecHash: "spec"}}
 	request := api.ArchiveCaptureRequest{ID: "arc-0123456789abcdef0123456789abcdef", Snapshot: "checkpoint-1", ExpiresAt: time.Now().Add(time.Minute)}
 	result, err := backend.CaptureWorkspaceArchive(context.Background(), w, request)
@@ -141,10 +162,31 @@ func TestCaptureWorkspaceArchiveRejectsIntermediateSymlink(t *testing.T) {
 	if err = homevolume.Checkpoint(base, "owner", identity.ID, "pod", "checkpoint-1"); err != nil {
 		t.Fatal(err)
 	}
+	runsc := filepath.Join(base, "runsc")
+	if err = os.WriteFile(runsc, []byte("runsc"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	snapshotDir, err := SnapshotPath(base, "owner", "checkpoint-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(snapshotDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(snapshotDir, "checkpoint.img"), []byte("state"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runscHash, err := Digest(runsc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = Seal(snapshotDir, Manifest{OwnerUID: "owner", SpecHash: "spec", RunscHash: runscHash, HomeID: identity.ID}); err != nil {
+		t.Fatal(err)
+	}
 	config, _ := json.Marshal(guestapi.Config{Workspace: "/home/agent/workspace-link/nested"})
 	w := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{UID: "owner"}, Spec: api.Spec{NodeName: "node-a", DesiredState: "Suspended", PersistentHome: true, Container: core.Container{Args: []string{"--config-base64", base64.StdEncoding.EncodeToString(config)}}}, Status: api.Status{Phase: "Suspended", Snapshot: "checkpoint-1", SpecHash: "spec"}}
 	objects := &memoryObjects{objects: map[string][]byte{}}
-	backend := &Backend{Base: base, Objects: objects}
+	backend := &Backend{Base: base, Runsc: runsc, Objects: objects}
 	_, err = backend.CaptureWorkspaceArchive(context.Background(), w, api.ArchiveCaptureRequest{ID: "arc-1123456789abcdef0123456789abcdef", Snapshot: "checkpoint-1"})
 	if err == nil || !strings.Contains(err.Error(), "unavailable") {
 		t.Fatalf("intermediate symlink accepted: %v", err)
@@ -160,6 +202,56 @@ func TestCaptureWorkspaceArchiveRejectsIntermediateSymlink(t *testing.T) {
 	}
 	if objects.putCalls != 0 {
 		t.Fatalf("disk-only symlink path uploaded %d objects", objects.putCalls)
+	}
+}
+
+func TestCaptureWorkspaceArchiveUsesSandboxManifestForSharedVolume(t *testing.T) {
+	base := t.TempDir()
+	const owner, volumeUID, snapshot = "box-a", "shared-volume", "checkpoint-a"
+	identity, err := homevolume.Prepare(base, volumeUID, "node-a", homevolume.VolumeSpecHash, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, _ := homevolume.Path(base, volumeUID)
+	workspace := filepath.Join(root, "workspace", "src")
+	if err = os.MkdirAll(workspace, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(workspace, "main.go"), []byte("shared volume"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runsc := filepath.Join(base, "runsc")
+	if err = os.WriteFile(runsc, []byte("runsc"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	runscHash, err := Digest(runsc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotDir, _ := SnapshotPath(base, owner, snapshot)
+	if err = os.MkdirAll(snapshotDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(snapshotDir, "checkpoint.img"), []byte("sandbox state"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	volumeMount := VolumeMountAuthorization{UID: volumeUID, MountPath: homevolume.MountPath, HomeID: identity.ID}
+	if err = Seal(snapshotDir, Manifest{OwnerUID: owner, SpecHash: "spec", RunscHash: runscHash, Mounts: []VolumeMountAuthorization{volumeMount}}); err != nil {
+		t.Fatal(err)
+	}
+	config, _ := json.Marshal(guestapi.Config{Workspace: "/home/agent/workspace/src"})
+	w := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{UID: owner}, Spec: api.Spec{
+		NodeName: "node-a", DesiredState: "Suspended", Mounts: []api.VolumeMount{{UID: volumeUID, MountPath: homevolume.MountPath}},
+		Container: core.Container{Args: []string{"--config-base64", base64.StdEncoding.EncodeToString(config)}},
+	}, Status: api.Status{Phase: "Suspended", Snapshot: snapshot, SpecHash: "spec"}}
+	objects := &memoryObjects{objects: map[string][]byte{}}
+	backend := &Backend{Base: base, Runsc: runsc, Objects: objects}
+	request := api.ArchiveCaptureRequest{ID: "arc-3123456789abcdef0123456789abcdef", Snapshot: snapshot}
+	if _, err = backend.CaptureWorkspaceArchive(context.Background(), w, request); err != nil {
+		t.Fatalf("paused Box could not archive a shared volume from its own manifest: %v", err)
+	}
+	if _, err = os.Stat(filepath.Join(filepath.Dir(root), ".state.json")); !os.IsNotExist(err) {
+		t.Fatalf("archive required or created exclusive volume state: %v", err)
 	}
 }
 

@@ -146,17 +146,26 @@ func (b *Backend) CaptureWorkspaceArchive(ctx context.Context, r *api.ResumableP
 	if err != nil {
 		return result, err
 	}
-	var home homevolume.Identity
+	var identityErr error
 	if homeMount.Legacy {
-		home, err = homevolume.Verify(b.Base, homeMount.UID, r.Spec.NodeName, r.Status.SpecHash, "")
+		_, identityErr = homevolume.Verify(b.Base, homeMount.UID, r.Spec.NodeName, r.Status.SpecHash, "")
 	} else {
-		home, err = homevolume.VerifyAttachment(b.Base, homeMount.UID, r.Spec.NodeName, string(r.UID))
+		_, identityErr = homevolume.Verify(b.Base, homeMount.UID, r.Spec.NodeName, homevolume.VolumeSpecHash, "")
 	}
-	if err != nil {
-		return result, err
+	if identityErr != nil {
+		return result, identityErr
 	}
 	if r.Status.Phase == "Suspended" {
-		if err = homevolume.ValidateCheckpoint(b.Base, homeMount.UID, home.ID, r.Status.Snapshot); err != nil {
+		snapshotPath, pathErr := SnapshotPath(b.Base, string(r.UID), r.Status.Snapshot)
+		if pathErr != nil {
+			return result, pathErr
+		}
+		var manifest *Manifest
+		manifest, err = VerifyCached(snapshotPath, string(r.UID), r.Status.SpecHash, b.Runsc)
+		if err == nil {
+			err = b.verifySnapshotHome(r, manifest)
+		}
+		if err != nil {
 			return result, err
 		}
 	}
