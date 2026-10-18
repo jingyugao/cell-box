@@ -59,17 +59,13 @@ api:
   configSecret: cellbox-api-config
   # Set false to use the existing configSecret.
   manageSecrets: true
-  volumeBackups:
-    # Keep the repository password in ignored values_local.yaml. Helm creates
-    # its Secret; reuse the same password when upgrading or restoring backups.
-    password: ""
-    # Alternatively reference an existing Secret. Configure only one source.
-    # With neither source set, backups remain disabled.
-    # With api.manageSecrets=false, set passwordEnv in the external API config too.
-    passwordSecret: ""
-    passwordKey: RESTIC_PASSWORD
-  # Overrides for the API JSON configuration; defaults start with no profiles.
-  config: {}
+  # Volume backups use restic empty-password mode and are disabled by default.
+  # Set enabled: true explicitly under api.config.volumeBackups to opt in.
+  config:
+    volumeBackups:
+      enabled: false
+      binary: restic
+      keepLast: 3
 buildkit:
   enabled: false
   extraEnv: []

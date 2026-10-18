@@ -52,7 +52,7 @@ var backupIDPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 func (s *Service) requireVolumeBackups() error {
 	if s.backups == nil {
-		return apiError("UNSUPPORTED_CAPABILITY", "Volume backups require configured object storage and a backup password")
+		return apiError("UNSUPPORTED_CAPABILITY", "Volume backups require volumeBackups.enabled and configured object storage")
 	}
 	return nil
 }

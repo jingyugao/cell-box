@@ -22,7 +22,7 @@ func TestConfigValidateDefaultsAndBounds(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Binary != "restic" || cfg.KeepLast != 3 {
+	if cfg.Enabled || cfg.Binary != "restic" || cfg.KeepLast != 3 {
 		t.Fatalf("unexpected defaults: %+v", cfg)
 	}
 	for _, keep := range []int{-1, 101} {
@@ -34,7 +34,7 @@ func TestConfigValidateDefaultsAndBounds(t *testing.T) {
 }
 
 func TestS3RepositoryURLAndVolumeIsolation(t *testing.T) {
-	cfg := Config{PasswordEnv: "BACKUP_PASSWORD"}
+	cfg := Config{Enabled: true}
 	storage := objectstorage.Config{Endpoint: "http://127.0.0.1:9000/", Bucket: "backup-bucket", Prefix: "cellbox", Region: "us-east-1", PathStyle: true}
 	engine, err := New(cfg, storage)
 	if err != nil {
@@ -49,7 +49,7 @@ func TestS3RepositoryURLAndVolumeIsolation(t *testing.T) {
 		t.Fatal("different volumes must use isolated repositories")
 	}
 	args := strings.Join(engine.baseArgs("client", "volume"), " ")
-	if strings.Contains(args, "s3.endpoint=") || !strings.Contains(args, "s3.bucket-lookup=path") {
+	if strings.Contains(args, "s3.endpoint=") || !strings.Contains(args, "s3.bucket-lookup=path") || !strings.Contains(args, "--insecure-no-password") {
 		t.Fatalf("unsupported or incorrect S3 options: %s", args)
 	}
 }
@@ -67,7 +67,7 @@ func TestRealResticIncrementalRetentionAndRestore(t *testing.T) {
 	if err := os.Mkdir(cache, 0700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CELLBOX_TEST_VOLUME_BACKUP_PASSWORD", "test-only-volume-password")
+	setInheritedResticCredentials(t)
 	engine := localEngine(binary, repository, cache)
 	large := make([]byte, 8<<20)
 	if _, err := rand.Read(large); err != nil {
@@ -139,6 +139,11 @@ func TestRealResticIncrementalRetentionAndRestore(t *testing.T) {
 	if err != nil || executableInfo.Mode().Perm() != 0751 {
 		t.Fatalf("permissions were not restored: mode=%v err=%v", executableInfo, err)
 	}
+	cmd := exec.Command(binary, "-r", repository, "--cache-dir", cache, "--insecure-no-password", "--json", "snapshots")
+	cmd.Env = filterEnv(os.Environ(), "RESTIC_REPOSITORY", "RESTIC_REPOSITORY_FILE", "RESTIC_PASSWORD", "RESTIC_PASSWORD_FILE", "RESTIC_PASSWORD_COMMAND")
+	if _, err := cmd.Output(); err != nil {
+		t.Fatalf("native restic could not read the empty-password repository: %v", err)
+	}
 }
 
 func TestFailedBackupDoesNotPruneCompletedSnapshots(t *testing.T) {
@@ -154,7 +159,6 @@ func TestFailedBackupDoesNotPruneCompletedSnapshots(t *testing.T) {
 	if err := os.Mkdir(cache, 0700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CELLBOX_TEST_VOLUME_BACKUP_PASSWORD", "test-only-volume-password")
 	engine := localEngine(restic, repository, cache)
 	engine.config.KeepLast = 4
 	for version := 1; version <= 4; version++ {
@@ -196,10 +200,9 @@ func TestDisabledAndRestoreValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := engine.List(context.Background(), "client", "volume"); !errors.Is(err, ErrDisabled) {
-		t.Fatalf("List without configured password returned %v", err)
+		t.Fatalf("List without explicit enable returned %v", err)
 	}
-	t.Setenv("CELLBOX_TEST_VOLUME_BACKUP_PASSWORD", "test-only")
-	engine.config.PasswordEnv = "CELLBOX_TEST_VOLUME_BACKUP_PASSWORD"
+	engine.config.Enabled = true
 	target := t.TempDir()
 	if err := os.WriteFile(filepath.Join(target, "existing"), []byte("data"), 0600); err != nil {
 		t.Fatal(err)
@@ -212,6 +215,22 @@ func TestDisabledAndRestoreValidation(t *testing.T) {
 	}
 }
 
+func TestCommandEnvRemovesInheritedResticSettings(t *testing.T) {
+	t.Setenv("RESTIC_REPOSITORY", "s3:https://invalid.example/repo")
+	t.Setenv("RESTIC_REPOSITORY_FILE", "/inherited/repository-file")
+	t.Setenv("RESTIC_PASSWORD", "inherited-password")
+	t.Setenv("RESTIC_PASSWORD_FILE", "/inherited/password-file")
+	t.Setenv("RESTIC_PASSWORD_COMMAND", "/inherited/password-command")
+	engine := &Engine{storage: objectstorage.Config{Region: "us-east-1"}}
+	for _, item := range engine.commandEnv() {
+		for _, name := range []string{"RESTIC_REPOSITORY", "RESTIC_REPOSITORY_FILE", "RESTIC_PASSWORD", "RESTIC_PASSWORD_FILE", "RESTIC_PASSWORD_COMMAND"} {
+			if strings.HasPrefix(item, name+"=") {
+				t.Fatalf("inherited %s reached restic", name)
+			}
+		}
+	}
+}
+
 func TestRealResticS3IncrementalRetentionAndRestore(t *testing.T) {
 	endpoint := os.Getenv("CELLBOX_TEST_BACKUP_S3_ENDPOINT")
 	bucket := os.Getenv("CELLBOX_TEST_BACKUP_S3_BUCKET")
@@ -221,7 +240,6 @@ func TestRealResticS3IncrementalRetentionAndRestore(t *testing.T) {
 		t.Skip("set isolated CELLBOX_TEST_BACKUP_S3_* settings to run the real S3 backend test")
 	}
 	binary := requireRestic(t)
-	t.Setenv("CELLBOX_TEST_VOLUME_BACKUP_PASSWORD", "test-only-volume-password")
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
 	target := filepath.Join(root, "restored")
@@ -235,7 +253,7 @@ func TestRealResticS3IncrementalRetentionAndRestore(t *testing.T) {
 		Endpoint: endpoint, Bucket: bucket, Region: "us-east-1", Prefix: "test/volume-backups/" + fmt.Sprint(time.Now().UnixNano()),
 		PathStyle: true, AccessKeyEnv: "CELLBOX_TEST_BACKUP_S3_ACCESS_KEY", SecretKeyEnv: "CELLBOX_TEST_BACKUP_S3_SECRET_KEY",
 	}
-	engine, err := New(Config{Binary: binary, PasswordEnv: "CELLBOX_TEST_VOLUME_BACKUP_PASSWORD", KeepLast: 3}, storage)
+	engine, err := New(Config{Binary: binary, Enabled: true, KeepLast: 3}, storage)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +309,16 @@ func requireRestic(t *testing.T) string {
 }
 
 func localEngine(binary, repository, cache string) *Engine {
-	cfg := Config{Binary: binary, PasswordEnv: "CELLBOX_TEST_VOLUME_BACKUP_PASSWORD", KeepLast: 3}
+	cfg := Config{Binary: binary, Enabled: true, KeepLast: 3}
 	_ = cfg.Validate()
 	return &Engine{config: cfg, storage: objectstorage.Config{Region: "us-east-1", Bucket: "local"}, repositoryOverride: repository, cacheDir: cache}
+}
+
+func setInheritedResticCredentials(t *testing.T) {
+	t.Helper()
+	t.Setenv("RESTIC_REPOSITORY", "s3:https://invalid.example/inherited-repository")
+	t.Setenv("RESTIC_REPOSITORY_FILE", "/definitely/not/a/repository-file")
+	t.Setenv("RESTIC_PASSWORD", "inherited-password-must-be-ignored")
+	t.Setenv("RESTIC_PASSWORD_FILE", "/definitely/not/a/restic-password-file")
+	t.Setenv("RESTIC_PASSWORD_COMMAND", "/definitely/not/a/password-command")
 }

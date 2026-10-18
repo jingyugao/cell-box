@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path"
 	"slices"
 	"strings"
@@ -99,12 +98,7 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 		http:     &http.Client{Transport: &http.Transport{Proxy: nil, ResponseHeaderTimeout: 35 * time.Second}, CheckRedirect: noRedirect},
 		toolHTTP: &http.Client{Transport: &http.Transport{Proxy: nil, ResponseHeaderTimeout: 5*time.Minute + 5*time.Second}, CheckRedirect: noRedirect},
 		ctx:      ctx, cancel: cancel, streams: map[string]activeStream{}}
-	if config.VolumeBackups.PasswordEnv != "" {
-		if os.Getenv(config.VolumeBackups.PasswordEnv) == "" {
-			cancel()
-			store.Close()
-			return nil, errors.New("volume backup password environment is empty")
-		}
+	if config.VolumeBackups.Enabled {
 		s.backups, err = volumebackup.New(config.VolumeBackups, config.ObjectStorage)
 		if err != nil {
 			cancel()

@@ -1,5 +1,6 @@
-// Package volumebackup stores incremental, encrypted volume snapshots in an
-// isolated restic repository per client and volume.
+// Package volumebackup stores incremental volume snapshots in an isolated
+// restic repository per client and volume. Repositories use restic's native
+// empty-password mode; access is controlled by object storage permissions.
 package volumebackup
 
 import (
@@ -43,11 +44,11 @@ const (
 
 var snapshotIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
 
-// Config controls the external restic executable and repository password.
+// Config controls the external restic executable and backup availability.
 type Config struct {
-	Binary      string `json:"binary,omitempty"`
-	PasswordEnv string `json:"passwordEnv,omitempty"`
-	KeepLast    int    `json:"keepLast,omitempty"`
+	Enabled  bool   `json:"enabled,omitempty"`
+	Binary   string `json:"binary,omitempty"`
+	KeepLast int    `json:"keepLast,omitempty"`
 }
 
 func (c *Config) Validate() error {
@@ -62,9 +63,6 @@ func (c *Config) Validate() error {
 	}
 	if c.KeepLast < 1 || c.KeepLast > 100 {
 		return errors.New("volumeBackup.keepLast must be between 1 and 100")
-	}
-	if c.PasswordEnv != "" && !validEnvironmentName(c.PasswordEnv) {
-		return errors.New("volumeBackup.passwordEnv must be a valid environment variable name")
 	}
 	return nil
 }
@@ -250,7 +248,7 @@ func (e *Engine) ready(clientID, volumeID string) error {
 	if clientID == "" || volumeID == "" {
 		return fmt.Errorf("%w: client and volume IDs are required", ErrInvalid)
 	}
-	if e.config.PasswordEnv == "" || os.Getenv(e.config.PasswordEnv) == "" {
+	if !e.config.Enabled {
 		return ErrDisabled
 	}
 	return nil
@@ -261,7 +259,7 @@ func (e *Engine) baseArgs(clientID, volumeID string) []string {
 	if e.repositoryOverride != "" {
 		repository = e.repositoryOverride
 	}
-	args := []string{"-r", repository}
+	args := []string{"-r", repository, "--insecure-no-password"}
 	if e.cacheDir != "" {
 		args = append(args, "--cache-dir", e.cacheDir)
 	}
@@ -317,9 +315,8 @@ func (e *Engine) run(ctx context.Context, dir string, args ...string) ([]byte, e
 
 func (e *Engine) commandEnv() []string {
 	env := os.Environ()
-	password := os.Getenv(e.config.PasswordEnv)
-	env = filterEnv(env, "RESTIC_REPOSITORY", "RESTIC_PASSWORD", "RESTIC_PASSWORD_FILE", "RESTIC_PASSWORD_COMMAND")
-	env = append(env, "RESTIC_PASSWORD="+password, "AWS_DEFAULT_REGION="+e.storage.Region)
+	env = filterEnv(env, "RESTIC_REPOSITORY", "RESTIC_REPOSITORY_FILE", "RESTIC_PASSWORD", "RESTIC_PASSWORD_FILE", "RESTIC_PASSWORD_COMMAND")
+	env = append(env, "AWS_DEFAULT_REGION="+e.storage.Region)
 	if e.storage.AccessKeyEnv != "" {
 		env = filterEnv(env, "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN")
 		env = append(env, "AWS_ACCESS_KEY_ID="+os.Getenv(e.storage.AccessKeyEnv), "AWS_SECRET_ACCESS_KEY="+os.Getenv(e.storage.SecretKeyEnv))
@@ -486,18 +483,6 @@ func contains(items []string, wanted string) bool {
 		}
 	}
 	return false
-}
-
-func validEnvironmentName(value string) bool {
-	if value == "" {
-		return false
-	}
-	for index, r := range value {
-		if !(r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || index > 0 && r >= '0' && r <= '9') {
-			return false
-		}
-	}
-	return true
 }
 
 var _ io.Writer = (*boundedBuffer)(nil)

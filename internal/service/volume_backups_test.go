@@ -311,20 +311,48 @@ func TestInterruptedVolumeRestorePreservesSourceAndFailsOnlyTarget(t *testing.T)
 	}
 }
 
-func TestConfiguredVolumeBackupsRequirePasswordAtStartup(t *testing.T) {
-	f := newCoreFixture(t)
-	config := f.config
-	config.DataDir = t.TempDir()
-	config.VolumeBackups.PasswordEnv = "CELLBOX_TEST_MISSING_BACKUP_PASSWORD"
-	t.Setenv(config.VolumeBackups.PasswordEnv, "")
-	service, err := New(config, map[string]boxprovider.Provider{"docker": f.provider})
-	if err == nil {
-		service.Close()
-		t.Fatal("advertised backups despite a missing repository password")
+func TestVolumeBackupsRequireExplicitEnablementAndObjectStorage(t *testing.T) {
+	t.Setenv("CELLBOX_TEST_BACKUP_ACCESS", "test-access")
+	t.Setenv("CELLBOX_TEST_BACKUP_SECRET", "test-secret")
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("enabled=%v", enabled), func(t *testing.T) {
+			f := newCoreFixture(t)
+			config := f.config
+			config.DataDir = t.TempDir()
+			config.VolumeBackups.Enabled = enabled
+			config.ObjectStorage = objectstorage.Config{Endpoint: "http://127.0.0.1:1", Bucket: "test-backups",
+				AccessKeyEnv: "CELLBOX_TEST_BACKUP_ACCESS", SecretKeyEnv: "CELLBOX_TEST_BACKUP_SECRET"}
+			service, err := New(config, map[string]boxprovider.Provider{"docker": f.provider})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer service.Close()
+			api := &coreFixture{service: service}
+			status, body := api.call(t, "GET", "/v1/backup-policy", testClientToken, "", nil)
+			wantStatus(t, status, 200, body)
+			policy := decodeResponse[struct {
+				Enabled  bool `json:"enabled"`
+				KeepLast int  `json:"keepLast"`
+			}](t, body)
+			if policy.Enabled != enabled || policy.KeepLast != 3 {
+				t.Fatalf("unexpected policy: %+v", policy)
+			}
+		})
 	}
-	if !strings.Contains(err.Error(), "password environment is empty") {
-		t.Fatalf("unexpected startup error: %v", err)
-	}
+	t.Run("enabled-without-storage", func(t *testing.T) {
+		f := newCoreFixture(t)
+		config := f.config
+		config.DataDir = t.TempDir()
+		config.VolumeBackups.Enabled = true
+		service, err := New(config, map[string]boxprovider.Provider{"docker": f.provider})
+		if err == nil {
+			service.Close()
+			t.Fatal("enabled backups without object storage")
+		}
+		if !strings.Contains(err.Error(), "objectStorage.bucket is required") {
+			t.Fatalf("unexpected startup error: %v", err)
+		}
+	})
 }
 
 // Opt-in filesystem/S3 integration. The endpoint must be isolated from any
@@ -335,9 +363,8 @@ func TestVolumeBackupS3APIIntegration(t *testing.T) {
 	if endpoint == "" || bucket == "" || binary == "" {
 		t.Skip("set isolated CELLBOX_TEST_BACKUP_S3_* and CELLBOX_TEST_RESTIC settings")
 	}
-	t.Setenv("CELLBOX_TEST_API_BACKUP_PASSWORD", "isolated-api-test-password")
 	f, provider := volumeFixture(t)
-	engine, err := volumebackup.New(volumebackup.Config{Binary: binary, PasswordEnv: "CELLBOX_TEST_API_BACKUP_PASSWORD", KeepLast: 3},
+	engine, err := volumebackup.New(volumebackup.Config{Binary: binary, Enabled: true, KeepLast: 3},
 		objectstorage.Config{Endpoint: endpoint, Bucket: bucket, Region: "us-east-1", PathStyle: true,
 			Prefix:       fmt.Sprintf("test/api-volume-backups/%d", time.Now().UnixNano()),
 			AccessKeyEnv: "CELLBOX_TEST_BACKUP_S3_ACCESS_KEY", SecretKeyEnv: "CELLBOX_TEST_BACKUP_S3_SECRET_KEY"})

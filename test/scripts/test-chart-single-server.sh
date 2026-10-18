@@ -20,6 +20,25 @@ expect_failure() {
     exit 1
   fi
 }
+assert_backup_config() {
+  local file=$1 expected_enabled=$2
+  local encoded
+  encoded=$(awk '
+    /^  name: cellbox-api-config$/ { in_config_secret=1; next }
+    in_config_secret && /^  config\.json: / {
+      sub(/^  config\.json: "/, "")
+      sub(/"$/, "")
+      print
+      exit
+    }
+    in_config_secret && /^---$/ { in_config_secret=0 }
+  ' "$file")
+  [[ -n $encoded ]] || { echo "cellbox-api-config Secret/config.json was not rendered" >&2; return 1; }
+  printf '%s' "$encoded" | base64 --decode | jq -e --argjson enabled "$expected_enabled" \
+    '.volumeBackups.enabled == $enabled and .volumeBackups.binary == "restic" and .volumeBackups.keepLast == 3 and (.volumeBackups | has("passwordEnv") | not)' \
+    >/dev/null
+  ! grep -qE 'CELLBOX_BACKUP_PASSWORD|cellbox-volume-backups|checksum/backup-password' "$file"
+}
 
 helm lint "$root/charts/cellbox" "${common[@]}"
 helm template cellbox "$root/charts/cellbox" --namespace cellbox "${common[@]}" \
@@ -48,17 +67,11 @@ helm template cellbox "$root/charts/cellbox" --namespace cellbox "${common[@]}" 
   --set storage.existingClaim=cellbox-data > "$tmp/claim.yaml"
 grep -q 'claimName: "cellbox-data"' "$tmp/claim.yaml"
 
-# A local-values password owns its Secret and enables the server without a
-# separately provisioned credential. Missing credentials keep backups disabled.
-! grep -q 'name: CELLBOX_BACKUP_PASSWORD' "$tmp/rendered.yaml"
+# Backups are disabled by default and have no password Secret, env, or checksum.
+assert_backup_config "$tmp/rendered.yaml" false
 helm template cellbox "$root/charts/cellbox" --namespace cellbox "${common[@]}" \
-  --set-string api.volumeBackups.password=local-backup-test-password > "$tmp/backup-password.yaml"
-grep -q 'name: cellbox-volume-backups' "$tmp/backup-password.yaml"
-grep -q 'RESTIC_PASSWORD: "local-backup-test-password"' "$tmp/backup-password.yaml"
-grep -q 'name: CELLBOX_BACKUP_PASSWORD' "$tmp/backup-password.yaml"
-grep -q 'checksum/backup-password:' "$tmp/backup-password.yaml"
-expect_failure 'configure only one of api.volumeBackups.password and api.volumeBackups.passwordSecret' "${common[@]}" \
-  --set-string api.volumeBackups.password=local-backup-test-password --set api.volumeBackups.passwordSecret=external-backup-secret
+  --set api.config.volumeBackups.enabled=true > "$tmp/backups-enabled.yaml"
+assert_backup_config "$tmp/backups-enabled.yaml" true
 
 cat > "$tmp/profile-mismatch.yaml" <<'YAML'
 api:
