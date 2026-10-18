@@ -13,6 +13,18 @@
 {{- default .Release.Namespace .Values.api.namespace -}}
 {{- end -}}
 
+{{- define "cellbox.backupPasswordSecret" -}}
+{{- $backups := .Values.api.volumeBackups | default dict -}}
+{{- if and $backups.password $backups.passwordSecret -}}
+{{- fail "configure only one of api.volumeBackups.password and api.volumeBackups.passwordSecret" -}}
+{{- end -}}
+{{- if $backups.password -}}
+{{- printf "%s-volume-backups" .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- $backups.passwordSecret | default "" -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "cellbox.objectStorageConfig" -}}
 {{- $storage := .Values.objectStorage -}}
 {{- $config := dict -}}

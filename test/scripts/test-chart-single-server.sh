@@ -48,6 +48,18 @@ helm template cellbox "$root/charts/cellbox" --namespace cellbox "${common[@]}" 
   --set storage.existingClaim=cellbox-data > "$tmp/claim.yaml"
 grep -q 'claimName: "cellbox-data"' "$tmp/claim.yaml"
 
+# A local-values password owns its Secret and enables the server without a
+# separately provisioned credential. Missing credentials keep backups disabled.
+! grep -q 'name: CELLBOX_BACKUP_PASSWORD' "$tmp/rendered.yaml"
+helm template cellbox "$root/charts/cellbox" --namespace cellbox "${common[@]}" \
+  --set-string api.volumeBackups.password=local-backup-test-password > "$tmp/backup-password.yaml"
+grep -q 'name: cellbox-volume-backups' "$tmp/backup-password.yaml"
+grep -q 'RESTIC_PASSWORD: "local-backup-test-password"' "$tmp/backup-password.yaml"
+grep -q 'name: CELLBOX_BACKUP_PASSWORD' "$tmp/backup-password.yaml"
+grep -q 'checksum/backup-password:' "$tmp/backup-password.yaml"
+expect_failure 'configure only one of api.volumeBackups.password and api.volumeBackups.passwordSecret' "${common[@]}" \
+  --set-string api.volumeBackups.password=local-backup-test-password --set api.volumeBackups.passwordSecret=external-backup-secret
+
 cat > "$tmp/profile-mismatch.yaml" <<'YAML'
 api:
   config:

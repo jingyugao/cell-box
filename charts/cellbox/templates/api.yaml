@@ -40,6 +40,9 @@ spec:
         {{- if .Values.api.manageSecrets }}
         checksum/api-config: {{ toJson .Values.api.config | sha256sum }}
         {{- end }}
+        {{- if .Values.api.volumeBackups.password }}
+        checksum/backup-password: {{ .Values.api.volumeBackups.password | sha256sum }}
+        {{- end }}
         {{- if .Values.buildkit.enabled }}
         checksum/buildkit-config: {{ include (print $.Template.BasePath "/buildkit-config.yaml") . | sha256sum }}
         {{- end }}
@@ -143,11 +146,11 @@ spec:
                   name: {{ .Values.objectStorage.credentialsSecret }}
                   key: {{ .Values.objectStorage.secretKeyKey }}
             {{- end }}
-            {{- if .Values.api.volumeBackups.passwordSecret }}
+            {{- if include "cellbox.backupPasswordSecret" . }}
             - name: CELLBOX_BACKUP_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.api.volumeBackups.passwordSecret }}
+                  name: {{ include "cellbox.backupPasswordSecret" . | quote }}
                   key: {{ .Values.api.volumeBackups.passwordKey }}
             {{- end }}
             {{- with .Values.api.extraEnv }}

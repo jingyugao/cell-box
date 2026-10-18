@@ -60,7 +60,11 @@ api:
   # Set false to use the existing configSecret.
   manageSecrets: true
   volumeBackups:
-    # Reference an existing Secret. Empty leaves passwordEnv unset and disables backups.
+    # Keep the repository password in ignored values_local.yaml. Helm creates
+    # its Secret; reuse the same password when upgrading or restoring backups.
+    password: ""
+    # Alternatively reference an existing Secret. Configure only one source.
+    # With neither source set, backups remain disabled.
     # With api.manageSecrets=false, set passwordEnv in the external API config too.
     passwordSecret: ""
     passwordKey: RESTIC_PASSWORD
