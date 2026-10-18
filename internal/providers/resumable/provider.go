@@ -102,14 +102,14 @@ func buildWanted(spec boxprovider.Spec) (*api.ResumablePod, error) {
 	container := core.Container{
 		Name: "cellbox", Image: spec.Image, ImagePullPolicy: core.PullIfNotPresent,
 		Command: []string{guestapi.Binary}, Args: argv,
-		Ports: []core.ContainerPort{{Name: "guest", ContainerPort: guestapi.Port, Protocol: core.ProtocolTCP}},
-		Resources: core.ResourceRequirements{
-			Requests: core.ResourceList{core.ResourceCPU: resource.MustParse("0"), core.ResourceMemory: resource.MustParse("0")},
-			Limits:   resources,
-		},
+		Ports:     []core.ContainerPort{{Name: "guest", ContainerPort: guestapi.Port, Protocol: core.ProtocolTCP}},
+		Resources: core.ResourceRequirements{Requests: core.ResourceList{core.ResourceCPU: resource.MustParse("0"), core.ResourceMemory: resource.MustParse("0")}},
 		SecurityContext: &core.SecurityContext{RunAsUser: &zero, RunAsNonRoot: &no, Privileged: &no, AllowPrivilegeEscalation: &no,
 			Capabilities: &core.Capabilities{Drop: []core.Capability{"ALL"}, Add: []core.Capability{"CHOWN", "SETUID", "SETGID", "FOWNER", "DAC_OVERRIDE"}}},
 		ReadinessProbe: &core.Probe{ProbeHandler: core.ProbeHandler{TCPSocket: &core.TCPSocketAction{Port: intstr.FromInt32(guestapi.Port)}}, PeriodSeconds: 1},
+	}
+	if !spec.UnlimitedResources {
+		container.Resources.Limits = resources
 	}
 	wanted := &api.ResumablePod{
 		TypeMeta:   meta.TypeMeta{APIVersion: api.GroupVersion.String(), Kind: api.Kind},

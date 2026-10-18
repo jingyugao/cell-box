@@ -79,6 +79,9 @@ func (c *Config) Validate() error {
 		if p.Provider != "docker" && p.Provider != "resumable-k8s-pod" {
 			return fmt.Errorf("profile %s has unknown provider", p.ID)
 		}
+		if p.UnlimitedResources && p.Provider != "resumable-k8s-pod" {
+			return fmt.Errorf("profile %s unlimitedResources requires resumable-k8s-pod provider", p.ID)
+		}
 		// New resumable Boxes always persist HOME. Stored immutable profiles are
 		// decoded separately, so pre-upgrade Boxes retain their original layout.
 		p.PersistentHome = p.Provider == "resumable-k8s-pod"

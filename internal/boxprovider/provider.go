@@ -29,6 +29,7 @@ type Spec struct {
 	DebugReadOnlyHostPath  string
 	DebugReadWriteHostPath string
 	PersistentHome         bool
+	UnlimitedResources     bool
 	Staged                 bool // Start guest control, but hold the configured workload until activation.
 }
 

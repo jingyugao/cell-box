@@ -86,6 +86,23 @@ func TestPersistentHomeIsFixedForNewBoxesAndPreservesLegacyLayout(t *testing.T) 
 	}
 }
 
+func TestUnlimitedResourcesRequiresResumableProviderAndIsForwarded(t *testing.T) {
+	image := "registry.example.invalid/image@sha256:" + strings.Repeat("a", 64)
+	docker := Config{Profiles: []Profile{{ID: "unlimited", Provider: "docker", Image: image, UnlimitedResources: true}}}
+	if err := docker.Validate(); err == nil {
+		t.Fatal("Docker profile accepted unlimitedResources")
+	}
+
+	k8s := Config{Profiles: []Profile{{ID: "unlimited", Provider: "resumable-k8s-pod", Image: image,
+		Namespace: "boxes", NodeName: "node-a", UnlimitedResources: true}}}
+	if err := k8s.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !runtimeSpec(boxRecord{Box: Box{ID: "box-1"}, Profile: k8s.Profiles[0]}).UnlimitedResources {
+		t.Fatal("unlimitedResources was not forwarded to the provider spec")
+	}
+}
+
 type fakeCoreProvider struct {
 	mu           sync.Mutex
 	guestURL     string
