@@ -13,7 +13,7 @@ RUN apk add --no-cache util-linux ca-certificates \
     && echo "$restic_asset_sha256  /tmp/restic.bz2" | sha256sum -c - \
     && bunzip2 /tmp/restic.bz2 \
     && echo "$restic_binary_sha256  /tmp/restic" | sha256sum -c - \
-    && install -m 0755 /tmp/restic /usr/local/bin/restic \
+    && install -m 0755 /tmp/restic /usr/bin/restic \
     && rm -f /tmp/restic \
     && apk del .restic-download-deps
 COPY cellbox-server /opt/cellbox/bin/cellbox-server
