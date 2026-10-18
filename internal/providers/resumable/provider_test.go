@@ -11,6 +11,7 @@ import (
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/boxprovider"
 	"cellbox.local/cellbox/internal/guestapi"
+	"cellbox.local/cellbox/internal/runtimecontrol"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -67,6 +68,7 @@ func TestPersistentHomeSpecPropagationAndReentryCheck(t *testing.T) {
 
 func TestCaptureWorkspaceArchiveRequiresSuspendedAndConsumesMatchingResult(t *testing.T) {
 	p, s, ctx := fixture(t)
+	p.Local = runtimecontrol.New(p.Client)
 	s.PersistentHome = true
 	s.Config.Workspace = "/home/agent/workspace"
 	h, err := p.Create(ctx, s)
@@ -87,7 +89,7 @@ func TestCaptureWorkspaceArchiveRequiresSuspendedAndConsumesMatchingResult(t *te
 		w.Annotations = map[string]string{}
 	}
 	request, _ := json.Marshal(api.ArchiveCaptureRequest{ID: id, Snapshot: "checkpoint-1", ExpiresAt: meta.NewTime(time.Now().Add(time.Minute)).Time})
-	result, _ := json.Marshal(api.ArchiveCaptureResult{ID: id, Snapshot: "checkpoint-1", Size: 123, SHA256: strings.Repeat("a", 64)})
+	result, _ := json.Marshal(api.ArchiveCaptureResult{SourceUID: "cr-uid", SourceGeneration: w.Generation, ID: id, Snapshot: "checkpoint-1", Size: 123, SHA256: strings.Repeat("a", 64)})
 	w.Annotations[api.ArchiveRequestAnnotation] = string(request)
 	w.Annotations[api.ArchiveResultAnnotation] = string(result)
 	if err = p.Client.Update(ctx, w); err != nil {
@@ -113,120 +115,6 @@ func TestCaptureWorkspaceArchiveRequiresSuspendedAndConsumesMatchingResult(t *te
 	}
 	if _, _, err = p.CaptureWorkspaceArchive(ctx, h, id); err == nil {
 		t.Fatal("same request ID was accepted against a different checkpoint")
-	}
-}
-
-type diskArchiveCompletingClient struct {
-	client.Client
-	atomicRequest bool
-}
-
-func (c *diskArchiveCompletingClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-	w, ok := obj.(*api.ResumablePod)
-	if ok {
-		var request api.ArchiveCaptureRequest
-		if json.Unmarshal([]byte(w.Annotations[api.ArchiveRequestAnnotation]), &request) == nil && request.DiskOnly {
-			if w.Spec.DesiredState != "Suspended" {
-				return errors.New("disk archive request was patched without suspending execution")
-			}
-			c.atomicRequest = true
-		}
-	}
-	if err := c.Client.Patch(ctx, obj, patch, opts...); err != nil {
-		return err
-	}
-	if !ok {
-		return nil
-	}
-	var request api.ArchiveCaptureRequest
-	if json.Unmarshal([]byte(w.Annotations[api.ArchiveRequestAnnotation]), &request) != nil || !request.DiskOnly {
-		return nil
-	}
-	stored := &api.ResumablePod{}
-	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(w), stored); err != nil {
-		return err
-	}
-	stored.Status.Phase = "Failed"
-	stored.Status.Snapshot = ""
-	stored.Status.PodUID, stored.Status.PodName = "", ""
-	if err := c.Client.Status().Update(ctx, stored); err != nil {
-		return err
-	}
-	result, _ := json.Marshal(api.ArchiveCaptureResult{ID: request.ID, DiskOnly: true, SourceUID: string(stored.UID), SourceGeneration: stored.Generation,
-		Size: 123, SHA256: strings.Repeat("a", 64)})
-	stored.Annotations[api.ArchiveResultAnnotation] = string(result)
-	return c.Client.Update(ctx, stored)
-}
-
-func TestCaptureDiskWorkspaceArchiveFromFailedHomeAndFencesReplay(t *testing.T) {
-	// Build the normal resource with the fake client, then wrap it so the
-	// controller result appears as soon as the atomic request patch lands.
-	p, createSpec, ctx := fixture(t)
-	createSpec.PersistentHome = true
-	createSpec.Config.Workspace = "/home/agent/workspace"
-	h, err := p.Create(ctx, createSpec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	baseClient := p.Client
-	w := &api.ResumablePod{}
-	if err = baseClient.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
-		t.Fatal(err)
-	}
-	w.Spec.DesiredState = "Suspended"
-	if err = baseClient.Update(ctx, w); err != nil {
-		t.Fatal(err)
-	}
-	w.Status.Phase = "Failed"
-	w.Status.Snapshot = ""
-	w.Status.PodUID, w.Status.PodName = "", ""
-	if err = baseClient.Status().Update(ctx, w); err != nil {
-		t.Fatal(err)
-	}
-	wrapper := &diskArchiveCompletingClient{Client: baseClient}
-	p.Client = wrapper
-	id := "arc-3123456789abcdef0123456789abcdef"
-	size, digest, err := p.CaptureDiskWorkspaceArchive(ctx, h, id)
-	if err != nil || size != 123 || digest != strings.Repeat("a", 64) {
-		t.Fatalf("disk archive capture = %d/%s/%v", size, digest, err)
-	}
-	if !wrapper.atomicRequest {
-		t.Fatal("DiskOnly request and DesiredState=Suspended were not patched atomically")
-	}
-	if err = baseClient.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
-		t.Fatal(err)
-	}
-	var captured api.ArchiveCaptureResult
-	if json.Unmarshal([]byte(w.Annotations[api.ArchiveResultAnnotation]), &captured) != nil || captured.SourceUID != string(w.UID) || captured.SourceGeneration != w.Generation {
-		t.Fatalf("result lacks its captured identity fence: %+v generation=%d", captured, w.Generation)
-	}
-	if w.Spec.DesiredState != "Suspended" || w.Status.Phase != "Failed" || w.Status.Snapshot != "" || w.Status.PodName != "" || w.Status.PodUID != "" || w.Annotations[api.ArchiveRequestAnnotation] != "" {
-		t.Fatalf("disk archive did not retain a stopped failed source: spec=%+v status=%+v annotations=%v", w.Spec, w.Status, w.Annotations)
-	}
-	if _, _, err = p.CaptureDiskWorkspaceArchive(ctx, h, id); err != nil {
-		t.Fatalf("same source generation should safely reuse prior archive: %v", err)
-	}
-	if err = baseClient.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
-		t.Fatal(err)
-	}
-	w.Spec.DesiredState = "Running"
-	w.Generation++
-	if err = baseClient.Update(ctx, w); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err = p.CaptureDiskWorkspaceArchive(ctx, h, id); err == nil {
-		t.Fatal("replayed old archive after source resumed")
-	}
-	if err = baseClient.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
-		t.Fatal(err)
-	}
-	w.Spec.DesiredState = "Suspended"
-	w.Generation++
-	if err = baseClient.Update(ctx, w); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err = p.CaptureDiskWorkspaceArchive(ctx, h, id); err == nil {
-		t.Fatal("replayed old archive after source generation changed")
 	}
 }
 
@@ -536,80 +424,3 @@ func TestInspectRejectsExecutionSwitchDuringPodRead(t *testing.T) {
 	}
 }
 func boolPtr(v bool) *bool { return &v }
-
-func TestRebuildRequiresFailedPersistentHomeAndReportsPendingRequest(t *testing.T) {
-	p, spec, ctx := fixture(t)
-	spec.PersistentHome = true
-	h, err := p.Create(ctx, spec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w := &api.ResumablePod{}
-	if err := p.Client.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
-		t.Fatal(err)
-	}
-	if err := p.Action(ctx, h, "rebuild"); err == nil {
-		t.Fatal("healthy box rebuilt")
-	}
-	w.Status.Phase = "Failed"
-	w.Status.PodUID = "old"
-	if err := p.Client.Status().Update(ctx, w); err != nil {
-		t.Fatal(err)
-	}
-	if err := p.Action(ctx, h, "rebuild"); err != nil {
-		t.Fatal(err)
-	}
-	if err := p.Client.Get(ctx, client.ObjectKeyFromObject(w), w); err != nil {
-		t.Fatal(err)
-	}
-	if w.Spec.RebuildNonce == "" || w.UID != types.UID(h.ID) {
-		t.Fatal("lost restart request or box identity")
-	}
-	observed, err := p.Inspect(ctx, h)
-	if err != nil || observed.Phase != "creating" || observed.ExecutionID != "" {
-		t.Fatal("pending rebuild exposed old failed execution", observed, err)
-	}
-}
-
-func TestDiskUpgradeKeepsOwnerAndHidesOldExecution(t *testing.T) {
-	p, spec, ctx := fixture(t)
-	spec.PersistentHome = true
-	h, err := p.Create(ctx, spec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w := &api.ResumablePod{}
-	if err := p.Client.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
-		t.Fatal(err)
-	}
-	w.Status.Phase, w.Status.PodUID = "Running", "old-pod"
-	if err := p.Client.Status().Update(ctx, w); err != nil {
-		t.Fatal(err)
-	}
-	oldImage := spec.Image
-	spec.Image = "registry.example.invalid/prepared@sha256:" + strings.Repeat("b", 64)
-	upgraded, err := p.Upgrade(ctx, h, spec, "upgrade-1")
-	if err != nil || upgraded.ID != h.ID || upgraded.ImageID != spec.Image {
-		t.Fatal(upgraded, err)
-	}
-	if err := p.Client.Get(ctx, client.ObjectKeyFromObject(w), w); err != nil {
-		t.Fatal(err)
-	}
-	if w.Spec.Upgrade.PreviousContainer.Image != oldImage || w.Spec.Container.Image != spec.Image {
-		t.Fatal("lost image transition")
-	}
-	observed, err := p.Inspect(ctx, upgraded)
-	if err != nil || observed.Phase != "creating" || observed.ExecutionID != "" {
-		t.Fatal("exposed old execution", observed, err)
-	}
-	if _, err := p.Upgrade(ctx, h, spec, "upgrade-1"); err != nil {
-		t.Fatal("lost response not replayable", err)
-	}
-	if _, err := p.Upgrade(ctx, h, spec, "upgrade-2"); err == nil {
-		t.Fatal("overlapping upgrade accepted")
-	}
-	spec.NodeName = "another-node"
-	if _, err := p.Upgrade(ctx, h, spec, "upgrade-1"); err == nil {
-		t.Fatal("disk move accepted")
-	}
-}

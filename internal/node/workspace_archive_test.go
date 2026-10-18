@@ -127,7 +127,7 @@ func TestCaptureWorkspaceArchiveRejectsIntermediateSymlink(t *testing.T) {
 	}
 	w.Status.Phase = "Failed"
 	w.Status.Snapshot = ""
-	_, err = backend.CaptureWorkspaceArchive(context.Background(), w, api.ArchiveCaptureRequest{ID: "arc-2123456789abcdef0123456789abcdef", DiskOnly: true})
+	_, err = backend.CaptureWorkspaceArchive(context.Background(), w, api.ArchiveCaptureRequest{ID: "arc-2123456789abcdef0123456789abcdef"})
 	if err == nil || !strings.Contains(err.Error(), "unavailable") {
 		t.Fatalf("disk-only archive accepted intermediate symlink: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestCaptureWorkspaceArchiveRejectsIntermediateSymlink(t *testing.T) {
 	}
 }
 
-func TestCaptureDiskOnlyArchiveFromFailedPersistentHomeWithoutCheckpoint(t *testing.T) {
+func TestCaptureFailedStoppedPersistentHomeWithoutCheckpoint(t *testing.T) {
 	base := t.TempDir()
 	_, err := homevolume.Prepare(base, "owner", "node-a", "spec", true)
 	if err != nil {
@@ -159,16 +159,16 @@ func TestCaptureDiskOnlyArchiveFromFailedPersistentHomeWithoutCheckpoint(t *test
 	}
 	objects := &memoryObjects{objects: map[string][]byte{}}
 	backend := &Backend{Base: base, Objects: objects}
-	w := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{UID: "owner"}, Spec: api.Spec{NodeName: "node-a", DesiredState: "Suspended", PersistentHome: true, Container: core.Container{Args: []string{"serve", "--config-base64", base64.StdEncoding.EncodeToString(config)}}}, Status: api.Status{Phase: "Failed", SpecHash: "spec"}}
-	request := api.ArchiveCaptureRequest{ID: "arc-2123456789abcdef0123456789abcdef", DiskOnly: true, ExpiresAt: time.Now().Add(time.Minute)}
+	w := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{UID: "owner"}, Spec: api.Spec{NodeName: "node-a", DesiredState: "Running", PersistentHome: true, Container: core.Container{Args: []string{"serve", "--config-base64", base64.StdEncoding.EncodeToString(config)}}}, Status: api.Status{Phase: "Failed", SpecHash: "spec"}}
+	request := api.ArchiveCaptureRequest{ID: "arc-2123456789abcdef0123456789abcdef", ExpiresAt: time.Now().Add(time.Minute)}
 	result, err := backend.CaptureWorkspaceArchive(context.Background(), w, request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Size < 1 || len(result.SHA256) != 64 || result.Snapshot != "" {
-		t.Fatalf("invalid disk-only archive result: %+v", result)
+		t.Fatalf("invalid failed-source archive result: %+v", result)
 	}
 	if objects.putCalls != 1 {
-		t.Fatalf("disk-only archive uploaded %d objects", objects.putCalls)
+		t.Fatalf("failed-source archive uploaded %d objects", objects.putCalls)
 	}
 }

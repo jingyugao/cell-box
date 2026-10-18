@@ -1,33 +1,31 @@
 package service
 
 import (
-	"cellbox.local/cellbox/internal/objectstorage"
+	"cellbox.local/cellbox/internal/guestapi"
+	"cellbox.local/cellbox/internal/telemetry"
+	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"golang.org/x/sys/unix"
-	"io"
-	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
+
+	"golang.org/x/sys/unix"
+	_ "modernc.org/sqlite"
 )
 
+// Store owns the single local database. Operations read and write only their records.
 type Store struct {
-	// Writers remain serialized for cross-resource invariants. Readers only hold
-	// mu while copying committed memory, never while object storage is accessed.
-	writeMu       sync.RWMutex
-	boxWrites     keyedLocks
-	records       *recordStore
-	objects       objectstorage.Objects
-	etag          string
-	failure       error
-	onFailure     func()
-	mu            sync.Mutex
-	changes       chan struct{}
-	state         State
-	dir           string
-	lock          *os.File
-	objectsCloser io.Closer
+	db       *sql.DB
+	dir      string
+	lock     *os.File
+	writerMu sync.Mutex
+	mu       sync.Mutex
+	changes  chan struct{}
 }
 
 func lockDataDirectory(dir string) (*os.File, error) {
@@ -39,10 +37,8 @@ func lockDataDirectory(dir string) (*os.File, error) {
 		return nil, err
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("data directory must be a real directory")
+		return nil, errors.New("data directory must be a real directory")
 	}
-	// Existing volumes may be owned by the provisioner and writable through
-	// fsGroup. Preserve their permissions; the service cannot chmod them.
 	fd, err := unix.Open(filepath.Join(dir, "service.lock"), unix.O_CREAT|unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
 	if err != nil {
 		return nil, err
@@ -56,395 +52,362 @@ func lockDataDirectory(dir string) (*os.File, error) {
 }
 
 func OpenStore(dir string) (*Store, error) {
-	f, err := lockDataDirectory(dir)
+	lock, err := lockDataDirectory(dir)
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{dir: dir, lock: f, state: newState()}
-	name := filepath.Join(dir, "state.json")
-	if info, e := os.Lstat(name); e == nil && !info.Mode().IsRegular() {
-		s.Close()
-		return nil, fmt.Errorf("state file must be a regular file")
+	failed := true
+	defer func() {
+		if failed {
+			lock.Close()
+		}
+	}()
+	for _, old := range []string{"state.json", "catalog.db"} {
+		if _, err := os.Lstat(filepath.Join(dir, old)); err == nil {
+			return nil, fmt.Errorf("legacy metadata %s is not supported; use a new data directory", old)
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
 	}
-	b, err := os.ReadFile(name)
-	if err != nil && !os.IsNotExist(err) {
-		s.Close()
+	name, err := filepath.Abs(filepath.Join(dir, "cellbox.db"))
+	if err != nil {
 		return nil, err
 	}
-	if err == nil {
-		s.state = State{}
-		if err = json.Unmarshal(b, &s.state); err != nil {
-			s.Close()
-			return nil, fmt.Errorf("invalid state file: %w", err)
-		}
-		if s.state.Purges == nil {
-			s.state.Purges = map[string]purgeRecord{}
-		}
-		if s.state.Schema != stateSchema {
-			s.Close()
-			return nil, fmt.Errorf("unsupported state schema")
-		}
-		if s.state.Boxes == nil || s.state.Operations == nil || s.state.Keys == nil || s.state.Executions == nil || s.state.Leases == nil || s.state.Routes == nil || s.state.ImportedImages == nil || s.state.Archives == nil {
-			s.Close()
-			return nil, fmt.Errorf("state contains null collections")
-		}
+	if info, err := os.Lstat(name); err == nil && !info.Mode().IsRegular() {
+		return nil, errors.New("database must be a regular file")
+	} else if err != nil && !os.IsNotExist(err) {
+		return nil, err
 	}
-	return s, nil
-}
-
-var errBoxObservationConflict = fmt.Errorf("box changed during observation")
-
-func cloneBoxRecord(record boxRecord) (boxRecord, error) {
-	b, err := json.Marshal(record)
+	// Configure every pooled connection. Immediate transactions serialize writers
+	// before reading their snapshot; WAL allows catalog reads during admission.
+	uri := url.URL{Scheme: "file", Path: name}
+	query := url.Values{"_pragma": {"busy_timeout(5000)", "foreign_keys(1)", "synchronous(FULL)"}, "_txlock": {"immediate"}}
+	uri.RawQuery = query.Encode()
+	db, err := sql.Open("sqlite", uri.String())
 	if err != nil {
-		return boxRecord{}, err
+		return nil, err
 	}
-	var copy boxRecord
-	err = json.Unmarshal(b, &copy)
-	return copy, err
-}
-
-// BoxRecords returns isolated copies of only the requested records. An empty
-// ID list means all records owned by client.
-func (s *Store) BoxRecords(client string, ids []string) ([]boxRecord, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.failure != nil {
-		return nil, s.failure
-	}
-	if len(ids) == 0 {
-		out := make([]boxRecord, 0)
-		for _, record := range s.state.Boxes {
-			if record.ClientID == client {
-				copy, err := cloneBoxRecord(record)
-				if err != nil {
-					return nil, err
-				}
-				out = append(out, copy)
-			}
+	defer func() {
+		if failed {
+			db.Close()
 		}
-		return out, nil
+	}()
+	db.SetMaxOpenConns(4)
+	if _, err = db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		return nil, err
 	}
-	out := make([]boxRecord, 0, len(ids))
-	for _, id := range ids {
-		record, ok := s.state.Boxes[id]
-		if !ok || record.ClientID != client {
-			return nil, apiError("NOT_FOUND", "Box not found")
-		}
-		copy, err := cloneBoxRecord(record)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, copy)
+	if err = os.Chmod(name, 0600); err != nil {
+		return nil, err
 	}
-	return out, nil
-}
-
-// RuntimeBoxRecords returns isolated Box projections for background provider
-// observation without serializing operations, idempotency keys or other state.
-func (s *Store) RuntimeBoxRecords() ([]boxRecord, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.failure != nil {
-		return nil, s.failure
+	var version int
+	if err = db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return nil, err
 	}
-	out := make([]boxRecord, 0, len(s.state.Boxes))
-	for _, record := range s.state.Boxes {
-		if record.Handle.ID == "" || record.Box.Phase == "deleted" {
-			continue
-		}
-		copy, err := cloneBoxRecord(record)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, copy)
+	if version != 0 && version != 3 {
+		return nil, fmt.Errorf("unsupported database schema %d", version)
 	}
-	return out, nil
-}
-
-type boxAdmissionSnapshot struct {
-	Box                   boxRecord
-	Key                   keyRecord
-	KeyExists             bool
-	KeyOperation          Operation
-	KeyOperationExists    bool
-	ActiveOperation       Operation
-	ActiveOperationExists bool
-}
-
-// BoxAdmission reads one Box and only the operations referenced by its current
-// operation ID or the caller's idempotency key. It avoids cloning unrelated
-// history on lifecycle request paths.
-func (s *Store) BoxAdmission(client, id, key string) (boxAdmissionSnapshot, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.failure != nil {
-		return boxAdmissionSnapshot{}, s.failure
-	}
-	box, ok := s.state.Boxes[id]
-	if !ok || box.ClientID != client {
-		return boxAdmissionSnapshot{}, apiError("NOT_FOUND", "Box not found")
-	}
-	boxCopy, err := cloneBoxRecord(box)
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS runtime_records (
+ kind TEXT NOT NULL, id TEXT NOT NULL, client_id TEXT NOT NULL DEFAULT '', box_id TEXT NOT NULL DEFAULT '', record TEXT NOT NULL,
+ PRIMARY KEY(kind,id));
+ CREATE INDEX IF NOT EXISTS runtime_owner ON runtime_records(kind,client_id);
+ CREATE INDEX IF NOT EXISTS runtime_box ON runtime_records(kind,box_id);
+ PRAGMA user_version=3;`)
 	if err != nil {
-		return boxAdmissionSnapshot{}, err
+		return nil, err
 	}
-	out := boxAdmissionSnapshot{Box: boxCopy}
-	cloneOperation := func(id string) (Operation, bool, error) {
-		if id == "" {
-			return Operation{}, false, nil
-		}
-		record, ok := s.state.Operations[id]
-		if !ok || record.ClientID != client {
-			return Operation{}, false, nil
-		}
-		data, err := json.Marshal(record.Operation)
-		if err != nil {
-			return Operation{}, false, err
-		}
-		var copy Operation
-		if err = json.Unmarshal(data, &copy); err != nil {
-			return Operation{}, false, err
-		}
-		return copy, true, nil
-	}
-	if box.Box.OperationID != "" {
-		out.ActiveOperation, out.ActiveOperationExists, err = cloneOperation(box.Box.OperationID)
-		if err != nil {
-			return boxAdmissionSnapshot{}, err
-		}
-	}
-	if key != "" {
-		out.Key, out.KeyExists = s.state.Keys[key]
-		if out.KeyExists {
-			out.KeyOperation, out.KeyOperationExists, err = cloneOperation(out.Key.OperationID)
-			if err != nil {
-				return boxAdmissionSnapshot{}, err
-			}
-		}
-	}
-	return out, nil
+	failed = false
+	return &Store{db: db, dir: dir, lock: lock}, nil
 }
 
-func (s *Store) BoxRecord(id string) (boxRecord, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.failure != nil {
-		return boxRecord{}, s.failure
-	}
-	record, ok := s.state.Boxes[id]
-	if !ok {
-		return boxRecord{}, apiError("NOT_FOUND", "Box not found")
-	}
-	return cloneBoxRecord(record)
-}
-
-// Operation returns an isolated record without copying historical executions,
-// images and boxes on every lifecycle poll.
-func (s *Store) Operation(client, id string) (Operation, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.failure != nil {
-		return Operation{}, s.failure
-	}
-	record, ok := s.state.Operations[id]
-	if !ok || record.ClientID != client {
-		return Operation{}, apiError("NOT_FOUND", "Operation not found")
-	}
-	op := record.Operation
-	op.Result = maps.Clone(op.Result)
-	if op.Error != nil {
-		copy := *op.Error
-		op.Error = &copy
-	}
-	if op.FinishedAt != nil {
-		copy := *op.FinishedAt
-		op.FinishedAt = &copy
-	}
-	return op, nil
-}
-
-func sameObservationBase(a, b boxRecord) bool {
-	return a.Box.Version == b.Box.Version && a.Box.Generation == b.Box.Generation &&
-		a.Box.Phase == b.Box.Phase && a.Box.OperationID == b.Box.OperationID &&
-		a.Handle == b.Handle && a.ExecutionID == b.ExecutionID && a.TransitionID == b.TransitionID &&
-		a.ObservedTransitionID == b.ObservedTransitionID &&
-		a.ResumePending == b.ResumePending && a.ResumeNeedsGuest == b.ResumeNeedsGuest &&
-		a.ResumeIntentID == b.ResumeIntentID && a.ResumeExecutionID == b.ResumeExecutionID &&
-		a.ResumeTransitionID == b.ResumeTransitionID && a.ResumeObservedTransitionID == b.ResumeObservedTransitionID &&
-		a.Staged == b.Staged && a.RestoreArchiveID == b.RestoreArchiveID &&
-		a.RestoreComplete == b.RestoreComplete && a.AcceptImageChange == b.AcceptImageChange
-}
-
-// UpdateObservedBox performs the compare even when update reports no changes.
-// It persists only when the observation changed the box.
-func (s *Store) UpdateObservedBox(base boxRecord, update func(*boxRecord) (bool, error)) (boxRecord, error) {
-	var unlock func()
-	if base.Profile.Provider == "resumable-k8s-pod" {
-		unlock = s.lockBoxWriter(base.Box.ID)
-	} else {
-		s.writeMu.Lock()
-		unlock = s.writeMu.Unlock
-	}
-	defer unlock()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.failure != nil {
-		return boxRecord{}, s.failure
-	}
-	current, ok := s.state.Boxes[base.Box.ID]
-	if !ok || !sameObservationBase(base, current) {
-		return boxRecord{}, errBoxObservationConflict
-	}
-	next, err := cloneBoxRecord(current)
-	if err != nil {
-		return boxRecord{}, err
-	}
-	changed, err := update(&next)
-	if err != nil {
-		return boxRecord{}, err
-	}
-	if !changed {
-		return cloneBoxRecord(current)
-	}
-	// Only this already-cloned box can change. Other collections stay private
-	// to the store and are never handed to the callback.
-	state := s.state
-	state.Boxes = maps.Clone(s.state.Boxes)
-	state.Boxes[base.Box.ID] = next
-	if s.records != nil && next.Profile.Provider == "resumable-k8s-pod" {
-		// Kubernetes owns observations; Cycle supplies the durable generation.
-		s.state = state
-		return cloneBoxRecord(next)
-	}
-	if err = s.persistLocked(state); err != nil {
-		return boxRecord{}, err
-	}
-	return cloneBoxRecord(next)
-}
 func (s *Store) Close() error {
-	var closeErr error
-	if s.objectsCloser != nil {
-		closeErr = s.objectsCloser.Close()
-		s.objectsCloser = nil
-	}
-	if s.lock == nil {
-		return closeErr
-	}
-	err := s.lock.Close()
-	s.lock = nil
-	if closeErr != nil {
-		return closeErr
+	s.writerMu.Lock()
+	defer s.writerMu.Unlock()
+	err := s.db.Close()
+	if s.lock != nil {
+		err = errors.Join(err, s.lock.Close())
+		s.lock = nil
 	}
 	return err
 }
-func (s *Store) View(fn func(State) error) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.failure != nil {
-		return s.failure
-	}
-	b, err := json.Marshal(s.state)
-	if err != nil {
-		return err
-	}
-	var copy State
-	if err = json.Unmarshal(b, &copy); err != nil {
-		return err
-	}
-	return fn(copy)
-}
-func (s *Store) Update(fn func(*State) error) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.failure != nil {
-		return s.failure
-	}
-	b, err := json.Marshal(s.state)
-	if err != nil {
-		return err
-	}
-	var next State
-	if err = json.Unmarshal(b, &next); err != nil {
-		return err
-	}
-	if err = fn(&next); err != nil {
-		return err
-	}
-	return s.persistLocked(next)
+
+type sqlReader interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-func cloneState(state State) (State, error) {
-	b, err := json.Marshal(state)
-	if err != nil {
-		return State{}, err
-	}
-	var next State
-	err = json.Unmarshal(b, &next)
-	return next, err
+// storeTx is a SQLite transaction, not a snapshot of all business records.
+type storeTx struct {
+	ctx     context.Context
+	tx      *sql.Tx
+	changed bool
 }
 
-func (s *Store) persistLocked(next State) error {
-	if s.failure != nil {
-		return s.failure
+func (s *Store) Write(ctx context.Context, fn func(*storeTx) error) (retErr error) {
+	ctx, span := telemetry.Start(ctx, "cellbox.storage.transaction", telemetry.String("storage.backend", "sqlite"))
+	defer func() { telemetry.End(span, retErr) }()
+	s.writerMu.Lock()
+	defer s.writerMu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
 	}
-	if s.objects != nil {
-		// writeMu protects the transaction. Publish the new state only after its
-		// durable commit; concurrent readers can keep using the previous snapshot.
-		s.mu.Unlock()
-		err := s.persistRecords(next)
+	defer tx.Rollback()
+	writer := &storeTx{ctx: ctx, tx: tx}
+	if err = fn(writer); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	if writer.changed {
 		s.mu.Lock()
-		if err != nil {
-			return s.failRemote()
-		}
-		s.state = next
 		s.notifyLocked()
-		return nil
-	}
-	persisted := next
-	persisted.Routes = map[string]Route{}
-	b, err := json.MarshalIndent(persisted, "", "  ")
-	if err != nil {
-		return err
-	}
-	f, err := os.CreateTemp(s.dir, ".state-*")
-	if err != nil {
-		return err
-	}
-	name := f.Name()
-	defer os.Remove(name)
-	if err = f.Chmod(0600); err == nil {
-		_, err = f.Write(b)
-	}
-	if err == nil {
-		err = f.Sync()
-	}
-	closeErr := f.Close()
-	if err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return err
-	}
-	if err = os.Rename(name, filepath.Join(s.dir, "state.json")); err != nil {
-		return err
-	}
-	// Rename already committed; keep memory aligned even if directory fsync fails.
-	s.state = next
-	s.notifyLocked()
-	d, err := os.Open(s.dir)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "Cellbox: state committed but directory sync unavailable")
-		return nil
-	}
-	defer d.Close()
-	if err := d.Sync(); err != nil {
-		fmt.Fprintln(os.Stderr, "Cellbox: state committed but directory sync failed; crash durability is uncertain")
+		s.mu.Unlock()
 	}
 	return nil
 }
 
-const stateObjectKey = "metadata/state.json"
-const stateObjectLimit = 64 << 20
+func (t *storeTx) put(kind, id, client, boxID string, value any) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	result, err := t.tx.ExecContext(t.ctx, `INSERT INTO runtime_records(kind,id,client_id,box_id,record) VALUES(?,?,?,?,?)
+        ON CONFLICT(kind,id) DO UPDATE SET client_id=excluded.client_id,box_id=excluded.box_id,record=excluded.record
+        WHERE record!=excluded.record OR client_id!=excluded.client_id OR box_id!=excluded.box_id`, kind, id, client, boxID, string(data))
+	if err == nil {
+		n, _ := result.RowsAffected()
+		t.changed = t.changed || n > 0
+	}
+	return err
+}
+func (t *storeTx) exec(query string, args ...any) error {
+	result, err := t.tx.ExecContext(t.ctx, query, args...)
+	if err == nil {
+		n, _ := result.RowsAffected()
+		t.changed = t.changed || n > 0
+	}
+	return err
+}
+func (t *storeTx) Delete(kind, id string) error {
+	return t.exec("DELETE FROM runtime_records WHERE kind=? AND id=?", kind, id)
+}
+func (t *storeTx) Box(client, id string) (boxRecord, error) {
+	b, err := readRecord[boxRecord](t.ctx, t.tx, "boxes", id)
+	if errors.Is(err, sql.ErrNoRows) || err == nil && client != "" && b.ClientID != client {
+		return boxRecord{}, apiError("NOT_FOUND", "Box not found")
+	}
+	return b, err
+}
+func (t *storeTx) PutBox(b boxRecord) error { return t.put("boxes", b.Box.ID, b.ClientID, b.Box.ID, b) }
+func (t *storeTx) Operation(id string) (operationRecord, error) {
+	return readRecord[operationRecord](t.ctx, t.tx, "operations", id)
+}
+func (t *storeTx) PutOperation(r operationRecord) error {
+	return t.put("operations", r.Operation.ID, r.ClientID, r.Operation.TargetID, r)
+}
+func (t *storeTx) Execution(id string) (executionRecord, error) {
+	return readRecord[executionRecord](t.ctx, t.tx, "executions", id)
+}
+func (t *storeTx) PutExecution(e executionRecord) error {
+	if e.Result != nil {
+		if err := t.put("execution_results", e.ID, "", e.BoxID, e.Result); err != nil {
+			return err
+		}
+	}
+	if e.State == "expired" {
+		if err := t.Delete("execution_results", e.ID); err != nil {
+			return err
+		}
+	}
+	e.Result = nil
+	return t.put("executions", e.ID, "", e.BoxID, e)
+}
+func (t *storeTx) HasActiveExecution(id string) (bool, error) {
+	var yes bool
+	err := t.tx.QueryRowContext(t.ctx, `SELECT EXISTS(SELECT 1 FROM runtime_records WHERE kind='operations' AND box_id=?
+        AND json_extract(record,'$.operation.kind')='exec' AND json_extract(record,'$.operation.status') IN ('queued','running'))`, id).Scan(&yes)
+	return yes, err
+}
+func (t *storeTx) Archive(client, id string) (archiveRecord, error) {
+	a, err := readRecord[archiveRecord](t.ctx, t.tx, "archives", id)
+	if errors.Is(err, sql.ErrNoRows) || err == nil && a.ClientID != client {
+		return archiveRecord{}, apiError("NOT_FOUND", "Archive not found")
+	}
+	return a, err
+}
+func (t *storeTx) PutArchive(a archiveRecord) error {
+	return t.put("archives", a.Archive.ID, a.ClientID, "", a)
+}
+func (t *storeTx) ArchiveInUse(id string) (bool, error) {
+	var yes bool
+	err := t.tx.QueryRowContext(t.ctx, `SELECT EXISTS(SELECT 1 FROM runtime_records b JOIN runtime_records o
+        ON o.kind='operations' AND o.id=json_extract(b.record,'$.box.operationId')
+        WHERE b.kind='boxes' AND json_extract(b.record,'$.restoreArchiveId')=?
+        AND json_extract(o.record,'$.operation.status') IN ('queued','running'))`, id).Scan(&yes)
+	return yes, err
+}
+func (s *Store) ChangeBox(ctx context.Context, id string, fn func(*boxRecord) error) error {
+	return s.Write(ctx, func(t *storeTx) error {
+		b, err := t.Box("", id)
+		if err != nil {
+			return err
+		}
+		if err = fn(&b); err != nil {
+			return err
+		}
+		return t.PutBox(b)
+	})
+}
+func (s *Store) ArchiveRecord(client, id string) (archiveRecord, error) {
+	a, err := readRecord[archiveRecord](context.Background(), s.db, "archives", id)
+	if errors.Is(err, sql.ErrNoRows) || err == nil && a.ClientID != client {
+		return archiveRecord{}, apiError("NOT_FOUND", "Archive not found")
+	}
+	return a, err
+}
+func (s *Store) ArchiveRecords(client string) ([]archiveRecord, error) {
+	return listRecords[archiveRecord](context.Background(), s.db, "archives", "AND client_id=?", client)
+}
+func (s *Store) ExecutionRecord(client, id string) (executionRecord, error) {
+	var data []byte
+	err := s.db.QueryRow(`SELECT e.record FROM runtime_records e JOIN runtime_records b ON b.kind='boxes' AND b.id=e.box_id
+        WHERE e.kind='executions' AND e.id=? AND b.client_id=?`, id, client).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return executionRecord{}, apiError("NOT_FOUND", "Execution not found")
+	}
+	var e executionRecord
+	if err == nil {
+		err = json.Unmarshal(data, &e)
+	}
+	return e, err
+}
+
+// Interrupted work is not replayed. Runtime observation may still reveal its effects.
+func (s *Store) InterruptOperations(ctx context.Context) error {
+	return s.Write(ctx, func(t *storeTx) error {
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		if err := t.exec(`UPDATE runtime_records SET record=json_set(record,'$.state','unknown')
+            WHERE kind='executions' AND json_extract(record,'$.state')='running'`); err != nil {
+			return err
+		}
+		if err := t.exec(`UPDATE runtime_records SET record=json_set(record,'$.operation.status','failed',
+            '$.operation.error',json('{"code":"UNKNOWN_OUTCOME","message":"Service restarted before completion; inspect the resource before retrying"}'),
+            '$.operation.finishedAt',?,'$.operation.version',json_extract(record,'$.operation.version')+1)
+            WHERE kind='operations' AND json_extract(record,'$.operation.status') IN ('queued','running')`, now); err != nil {
+			return err
+		}
+		return t.exec(`UPDATE runtime_records SET record=json_set(record,'$.box.operationId','',
+            '$.box.resourceVersion',json_extract(record,'$.box.resourceVersion')+1,
+            '$.box.phase',CASE WHEN json_extract(record,'$.box.phase') IN ('creating','restoring') THEN 'failed' ELSE json_extract(record,'$.box.phase') END)
+            WHERE kind='boxes' AND coalesce(json_extract(record,'$.box.operationId'),'')!=''`)
+	})
+}
+
+func readRecord[T any](ctx context.Context, db sqlReader, kind, id string) (T, error) {
+	var out T
+	var data []byte
+	err := db.QueryRowContext(ctx, "SELECT record FROM runtime_records WHERE kind=? AND id=?", kind, id).Scan(&data)
+	if err == nil {
+		err = json.Unmarshal(data, &out)
+	}
+	return out, err
+}
+
+func listRecords[T any](ctx context.Context, db sqlReader, kind string, where string, args ...any) ([]T, error) {
+	rows, err := db.QueryContext(ctx, "SELECT record FROM runtime_records WHERE kind=? "+where, append([]any{kind}, args...)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []T{}
+	for rows.Next() {
+		var data []byte
+		var value T
+		if err = rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		if err = json.Unmarshal(data, &value); err != nil {
+			return nil, err
+		}
+		out = append(out, value)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) BoxRecords(client string, ids []string) ([]boxRecord, error) {
+	if len(ids) == 0 {
+		return listRecords[boxRecord](context.Background(), s.db, "boxes", "AND client_id=?", client)
+	}
+	out := make([]boxRecord, 0, len(ids))
+	for _, id := range ids {
+		record, err := s.BoxRecord(id)
+		if err != nil {
+			return nil, err
+		}
+		if record.ClientID != client {
+			return nil, apiError("NOT_FOUND", "Box not found")
+		}
+		out = append(out, record)
+	}
+	return out, nil
+}
+func (s *Store) RuntimeBoxRecords() ([]boxRecord, error) {
+	return listRecords[boxRecord](context.Background(), s.db, "boxes", "AND json_extract(record,'$.handle.id')!='' AND json_extract(record,'$.box.phase')!='deleted'")
+}
+func (s *Store) BoxRecord(id string) (boxRecord, error) {
+	b, err := readRecord[boxRecord](context.Background(), s.db, "boxes", id)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = apiError("NOT_FOUND", "Box not found")
+	}
+	return b, err
+}
+func (s *Store) Operation(client, id string) (Operation, error) {
+	r, err := readRecord[operationRecord](context.Background(), s.db, "operations", id)
+	if errors.Is(err, sql.ErrNoRows) || err == nil && r.ClientID != client {
+		return Operation{}, apiError("NOT_FOUND", "Operation not found")
+	}
+	return r.Operation, err
+}
+
+var errBoxObservationConflict = errors.New("box changed during observation")
+
+func sameObservationBase(a, b boxRecord) bool {
+	return a.Box.Version == b.Box.Version && a.Box.Generation == b.Box.Generation && a.Box.Phase == b.Box.Phase &&
+		a.Box.OperationID == b.Box.OperationID && a.Handle == b.Handle && a.ExecutionID == b.ExecutionID &&
+		a.TransitionID == b.TransitionID && a.ObservedTransitionID == b.ObservedTransitionID &&
+		a.Staged == b.Staged && a.RestoreArchiveID == b.RestoreArchiveID && a.RestoreComplete == b.RestoreComplete
+}
+func (s *Store) UpdateObservedBox(base boxRecord, fn func(*boxRecord) (bool, error)) (boxRecord, error) {
+	var current boxRecord
+	err := s.Write(context.Background(), func(t *storeTx) error {
+		var err error
+		current, err = t.Box("", base.Box.ID)
+		if err != nil {
+			return err
+		}
+		if !sameObservationBase(base, current) {
+			return errBoxObservationConflict
+		}
+		changed, err := fn(&current)
+		if err != nil || !changed {
+			return err
+		}
+		return t.PutBox(current)
+	})
+	return current, err
+}
+
+func (s *Store) executionResult(ctx context.Context, e executionRecord) (Execution, error) {
+	if e.State == "expired" {
+		return Execution{}, apiError("RESULT_EXPIRED", "Execution output retention window has expired")
+	}
+	if e.Result == nil && e.State == "exited" {
+		result, err := readRecord[guestapi.ExecResult](ctx, s.db, "execution_results", e.ID)
+		if err != nil {
+			return Execution{}, err
+		}
+		e.Result = &result
+	}
+	return e.Execution, nil
+}

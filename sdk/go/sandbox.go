@@ -20,7 +20,8 @@ type Sandbox struct {
 }
 
 // Create waits for provisioning to complete. An application may still need its
-// own health check. On cancellation, inspect OperationError to recover the sandbox.
+// own health check. If the submission result is lost, inspect server state before
+// deciding whether to submit another create request.
 func (c *Client) Create(ctx context.Context, opts CreateOptions) (*Sandbox, error) {
 	op, err := c.CreateAsync(ctx, opts)
 	if err != nil {
@@ -45,7 +46,7 @@ func (c *Client) CreateAsync(ctx context.Context, opts CreateOptions) (*Operatio
 	if (opts.TemplateID == "") == (opts.RevisionID == "") || opts.OwnerKey == "" || len(opts.OwnerKey) > 256 {
 		return nil, fmt.Errorf("cellbox: exactly one of template ID or revision ID and an owner key (1..256 bytes) are required")
 	}
-	return c.submit(ctx, "/v1/boxes", opts.IdempotencyKey, opts)
+	return c.submit(ctx, "/v1/boxes", opts)
 }
 
 // Connect attaches to an existing sandbox without resuming it or changing state.
@@ -70,7 +71,7 @@ func (c *Client) GetSandbox(ctx context.Context, id string) (*SandboxInfo, error
 		return nil, err
 	}
 	var info SandboxInfo
-	if err := c.do(ctx, http.MethodGet, path, "", nil, &info); err != nil {
+	if err := c.do(ctx, http.MethodGet, path, nil, &info); err != nil {
 		return nil, err
 	}
 	return &info, nil
@@ -115,7 +116,7 @@ func (c *Client) ListSandboxes(ctx context.Context, opts ...SandboxListOptions) 
 		path += "?" + encoded
 	}
 	var sandboxes []SandboxInfo
-	err := c.do(ctx, http.MethodGet, path, "", nil, &sandboxes)
+	err := c.do(ctx, http.MethodGet, path, nil, &sandboxes)
 	return sandboxes, err
 }
 
@@ -124,17 +125,8 @@ func (s *Sandbox) Info(ctx context.Context) (*SandboxInfo, error) {
 	return s.client.GetSandbox(ctx, s.ID)
 }
 
-type DestroyOptions struct {
-	IdempotencyKey string
-}
-
-// Destroy waits for resource destruction. Active commands or leases may cause
-// a BUSY error. Destroy does not implicitly cancel commands.
-func (s *Sandbox) Destroy(ctx context.Context, opts *DestroyOptions) error {
-	var lifecycle LifecycleOptions
-	if opts != nil {
-		lifecycle.IdempotencyKey = opts.IdempotencyKey
-	}
-	_, err := s.action(ctx, "destroy", &lifecycle)
+// Destroy waits for resource destruction. Active commands may cause BUSY.
+func (s *Sandbox) Destroy(ctx context.Context) error {
+	_, err := s.action(ctx, "destroy")
 	return err
 }

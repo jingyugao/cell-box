@@ -196,15 +196,14 @@ func TestSuspendedInventoryPublishesAfterSnapshotAndRepairsAfterRestart(t *testi
 	}
 	workload.Status.SpecHash = "spec"
 	testCheckpoint(t, base, owner, snapshot, "spec", "image-id", runsc)
-	objects := &memoryObjects{}
-	backend := &Backend{Base: base, Runsc: runsc, Objects: objects}
+	checkpoints := &memoryCheckpointStore{}
+	backend := &Backend{Base: base, Runsc: runsc, Checkpoints: checkpoints}
 	if err = backend.SyncInventory(context.Background(), workload); err != nil {
 		t.Fatal("publish suspended inventory:", err)
 	}
-	indexKey := "checkpoints/" + owner + "/metadata.json"
-	var published inventory.Record
-	if err = json.Unmarshal(objects.objects[indexKey], &published); err != nil {
-		t.Fatal("invalid published index:", err)
+	published, err := checkpoints.GetCheckpoint(context.Background(), owner)
+	if err != nil {
+		t.Fatal("read published inventory:", err)
 	}
 	if published.ClientID != "client-one" || published.RuntimeID != owner || published.Snapshot != snapshot || published.NodeName != "" {
 		t.Fatalf("incomplete inventory record: %+v", published)
@@ -217,38 +216,27 @@ func TestSuspendedInventoryPublishesAfterSnapshotAndRepairsAfterRestart(t *testi
 	if err = json.Unmarshal(publishedBox["phase"], &phase); err != nil || phase != "suspended" {
 		t.Fatalf("inventory phase = %q, err=%v", phase, err)
 	}
-	if objects.putCalls != 1 {
-		t.Fatalf("initial inventory publish made %d puts", objects.putCalls)
-	}
-	if err = backend.SyncInventory(context.Background(), workload); err != nil || objects.putCalls != 1 {
-		t.Fatalf("unchanged inventory should be cached, puts=%d err=%v", objects.putCalls, err)
+	if err = backend.SyncInventory(context.Background(), workload); err != nil {
+		t.Fatalf("repeat inventory sync failed: %v", err)
 	}
 
-	// A process restart has an empty cache and must reconstruct a missing index.
-	delete(objects.objects, indexKey)
-	restarted := &Backend{Base: base, Runsc: runsc, Objects: objects}
+	// The database record survives a process restart; the new backend needs no cache reconstruction.
+	restarted := &Backend{Base: base, Runsc: runsc, Checkpoints: checkpoints}
 	if err = restarted.SyncInventory(context.Background(), workload); err != nil {
-		t.Fatal("restart did not repair index:", err)
-	}
-	if _, ok := objects.objects[indexKey]; !ok {
-		t.Fatal("suspended inventory index was not repaired")
+		t.Fatal("restart inventory sync failed:", err)
 	}
 
 	// Resume state belongs to the CR/API; the durable checkpoint descriptor
 	// stays unchanged until invalidation, with no redundant OSS write.
-	puts := objects.putCalls
 	resume := workload.DeepCopy()
 	resume.Spec.DesiredState = "Running"
 	resume.Status.Phase = "Restoring"
 	resume.Status.Cycle++
-	if err = restarted.SyncInventory(context.Background(), resume); err != nil || objects.putCalls != puts {
+	if err = restarted.SyncInventory(context.Background(), resume); err != nil {
 		t.Fatal("update index before restore:", err)
 	}
-	if _, ok := objects.objects[indexKey]; !ok {
-		t.Fatal("resume removed the checkpoint index before Forget")
-	}
-	published = inventory.Record{}
-	if err = json.Unmarshal(objects.objects[indexKey], &published); err != nil {
+	published, err = checkpoints.GetCheckpoint(context.Background(), owner)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err = json.Unmarshal(published.Box, &publishedBox); err != nil {
@@ -261,8 +249,8 @@ func TestSuspendedInventoryPublishesAfterSnapshotAndRepairsAfterRestart(t *testi
 	if err = restarted.Forget(context.Background(), resume); err != nil {
 		t.Fatal("running Forget did not remove checkpoint index:", err)
 	}
-	if _, ok := objects.objects[indexKey]; ok {
-		t.Fatal("running Forget left checkpoint index behind")
+	if _, err = checkpoints.GetCheckpoint(context.Background(), owner); !errors.Is(err, inventory.ErrNotFound) {
+		t.Fatalf("running Forget left checkpoint index behind: %v", err)
 	}
 }
 
@@ -277,15 +265,12 @@ func TestCheckpointingInventoryPublishesBeforeArchiveUpload(t *testing.T) {
 		"cellbox.local/box-id": "box-789", inventory.ClientLabel: inventory.ClientValue("client-three"),
 	}, Annotations: map[string]string{inventory.Annotation: string(annotation)}},
 		Spec: api.Spec{DesiredState: "Suspended"}, Status: api.Status{Phase: "Checkpointing", Snapshot: "checkpoint-9", Cycle: 9}}
-	objects := &memoryObjects{objects: map[string][]byte{}}
-	if err = (&Backend{Objects: objects}).SyncInventory(context.Background(), workload); err != nil {
+	checkpoints := &memoryCheckpointStore{}
+	if err = (&Backend{Checkpoints: checkpoints}).SyncInventory(context.Background(), workload); err != nil {
 		t.Fatal("publish checkpointing phase before archive upload:", err)
 	}
-	if _, ok := objects.objects["checkpoints/"+owner+"/checkpoint-9.tar"]; ok {
-		t.Fatal("checkpointing phase unexpectedly required or created the archive")
-	}
-	var record inventory.Record
-	if err = json.Unmarshal(objects.objects["checkpoints/"+owner+"/metadata.json"], &record); err != nil {
+	record, err := checkpoints.GetCheckpoint(context.Background(), owner)
+	if err != nil {
 		t.Fatal("checkpointing index missing:", err)
 	}
 	var metadata map[string]json.RawMessage
@@ -309,11 +294,11 @@ func TestCheckpointingInventoryPublishesBeforeArchiveUpload(t *testing.T) {
 		if state.phase == "Deleting" {
 			copy.DeletionTimestamp = &meta.Time{Time: time.Now()}
 		}
-		if err = (&Backend{Objects: objects}).SyncInventory(context.Background(), copy); err != nil {
+		if err = (&Backend{Checkpoints: checkpoints}).SyncInventory(context.Background(), copy); err != nil {
 			t.Fatalf("publish %s index: %v", state.phase, err)
 		}
-		var record inventory.Record
-		if err = json.Unmarshal(objects.objects["checkpoints/"+owner+"/metadata.json"], &record); err != nil {
+		record, err := checkpoints.GetCheckpoint(context.Background(), owner)
+		if err != nil {
 			t.Fatal(err)
 		}
 		var metadata map[string]json.RawMessage
@@ -413,23 +398,29 @@ func TestPrepareMissingLocalCheckpointNeverDownloadsRemoteCopy(t *testing.T) {
 func TestForgetOnlyDeletesInventoryAndLocalOwnerFiles(t *testing.T) {
 	base := t.TempDir()
 	objects := &memoryObjects{objects: map[string][]byte{
-		"checkpoints/owner/metadata.json": []byte("index"),
 		"checkpoints/owner/snapshot.tar":  []byte("legacy"),
 		"checkpoints/other/metadata.json": []byte("other"),
+	}}
+	checkpoints := &memoryCheckpointStore{records: map[string]inventory.Record{
+		"owner": {RuntimeID: "owner", Snapshot: "snapshot"},
+		"other": {RuntimeID: "other", Snapshot: "other-snapshot"},
 	}}
 	path := filepath.Join(base, "workloads", "owner")
 	if err := os.MkdirAll(path, 0700); err != nil {
 		t.Fatal(err)
 	}
-	b := &Backend{Base: base, Objects: objects}
+	b := &Backend{Base: base, Objects: objects, Checkpoints: checkpoints}
 	if err := b.Forget(context.Background(), testWorkload("owner", "snapshot", "spec", "image")); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := objects.objects["checkpoints/owner/metadata.json"]; ok {
+	if _, err := checkpoints.GetCheckpoint(context.Background(), "owner"); !errors.Is(err, inventory.ErrNotFound) {
 		t.Fatal("inventory remains")
 	}
 	if len(objects.objects) != 2 || objects.deleteCalls != 0 {
-		t.Fatal("cleanup scanned or deleted remote checkpoint content")
+		t.Fatal("cleanup scanned or deleted checkpoint payloads")
+	}
+	if _, err := checkpoints.GetCheckpoint(context.Background(), "other"); err != nil {
+		t.Fatal("Forget deleted another runtime's checkpoint inventory:", err)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("local checkpoint remains", err)

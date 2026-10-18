@@ -1,18 +1,5 @@
 components:
   parameters:
-    IdempotencyKey:
-      description: Scoped by client, action and target. Reuse identical input to retrieve
-        original operation, including after restart. Completed operation details are
-        retained for operationRetentionSeconds (default 86400). After history expires,
-        the key remains reserved and returns 410 OPERATION_EXPIRED without executing
-        the request again. Running or unknown executions are not expired.
-      in: header
-      name: Idempotency-Key
-      required: true
-      schema:
-        maxLength: 200
-        minLength: 1
-        type: string
   requestBodies:
     LifecyclePrecondition:
       required: false
@@ -25,7 +12,7 @@ components:
               expectedGeneration:
                 type: integer
                 minimum: 1
-                description: Atomically checked on fresh admission; a mismatch returns STALE_GENERATION without executing. An existing Idempotency-Key replays its original operation without rechecking this precondition. Empty request bodies remain supported.
+                description: Checked when the request is accepted. Empty request bodies remain supported.
   responses:
     Error:
       content:
@@ -34,7 +21,7 @@ components:
             $ref: '#/components/schemas/Error'
       description: 'Structured error: 400 invalid input, 401 unauthenticated, 403
         denied, 404 missing or not owned, 409 conflict/busy/stale generation, 410 expired result or operation, 422
-        unsupported, 502 runtime failure, 504 timeout or UNKNOWN_OUTCOME when a template desired state was saved but publishing has not yet been confirmed.'
+        unsupported, 502 runtime failure, 504 timeout, or UNKNOWN_OUTCOME when an accepted operation has no confirmed result.'
   schemas:
     Template:
       additionalProperties: false
@@ -127,7 +114,7 @@ components:
         generation: {type: integer}
         observedGeneration: {type: integer}
         desiredSlots: {type: integer}
-        syncStatus: {type: string, enum: [pending, applied, error, unsupported]}
+        syncStatus: {type: string, enum: [pending, applied, unsupported]}
         error: {type: string}
         observedAt: {type: string, format: date-time}
         stale: {type: boolean}
@@ -172,15 +159,9 @@ components:
           type: string
         imageId:
           type: string
-        importedImageId:
-          description: Imported image dependency captured by the archive. Restore always requires an explicit target template.
-          type: string
-        preparedImage:
-          description: Prepared image reference captured independently of the source box.
-          type: string
         manifestVersion:
-          description: Version 1 includes image dependencies independently of the source box.
           type: integer
+          description: Archive manifest version used to validate the stored payload.
         portable:
           type: boolean
         profileId:
@@ -273,15 +254,10 @@ components:
           enum:
           - creating
           - running
-          - freezing
-          - frozen
-          - unfreezing
           - checkpointing
           - suspending
           - suspended
           - resuming
-          - rebuilding
-          - upgrading
           - restoring
           - staged
           - deleting
@@ -289,8 +265,6 @@ components:
           - failed
           type: string
         workspace:
-          type: string
-        importedImageId:
           type: string
       required:
       - id
@@ -312,13 +286,12 @@ components:
       additionalProperties: false
       properties:
         archives:
-          const: workspace-best-effort
+          enum: [none, stopped-workspace]
           type: string
+          description: Profile/runtime support for stopped workspace capture. Archive operations also require node archive support and configured object storage.
         exec:
           type: boolean
         files:
-          type: boolean
-        freeze:
           type: boolean
         http:
           type: boolean
@@ -326,10 +299,10 @@ components:
           type: boolean
         credentialBatch:
           type: boolean
-          description: The API accepts generation-fenced batch credential writes. Older Guest images may require the single-slot endpoint.
+          description: Kubernetes only. Docker reports false and returns UNSUPPORTED_CAPABILITY for credential writes.
         internalServices:
           type: boolean
-          description: Clients can connect to HTTP/WebSocket services without creating browser routes or grants.
+          description: Direct HTTP/WebSocket service proxy support.
         rootDebug:
           type: boolean
           description: Admitted tools run as debug UID/GID zero and can read agent-owned private workspace files without permission changes.
@@ -356,9 +329,6 @@ components:
           type: string
         websocket:
           type: boolean
-        diskArchives:
-          type: boolean
-          description: Supports stopping execution and archiving persistent workspace without a process checkpoint.
       required:
       - exec
       - files
@@ -366,7 +336,6 @@ components:
       - websocket
       - pty
       - reconnectExec
-      - freeze
       - suspend
       - archives
       - protectedTools
@@ -380,7 +349,7 @@ components:
         staged:
           type: boolean
           default: false
-          description: Start guest control and hold the workload until explicit activation.
+          description: Kubernetes only. Start guest control and hold the workload until explicit activation; Docker returns UNSUPPORTED_CAPABILITY.
         ownerKey:
           maxLength: 256
           minLength: 1
@@ -505,39 +474,8 @@ components:
       - uid
       - gid
       type: object
-    Lease:
-      additionalProperties: false
-      properties:
-        boxId:
-          type: string
-        expiresAt:
-          format: date-time
-          type: string
-        id:
-          type: string
-        purpose:
-          type: string
-      required:
-      - id
-      - boxId
-      - purpose
-      - expiresAt
-      type: object
-    LeaseInput:
-      additionalProperties: false
-      properties:
-        purpose:
-          maxLength: 256
-          type: string
-        ttlSeconds:
-          default: 60
-          maximum: 3600
-          minimum: 1
-          type: integer
-      required: []
-      type: object
     Operation:
-      description: A lifecycle operation or a local template build. The id prefix and kind identify the matching shape.
+      description: An accepted runtime operation or a template build. Interrupted work after restart is reported failed with UNKNOWN_OUTCOME and is not rerun.
       oneOf:
       - $ref: '#/components/schemas/RuntimeOperation'
       - $ref: '#/components/schemas/TemplateBuildOperation'
@@ -590,7 +528,6 @@ components:
         code: {type: string}
         message: {type: string}
       required: [code, message]
-      type: object
       type: object
     Profile:
       additionalProperties: false
@@ -649,10 +586,14 @@ components:
       oneOf:
       - required: [templateId]
       - required: [revisionId]
-      description: Restore always uses the explicitly selected template. acceptImageChange is required when its resolved image differs from the archive image; the archive must be portable and agent UID/GID must still match.
+      description: Restore the archive into a new empty staged Kubernetes sandbox using its template or revision image and runtime configuration. The caller provisions credentials and explicitly activates it. A failed restore candidate is terminal and should be destroyed. Docker returns UNSUPPORTED_CAPABILITY.
       properties:
         archiveId:
           type: string
+        acceptImageChange:
+          type: boolean
+          default: false
+          description: Allow a portable archive to restore into a revision with a different image identity. Restore still requires a compatible guest agent identity.
         ownerKey:
           maxLength: 256
           minLength: 1
@@ -663,45 +604,7 @@ components:
         revisionId:
           type: string
           minLength: 1
-        acceptImageChange:
-          type: boolean
-          description: Explicitly allow a validated portable workspace archive to restore into a different immutable image. Agent UID/GID must still match.
-      description: Choose exactly one of templateId (resolves current stable revision) or revisionId.
       required: [ownerKey, archiveId]
-      type: object
-    Route:
-      additionalProperties: false
-      description: Process-local preview route; recreate it after API restart.
-      properties:
-        boxId:
-          type: string
-        id:
-          type: string
-        port:
-          type: integer
-        url:
-          format: uri
-          type: string
-      required:
-      - id
-      - boxId
-      - port
-      - url
-      type: object
-    RouteInput:
-      additionalProperties: false
-      properties:
-        boxId:
-          type: string
-        port:
-          maximum: 65535
-          minimum: 1
-          not:
-            const: 40000
-          type: integer
-      required:
-      - boxId
-      - port
       type: object
     ToolRequest:
       additionalProperties: false
@@ -717,122 +620,12 @@ components:
           type: integer
       required: []
       type: object
-    ImportedImage:
-      additionalProperties: false
-      properties:
-        id:
-          type: string
-        source:
-          type: string
-        resolvedSource:
-          type: string
-        image:
-          type: string
-        platform:
-          type: string
-        workingDir:
-          type: string
-        buildCommand:
-          type: string
-          description: Shell command executed during image preparation, when provided.
-        key:
-          type: string
-        command:
-          type: array
-          items:
-            type: string
-        warnings:
-          type: array
-          items:
-            type: string
-        env:
-          type: object
-          additionalProperties:
-            type: string
-        ports:
-          type: array
-          items:
-            type: integer
-            minimum: 1
-            maximum: 65535
-        createdAt:
-          type: string
-          format: date-time
-        deleting:
-          type: boolean
-      required:
-      - id
-      - source
-      - resolvedSource
-      - image
-      - platform
-      - workingDir
-      - key
-      - command
-      - warnings
-      - env
-      - ports
-      - createdAt
-      type: object
-    ImageUsage:
-      additionalProperties: false
-      properties:
-        deletable:
-          type: boolean
-        blockers:
-          type: array
-          items:
-            type: string
-        manifestShared:
-          type: boolean
-      required:
-      - deletable
-      - blockers
-      - manifestShared
-      type: object
-    ImportImage:
-      type: object
-      additionalProperties: false
-      required:
-      - url
-      properties:
-        url:
-          type: string
-          description: 'Docker pull reference: repository:tag or repository@sha256:digest.
-            HTTP download URLs are not supported.'
-        runCommand:
-          type: string
-          maxLength: 65536
-          description: One literal docker run command. Supports env, workdir, entrypoint
-            and TCP publish metadata. No shell expansion or host mounts.
-        buildCommand:
-          type: string
-          maxLength: 65536
-          description: Optional shell script executed as root inside BuildKit using
-            /bin/sh -c before Cellbox guest injection. Uses the source image ENV and
-            WorkingDir; the source must provide /bin/sh. Included in image cache identity.
-        platform:
-          type: string
-          enum:
-          - linux/amd64
-          default: linux/amd64
-        registryAuth:
-          type: object
-          additionalProperties: false
-          required:
-          - username
-          - password
-          properties:
-            username:
-              type: string
-            password:
-              type: string
-              writeOnly: true
+    get:
 info:
   description: Internal-network sandbox infrastructure. Control and service APIs require
     no token or browser authorization. X-Cellbox-Client-ID optionally selects a data
-    and idempotency namespace, not an authenticated identity; the default is config.clientId,
-    or internal. Single-writer durable state; no automatic command replay or implicit wake.
+    namespace, not an authenticated identity; the default is config.clientId, or internal.
+    Single-writer durable state; interrupted operations are not automatically replayed.
   title: Cellbox REST API
   version: 0.1.0
 openapi: 3.1.0
@@ -987,7 +780,6 @@ paths:
     post:
       operationId: createBox
       parameters:
-      - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         content:
           application/json:
@@ -1009,13 +801,8 @@ paths:
       operationId: listCheckpoints
       summary: List checkpoint resources directly from object storage
       description: |
-        Lists checkpoint metadata objects and reads each record directly from OSS.
-        Records are scoped to the selected client namespace. No lifecycle phase is
-        filtered: checkpointing, suspending, suspended, resuming, failed, and deleting
-        records remain visible until the underlying resource is physically removed.
-        Suspended records require a committed snapshot and released source Pod.
-        No Kubernetes or service-ledger enumeration is performed. Concurrent object
-        deletion between LIST and GET is skipped; storage errors fail the entire list.
+        Lists client-owned checkpoint index records from local SQLite.
+        Snapshot files stay on the assigned node. This endpoint does not query Kubernetes.
       responses:
         "200":
           content:
@@ -1025,61 +812,6 @@ paths:
                   $ref: '#/components/schemas/Box'
                 type: array
           description: Success
-        default:
-          $ref: '#/components/responses/Error'
-  /v1/images:
-    post:
-      operationId: buildImage
-      parameters:
-      - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        content:
-          multipart/form-data:
-            schema:
-              type: object
-              required: [baseImage]
-              additionalProperties: false
-              properties:
-                baseImage:
-                  description: Immutable repository@sha256:digest base image.
-                  type: string
-                platform:
-                  description: Optional Linux platform such as linux/amd64.
-                  type: string
-                manifest:
-                  description: Optional JSON installed at /opt/product/manifest.json.
-                  type: string
-                product:
-                  description: Optional plain tar archive of regular product files.
-                  type: string
-                  format: binary
-        required: true
-      responses:
-        "202":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Operation'
-          description: Build queued; the operation result contains image, digest, tag and key.
-        default:
-          $ref: '#/components/responses/Error'
-      summary: Build and publish a Cellbox image with BuildKit
-    get:
-      operationId: listImportedImages
-      description: |
-        Lists image metadata objects in OSS and reads them for each request.
-        The mutation cache is not consulted. Records are scoped to the authenticated
-        client, deletion tombstones are omitted, and storage errors fail the list.
-      summary: List successfully imported images owned by this client
-      responses:
-        '200':
-          description: Success
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/ImportedImage'
         default:
           $ref: '#/components/responses/Error'
   /v1/boxes/{id}:
@@ -1107,10 +839,7 @@ paths:
       summary: Inspect owned box and refresh provider lifecycle phase
   /v1/boxes/{id}/archives:
     post:
-      description: result.archiveId identifies the capture. By default the source
-        runtime is not destroyed or suspended. diskOnly stops execution without a
-        process checkpoint and captures persistent workspace files even from a failed
-        runtime; its disk is retained on failure. Excludes credentials outside workspace.
+      description: Captures a suspended or failed Kubernetes sandbox with persistent HOME. Requires node archive support and configured object storage. The source is not resumed automatically. Excludes credentials outside workspace.
       operationId: captureArchive
       requestBody:
         required: false
@@ -1119,17 +848,12 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              properties:
-                diskOnly:
-                  type: boolean
-                  default: false
       parameters:
       - in: path
         name: id
         required: true
         schema:
           type: string
-      - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         "202":
           content:
@@ -1142,8 +866,9 @@ paths:
       summary: Capture a durable best-effort workspace archive
   /v1/boxes/{id}/credentials/{slot}:
     put:
-      description: 1..1048576 bytes. Slot must be referenced by an admitted tool. Secret
-        never enters public box metadata or archive.
+      description: Kubernetes only; Docker returns UNSUPPORTED_CAPABILITY. Body is
+        1..1048576 bytes. Slot must be referenced by an admitted tool. Secret never
+        enters public box metadata or archive.
       operationId: putCredential
       parameters:
       - in: path
@@ -1173,7 +898,7 @@ paths:
   /v1/boxes/{id}/credentials:
     put:
       summary: Install admitted credential slots in one generation-fenced request
-      description: A 204 response acknowledges all writes against the requested generation. A failed batch can have applied some slots; retry the complete batch. Values are base64 strings, each decoding to 1..1048576 bytes, at most 2097152 bytes total.
+      description: A 204 response acknowledges all writes against the requested generation. A failed request may have applied some slots; the API provides no atomicity or idempotency guarantee, so callers must decide how to handle an uncertain result. Values are base64 strings, each decoding to 1..1048576 bytes, at most 2097152 bytes total. Docker returns UNSUPPORTED_CAPABILITY.
       operationId: writeCredentialBatch
       parameters:
       - in: path
@@ -1210,7 +935,7 @@ paths:
   /v1/boxes/{id}/services/{port}/{path}:
     get:
       summary: Connect an owning backend client to a box HTTP or WebSocket service
-      description: Requires no authentication. Rejects the private control port and holds a lifecycle fence for the live connection. No route, grant, lease or ledger write is required. Application Authorization is forwarded separately from guest transport credentials. Other HTTP methods are also proxied.
+      description: Proxies HTTP and WebSocket traffic directly to the selected sandbox service. Application Authorization is forwarded separately from guest transport credentials. Other HTTP methods are also proxied.
       operationId: internalService
       parameters:
       - in: path
@@ -1234,7 +959,7 @@ paths:
   /v1/boxes/{id}/execs:
     post:
       description: result.execId identifies the execution. Outcome may be unknown
-        on interruption; never automatically replay. No PTY or stdin stream.
+        on interruption. Each submission is an independent operation. No PTY or stdin stream.
       operationId: createExec
       parameters:
       - in: path
@@ -1242,7 +967,6 @@ paths:
         required: true
         schema:
           type: string
-      - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         content:
           application/json:
@@ -1389,36 +1113,12 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       summary: Write workspace bytes with agent ownership
-  /v1/boxes/{id}/leases:
-    post:
-      operationId: createLease
-      parameters:
-      - in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/LeaseInput'
-        required: true
-      responses:
-        "201":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Lease'
-          description: Success
-        default:
-          $ref: '#/components/responses/Error'
-      summary: Prevent lifecycle changes during product work
   /v1/boxes/{id}/tools/{tool}:
     post:
-      description: Arguments are validated against full-match patterns. Tool definitions
-        are server profile configuration; arbitrary debug commands are forbidden.
-        This synchronous request is not replay safe.
+      description: Kubernetes only. Docker returns UNSUPPORTED_CAPABILITY. Arguments
+        are validated against full-match patterns. Tool definitions are server profile
+        configuration; arbitrary debug commands are forbidden. Tool execution may
+        have side effects and has no idempotency or replay guarantee.
       operationId: runTool
       parameters:
       - in: path
@@ -1451,9 +1151,7 @@ paths:
     post:
       requestBody:
         $ref: '#/components/requestBodies/LifecyclePrecondition'
-      description: An active operation, service request, or unexpired usage lease
-        blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
-        never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
+      description: An active operation or command blocks lifecycle changes. Docker staged activation is unsupported.
       operationId: activateBox
       parameters:
       - in: path
@@ -1461,7 +1159,6 @@ paths:
         required: true
         schema:
           type: string
-      - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         "202":
           content:
@@ -1476,9 +1173,7 @@ paths:
     post:
       requestBody:
         $ref: '#/components/requestBodies/LifecyclePrecondition'
-      description: An active operation, service request, or unexpired usage lease
-        blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
-        never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
+      description: An active operation or command blocks lifecycle changes.
       operationId: destroyBox
       parameters:
       - in: path
@@ -1486,7 +1181,6 @@ paths:
         required: true
         schema:
           type: string
-      - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         "202":
           content:
@@ -1497,130 +1191,11 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       summary: Delete runtime while retaining archives
-  /v1/boxes/{id}:freeze:
-    post:
-      requestBody:
-        $ref: '#/components/requestBodies/LifecyclePrecondition'
-      description: An active operation, service request, or unexpired usage lease
-        blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
-        never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
-      operationId: freezeBox
-      parameters:
-      - in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        "202":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Operation'
-          description: Success
-        default:
-          $ref: '#/components/responses/Error'
-      summary: Pause a Docker container
-  /v1/boxes/{id}:reconcile:
-    post:
-      requestBody:
-        $ref: '#/components/requestBodies/LifecyclePrecondition'
-      description: An active operation, service request, or unexpired usage lease
-        blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
-        never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
-      operationId: reconcileBox
-      parameters:
-      - in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        "202":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Operation'
-          description: Success
-        default:
-          $ref: '#/components/responses/Error'
-      summary: Explicitly recover observed state after an interrupted operation
-  /v1/boxes/{id}:rebuild:
-    post:
-      requestBody:
-        $ref: '#/components/requestBodies/LifecyclePrecondition'
-      description: Explicitly cold-start a failed same-node Box using its existing validated persistent HOME. Preserves Box identity and latest disk contents, discards checkpoint state, and never restores an archive. Missing or invalid HOME stops the operation. Active operations, executions and leases block rebuilding.
-      operationId: rebuildBox
-      parameters:
-      - in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        "202":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Operation'
-          description: Success
-        default:
-          $ref: '#/components/responses/Error'
-      summary: Rebuild a failed Box from its persistent HOME
-  /v1/boxes/{id}:upgrade:
-    post:
-      description: Stop the previous execution before starting an imported image on the same owned disk. Invalidates old checkpoints, preserves Box and disk identity, and returns a staged Guest requiring credential provisioning and explicit activation. Running, suspended, and failed persistent Boxes are supported. Active operations, leases and executions block upgrading. No archive is used.
-      operationId: upgradeBox
-      parameters:
-      - in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              oneOf:
-              - required: [templateId]
-              - required: [revisionId]
-              properties:
-                templateId:
-                  type: string
-                  minLength: 1
-                revisionId:
-                  type: string
-                  minLength: 1
-      responses:
-        "202":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Operation'
-          description: Success
-        default:
-          $ref: '#/components/responses/Error'
-      summary: Upgrade a Box image while retaining its persistent HOME
   /v1/boxes/{id}:resume:
     post:
       requestBody:
         $ref: '#/components/requestBodies/LifecyclePrecondition'
-      description: An active operation, service request, or unexpired usage lease
-        blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
-        never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
-        This endpoint waits synchronously and returns a succeeded Operation with HTTP 200,
-        or a standard error response if resume fails. Disconnecting does not cancel
-        accepted work; retry the same Idempotency-Key to wait for its result.
-        Resume completion confirms the runtime is running and the Guest has been
-        unquiesced. Guest health checks run asynchronously and report diagnostics
-        without delaying completion or changing the box lifecycle phase.
+      description: Accepts a resume operation for a suspended Kubernetes sandbox. The caller can query its operation ID; Cellbox does not replay interrupted work after restart.
       operationId: resumeBox
       parameters:
       - in: path
@@ -1628,52 +1203,21 @@ paths:
         required: true
         schema:
           type: string
-      - $ref: '#/components/parameters/IdempotencyKey'
       responses:
-        "200":
+        "202":
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Operation'
-          description: Resume completed successfully and the operation result is durable.
+          description: Resume operation accepted.
         default:
           $ref: '#/components/responses/Error'
       summary: Restore a resumable Kubernetes checkpoint
-  /v1/boxes/{id}:ensure-running:
-    post:
-      requestBody:
-        $ref: '#/components/requestBodies/LifecyclePrecondition'
-      description: Idempotently ensures the Box is running. A running Box returns
-        an immediate successful snapshot even while executions or usage leases are
-        active. A suspended Box is resumed and unquiesced; active work blocks that
-        transition. Concurrent ensure-running requests join the existing resume
-        intent. This endpoint waits synchronously for a durable terminal Operation.
-        Guest health checks run asynchronously and do not delay completion.
-      operationId: ensureBoxRunning
-      parameters:
-      - in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        "200":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Operation'
-          description: The Box is running and the terminal operation includes its snapshot.
-        default:
-          $ref: '#/components/responses/Error'
-      summary: Ensure a Box is running
   /v1/boxes/{id}:suspend:
     post:
       requestBody:
         $ref: '#/components/requestBodies/LifecyclePrecondition'
-      description: An active operation, service request, or unexpired usage lease
-        blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
-        never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
+      description: An active operation or command blocks lifecycle changes. Docker suspend/resume is unsupported.
       operationId: suspendBox
       parameters:
       - in: path
@@ -1681,7 +1225,6 @@ paths:
         required: true
         schema:
           type: string
-      - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         "202":
           content:
@@ -1692,38 +1235,11 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       summary: Checkpoint a resumable Kubernetes box on its node
-  /v1/boxes/{id}:unfreeze:
-    post:
-      requestBody:
-        $ref: '#/components/requestBodies/LifecyclePrecondition'
-      description: An active operation, service request, or unexpired usage lease
-        blocks lifecycle changes. Docker suspend/resume is unsupported. Reconcile
-        never reruns an interrupted exec or resumes a failed archive restore. For an already activated running Box, Reconcile idempotently starts its workload if needed.
-      operationId: unfreezeBox
-      parameters:
-      - in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        "202":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Operation'
-          description: Success
-        default:
-          $ref: '#/components/responses/Error'
-      summary: Unpause a Docker container
   /v1/boxes:restore:
     post:
-      description: Requires exact prepared image identity and agent UID/GID. Product
-        workload is held until activate. Failed candidates must be destroyed.
+      description: Restore an archive into a new empty staged Kubernetes sandbox. The caller provisions credentials and explicitly activates it. Failed restore candidates are terminal and should be destroyed. Docker returns UNSUPPORTED_CAPABILITY.
       operationId: restoreBox
       parameters:
-      - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         content:
           application/json:
@@ -1762,45 +1278,6 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       summary: Get recorded execution output and status
-  /v1/leases/{id}:
-    delete:
-      operationId: releaseLease
-      parameters:
-      - in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      responses:
-        "204":
-          description: Success
-        default:
-          $ref: '#/components/responses/Error'
-      summary: Release usage lease
-    patch:
-      operationId: renewLease
-      parameters:
-      - in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/LeaseInput'
-        required: true
-      responses:
-        "200":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Lease'
-          description: Success
-        default:
-          $ref: '#/components/responses/Error'
-      summary: Renew an unexpired usage lease
   /v1/operations/{id}:
     get:
       operationId: getOperation
@@ -2069,9 +1546,8 @@ paths:
       summary: List template revisions
     post:
       operationId: buildTemplateRevision
-      description: Queues a BuildKit operation using a resolved immutable base image. The build command executes inside the image build, and runCommand is applied when creating a sandbox. No Kubernetes APIs are queried by this endpoint.
+      description: Queues a BuildKit operation using a resolved immutable base image. The build command executes inside the image build, and runCommand is applied when creating a sandbox. Each submission creates an independent build operation. No Kubernetes APIs are queried by this endpoint.
       parameters:
-      - $ref: '#/components/parameters/IdempotencyKey'
       - in: path
         name: id
         required: true
@@ -2146,17 +1622,14 @@ paths:
   /v1/template-revisions/{id}/warm-pool:
     get:
       operationId: getRevisionWarmPool
-      summary: Get cached warm-pool synchronization and inventory status
+      summary: Get the latest observed warm-pool status
       description: |
-        Returns a background-observed snapshot; this request does not call Kubernetes.
-        Active revisions with warmSlots greater than zero publish demand after a
-        successful build. Zero slots or retirement withdraws demand. Compatible
-        revisions can share a pool; changing the stable revision does not withdraw
-        demand from the previous revision. Node capacity defaults to 2 slots and is
-        configurable up to 32. Snapshot fields include observedAt and stale; pool
-        is null when no pool is currently associated. Resource values are
-        configured requests/limits, not measured usage. Do not sum resources across
-        revisions without deduplicating by poolId.
+        Desired revision configuration is read from SQLite and the latest controller
+        observation held by the provider is returned. This request does not query
+        Kubernetes. Compatible revisions can share a pool. observedAt and stale
+        describe the runtime observation; pool is null when no pool is associated.
+        Resource values are configured requests/limits, not measured usage. Do not
+        sum resources across revisions without deduplicating by poolId.
       parameters:
       - in: path
         name: id
@@ -2164,7 +1637,7 @@ paths:
         schema: {type: string}
       responses:
         "200":
-          description: Background warm-pool observation
+          description: Latest warm-pool observation
           content:
             application/json:
               schema: {$ref: '#/components/schemas/RevisionWarmStatus'}
@@ -2173,11 +1646,13 @@ paths:
   /v1/templates/{id}/runtime:
     get:
       operationId: getTemplateRuntime
-      summary: Get cached sandbox usage and warm-pool status for template revisions
+      summary: Get current sandbox usage and observed warm-pool status for template revisions
       description: |
-        Returns last background observations and does not call Kubernetes in the
-        request. sandboxCount may be null when no reliable observation is available;
-        check stale and observedAt before using counts.
+        Sandbox usage is read for this request from the Kubernetes resource inventory
+        (without listing Pods), or from SQLite for Docker. Warm-pool status comes from
+        the latest provider-held controller observation; desired configuration is
+        read from SQLite. On inventory failure sandboxCount is null and stale is true.
+        Check observedAt and stale before using either observation.
       parameters:
       - in: path
         name: id
@@ -2185,110 +1660,12 @@ paths:
         schema: {type: string}
       responses:
         "200":
-          description: Background runtime observations
+          description: Current inventory result and latest warm-pool observation
           content:
             application/json:
               schema: {$ref: '#/components/schemas/TemplateRuntimeStatus'}
         default:
           $ref: '#/components/responses/Error'
-  /v1/routes:
-    post:
-      description: One route per box/port; duplicate registration returns the existing
-        route. No browser session, bearer token or grant is required.
-      operationId: createRoute
-      parameters: []
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RouteInput'
-        required: true
-      responses:
-        "201":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Route'
-          description: Success
-        default:
-          $ref: '#/components/responses/Error'
-      summary: Register a service route without authentication
-  /v1/images:import:
-    post:
-      operationId: importImage
-      summary: Resolve a user image, inject the guest and publish a reusable sandbox
-        image
-      parameters:
-      - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ImportImage'
-      responses:
-        '202':
-          description: Success
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Operation'
-        default: &id001
-          $ref: '#/components/responses/Error'
-  /v1/images/{id}:
-    get:
-      operationId: getImportedImage
-      summary: Get an imported image and its effective startup settings
-      parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: string
-      responses:
-        '200':
-          description: Success
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ImportedImage'
-        default: *id001
-    delete:
-      operationId: deleteImportedImage
-      summary: Delete an unused imported image and its prepared registry manifest
-      parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: string
-      - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        '202':
-          description: Deletion operation accepted
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Operation'
-        default: *id001
-  /v1/images/{id}/usage:
-    get:
-      operationId: getImportedImageUsage
-      summary: Check whether an imported image can be deleted
-      parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: string
-      responses:
-        '200':
-          description: Generic usage blockers and manifest sharing status
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ImageUsage'
-        default: *id001
 security: []
 servers:
 - description: Local default; use TLS for remote deployment

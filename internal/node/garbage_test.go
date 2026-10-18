@@ -2,16 +2,19 @@ package node
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"cellbox.local/cellbox/internal/inventory"
 )
 
 func TestSnapshotCleanupSurvivesRestartAndPreservesNextCheckpoint(t *testing.T) {
 	ctx := context.Background()
-	objects := &memoryObjects{objects: map[string][]byte{"checkpoints/owner/checkpoint-1.tar": []byte("old"), "checkpoints/owner/metadata.json": []byte(`{"runtimeId":"owner","snapshot":"checkpoint-1"}`)}}
+	checkpoints := &memoryCheckpointStore{records: map[string]inventory.Record{"owner": {RuntimeID: "owner", Snapshot: "checkpoint-1"}}}
 	base := t.TempDir()
-	b := &Backend{Base: base, Objects: objects}
+	b := &Backend{Base: base, Checkpoints: checkpoints}
 	w := testWorkload("owner", "checkpoint-1", "spec", "image")
 	old, _ := SnapshotPath(base, "owner", "checkpoint-1")
 	if err := os.MkdirAll(old, 0700); err != nil {
@@ -20,30 +23,25 @@ func TestSnapshotCleanupSurvivesRestartAndPreservesNextCheckpoint(t *testing.T) 
 	if err := b.InvalidateSnapshot(ctx, w); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := objects.objects["checkpoints/owner/metadata.json"]; ok {
-		t.Fatal("consumed snapshot still published")
+	if _, err := checkpoints.GetCheckpoint(ctx, "owner"); !errors.Is(err, inventory.ErrNotFound) {
+		t.Fatalf("consumed snapshot still published: %v", err)
 	}
-	if _, ok := objects.objects["checkpoints/owner/checkpoint-1.tar"]; !ok {
-		t.Fatal("invalidation waited for physical cleanup")
+	if err := checkpoints.PutCheckpoint(ctx, inventory.Record{RuntimeID: "owner", Snapshot: "checkpoint-2"}); err != nil {
+		t.Fatal(err)
 	}
-	objects.objects["checkpoints/owner/checkpoint-2.tar"] = []byte("new")
-	objects.objects["checkpoints/owner/metadata.json"] = []byte("new-index")
 	next, _ := SnapshotPath(base, "owner", "checkpoint-2")
 	if err := os.MkdirAll(next, 0700); err != nil {
 		t.Fatal(err)
 	}
-	b = &Backend{Base: base, Objects: objects}
+	b = &Backend{Base: base, Checkpoints: checkpoints}
 	if err := b.CollectGarbage(ctx); err != nil {
 		t.Fatal(err)
-	}
-	if _, ok := objects.objects["checkpoints/owner/checkpoint-1.tar"]; !ok {
-		t.Fatal("local garbage collection touched a legacy remote snapshot")
 	}
 	if err := b.InvalidateSnapshot(ctx, w); err != nil {
 		t.Fatal(err)
 	}
-	if string(objects.objects["checkpoints/owner/metadata.json"]) != "new-index" || string(objects.objects["checkpoints/owner/checkpoint-2.tar"]) != "new" {
-		t.Fatal("old cleanup removed new checkpoint")
+	if record, err := checkpoints.GetCheckpoint(ctx, "owner"); err != nil || record.Snapshot != "checkpoint-2" {
+		t.Fatalf("old cleanup removed new checkpoint: record=%+v err=%v", record, err)
 	}
 	if _, err := os.Stat(next); err != nil {
 		t.Fatal("new cache removed", err)
@@ -57,16 +55,27 @@ func TestSnapshotCleanupSurvivesRestartAndPreservesNextCheckpoint(t *testing.T) 
 	if err := b.prepareSnapshot(ctx, w); err == nil {
 		t.Fatal("consumed snapshot accepted for another execution")
 	}
-	// An interrupted invalidation has not revoked remote replay eligibility;
-	// its intent must not be collected until invalidation is retried.
+	// An interrupted invalidation must not be collected until the DB deletion is retried.
 	if err := AtomicJSON(filepath.Join(base, "garbage", "owner", "checkpoint-3.intent"), snapshotGarbage{Owner: "owner", Snapshot: "checkpoint-3"}); err != nil {
 		t.Fatal(err)
 	}
-	objects.objects["checkpoints/owner/checkpoint-3.tar"] = []byte("pending")
+	pending, _ := SnapshotPath(base, "owner", "checkpoint-3")
+	if err := os.MkdirAll(pending, 0700); err != nil {
+		t.Fatal(err)
+	}
 	if err := b.CollectGarbage(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if string(objects.objects["checkpoints/owner/checkpoint-3.tar"]) != "pending" {
+	if _, err := os.Stat(pending); err != nil {
 		t.Fatal("uncommitted invalidation was collected")
+	}
+	if err := checkpoints.PutCheckpoint(ctx, inventory.Record{RuntimeID: "owner", Snapshot: "checkpoint-3"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.InvalidateSnapshot(ctx, testWorkload("owner", "checkpoint-3", "spec", "image")); err != nil {
+		t.Fatal("restart did not finish checkpoint deletion:", err)
+	}
+	if _, err := checkpoints.GetCheckpoint(ctx, "owner"); !errors.Is(err, inventory.ErrNotFound) {
+		t.Fatalf("checkpoint index remains after resumed invalidation: %v", err)
 	}
 }

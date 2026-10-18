@@ -16,7 +16,13 @@ type RevisionRecord struct {
 // RuntimeRevisions reads all revisions in one SQLite snapshot. Retired and
 // zero-slot revisions are included so reconciliation can withdraw old demand.
 func (m *Manager) RuntimeRevisions(ctx context.Context) ([]RevisionRecord, error) {
-	rows, err := m.db.QueryContext(ctx, "SELECT client_id,record,profile FROM template_revisions ORDER BY id")
+	return m.runtimeRevisions(ctx, "", nil)
+}
+func (m *Manager) TemplateRuntimeRevisions(ctx context.Context, client, id string) ([]RevisionRecord, error) {
+	return m.runtimeRevisions(ctx, " WHERE client_id=? AND template_id=?", []any{client, id})
+}
+func (m *Manager) runtimeRevisions(ctx context.Context, where string, args []any) ([]RevisionRecord, error) {
+	rows, err := m.db.QueryContext(ctx, "SELECT client_id,record,profile FROM template_revisions"+where+" ORDER BY id", args...)
 	if err != nil {
 		return nil, err
 	}

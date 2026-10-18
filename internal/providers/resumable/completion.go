@@ -8,150 +8,66 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"os"
 	"strings"
-	"time"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/boxprovider"
 	"cellbox.local/cellbox/internal/telemetry"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/watch"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const observationBuffer = 8
 
-// WatchObservations establishes a watch at a current collection resourceVersion.
-// An unchanged object's own version may have expired from the watch history.
-// Events carry their complete CR state, with no follow-up CR or Pod read.
-// Reconnects take one fresh filtered LIST snapshot and watch from its version.
+// WatchObservations subscribes to committed snapshots from the embedded
+// controller. Separate-process watch polling is unsupported.
 func (p *Provider) WatchObservations(ctx context.Context, h boxprovider.Handle) (<-chan boxprovider.Observation, error) {
-	c, ok := p.Client.(client.WithWatch)
-	if !ok {
-		return nil, errors.New("Kubernetes client does not support watches")
+	if p == nil || p.Local == nil {
+		return nil, errors.New("embedded runtime control is required")
 	}
-	initial, stream, err := p.openObservationWatch(ctx, c, h)
+	return p.watchLocalObservations(ctx, h)
+}
+
+// The embedded runtime publishes complete, committed snapshots directly. Only
+// the initial subscription reads Kubernetes; completions need no watch or GET.
+func (p *Provider) watchLocalObservations(ctx context.Context, h boxprovider.Handle) (<-chan boxprovider.Observation, error) {
+	if err := validateHandle(h); err != nil {
+		return nil, err
+	}
+	snapshots, stop, err := p.Local.Subscribe(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name})
+	if apierrors.IsNotFound(err) {
+		return nil, boxprovider.ErrNotFound
+	}
 	if err != nil {
 		return nil, err
 	}
 	out := make(chan boxprovider.Observation, observationBuffer)
-	go p.runObservationWatch(ctx, c, h, out, initial, stream)
-	return out, nil
-}
-
-func (p *Provider) openObservationWatch(ctx context.Context, c client.WithWatch, h boxprovider.Handle) (boxprovider.Observation, watch.Interface, error) {
-	if err := validateHandle(h); err != nil {
-		return boxprovider.Observation{}, nil, err
-	}
-	snapshot := &api.ResumablePodList{}
-	if err := c.List(ctx, snapshot, client.InNamespace(h.Namespace), client.MatchingFields{"metadata.name": h.Name}); err != nil {
-		return boxprovider.Observation{}, nil, err
-	}
-	if len(snapshot.Items) != 1 || !validObservationIdentity(&snapshot.Items[0], h) {
-		return boxprovider.Observation{}, nil, boxprovider.ErrNotFound
-	}
-	if snapshot.ResourceVersion == "" {
-		return boxprovider.Observation{}, nil, errors.New("watch snapshot has no collection resourceVersion")
-	}
-	w := &snapshot.Items[0]
-	stream, err := c.Watch(ctx, &api.ResumablePodList{}, &client.ListOptions{Namespace: h.Namespace,
-		Raw: &meta.ListOptions{ResourceVersion: snapshot.ResourceVersion, FieldSelector: fields.OneTermEqualSelector("metadata.name", h.Name).String()}})
-	if err != nil {
-		return boxprovider.Observation{}, nil, err
-	}
-	return observationFromResource(w, false), stream, nil
-}
-
-func (p *Provider) runObservationWatch(ctx context.Context, c client.WithWatch, h boxprovider.Handle, out chan<- boxprovider.Observation,
-	initial boxprovider.Observation, stream watch.Interface) {
-	defer close(out)
-	defer func() {
-		if stream != nil {
-			stream.Stop()
+	go func() {
+		defer stop()
+		defer close(out)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case snapshot := <-snapshots:
+				deleted := snapshot.Deleted || !validObservationIdentity(snapshot.Resource, h)
+				observation := boxprovider.Observation{Phase: "deleted"}
+				if !deleted {
+					observation = observationFromResource(snapshot.Resource, false)
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case out <- observation:
+				}
+				if deleted {
+					return
+				}
+			}
 		}
 	}()
-	emit := func(observation boxprovider.Observation) bool {
-		select {
-		case out <- observation:
-			return true
-		case <-ctx.Done():
-			return false
-		}
-	}
-	if !emit(initial) {
-		return
-	}
-	reconnectDelay := 100 * time.Millisecond
-	for ctx.Err() == nil {
-		if stream == nil {
-			if !waitWatchRetry(ctx, reconnectDelay) {
-				return
-			}
-			reconnectDelay = min(reconnectDelay*2, 5*time.Second)
-			var err error
-			initial, stream, err = p.openObservationWatch(ctx, c, h)
-			if err != nil {
-				if errors.Is(err, boxprovider.ErrNotFound) {
-					emit(boxprovider.Observation{Phase: "deleted"})
-					return
-				}
-				continue
-			}
-			if !emit(initial) {
-				return
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case event, ok := <-stream.ResultChan():
-			if !ok || event.Type == watch.Error {
-				stream.Stop()
-				stream = nil
-
-				continue
-			}
-			if event.Type == watch.Bookmark {
-				reconnectDelay = 100 * time.Millisecond
-				continue
-			}
-			resource, ok := event.Object.(*api.ResumablePod)
-			if !ok || !validObservationIdentity(resource, h) {
-				// A same-name CR with a different UID is a new sandbox. Stop this
-				// handle's stream instead of publishing another execution's state.
-				emit(boxprovider.Observation{Phase: "deleted"})
-				return
-			}
-			if event.Type == watch.Deleted {
-				observation := observationFromResource(resource, true)
-				observation.Phase = "deleted"
-				if !emit(observation) {
-					return
-				}
-				return
-			}
-			if event.Type != watch.Added && event.Type != watch.Modified {
-				continue
-			}
-			reconnectDelay = 100 * time.Millisecond
-			if !emit(observationFromResource(resource, false)) {
-				return
-			}
-		}
-	}
-}
-
-func waitWatchRetry(ctx context.Context, delay time.Duration) bool {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
+	return out, nil
 }
 
 func validObservationIdentity(w *api.ResumablePod, h boxprovider.Handle) bool {
@@ -177,15 +93,6 @@ func observationFromResource(w *api.ResumablePod, deleted bool) boxprovider.Obse
 	}
 	if w.DeletionTimestamp != nil {
 		observation.Phase = "deleting"
-		return observation
-	}
-	if w.Spec.Upgrade != nil && w.Spec.Upgrade.Nonce != w.Status.UpgradeNonce {
-		observation.Phase, observation.ExecutionID = "creating", ""
-		return observation
-	}
-	if w.Status.Phase == "Failed" && w.Spec.PersistentHome && w.Spec.DesiredState == "Running" &&
-		w.Spec.RebuildNonce != "" && w.Spec.RebuildNonce != w.Status.RebuildNonce {
-		observation.Phase, observation.ExecutionID = "creating", ""
 		return observation
 	}
 	switch w.Status.Phase {

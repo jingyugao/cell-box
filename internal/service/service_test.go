@@ -9,8 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,6 +30,9 @@ func TestProfilePreservesExplicitRootDebugAndDefaultsOmittedIdentity(t *testing.
 	f := newCoreFixture(t)
 	c := f.config
 	p := &c.Profiles[0]
+	p.Provider = "resumable-k8s-pod"
+	p.Namespace, p.NodeName = "test", "test-node"
+	p.Image = "registry.example.test/agent@sha256:" + strings.Repeat("a", 64)
 	if err := json.Unmarshal([]byte(`{"workspace":"/workspace","debug":{"uid":0,"gid":0}}`), &p.Guest); err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +311,7 @@ func (f *coreFixture) template(t *testing.T) string {
 	return f.templateFor(t, f.service.config.Profiles[0], fmt.Sprintf("test-%d", time.Now().UnixNano()), "v1", "", 0)
 }
 
-func (f *coreFixture) templateFor(t *testing.T, profile Profile, name, version, importedImageID string, warmSlots int) string {
+func (f *coreFixture) templateFor(t *testing.T, profile Profile, name, version, _ string, warmSlots int) string {
 	t.Helper()
 	status, body := f.call(t, "POST", "/v1/templates", testClientToken, "", map[string]any{
 		"name": name, "defaultWarmSlots": warmSlots,
@@ -319,40 +320,7 @@ func (f *coreFixture) templateFor(t *testing.T, profile Profile, name, version, 
 	family := decodeResponse[catalog.Template](t, body)
 	baseImage := "registry.example.test/fixture-base:latest"
 	runCommand := ""
-	if importedImageID != "" {
-		var imported ImportedImage
-		if err := f.service.store.View(func(st State) error {
-			record, ok := st.ImportedImages[importedImageID]
-			if !ok || record.ClientID != "client-a" {
-				return fmt.Errorf("test imported image %s is unavailable", importedImageID)
-			}
-			baseImage = record.ImportedImage.Image
-			imported = record.ImportedImage
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-		args := []string{"docker", "run"}
-		if imported.WorkingDir != "" {
-			args = append(args, "--workdir", imported.WorkingDir)
-		}
-		keys := make([]string, 0, len(imported.Env))
-		for key := range imported.Env {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			args = append(args, "--env", key+"="+imported.Env[key])
-		}
-		args = append(args, baseImage)
-		args = append(args, imported.Command...)
-		for i, arg := range args {
-			args[i] = strconv.Quote(arg)
-		}
-		runCommand = strings.Join(args, " ")
-	}
-	key := fmt.Sprintf("build-%s-%s", name, version)
-	status, body = f.call(t, "POST", "/v1/templates/"+family.ID+"/revisions", testClientToken, key, map[string]any{
+	status, body = f.call(t, "POST", "/v1/templates/"+family.ID+"/revisions", testClientToken, "", map[string]any{
 		"userVersion": version, "baseImage": baseImage, "profileId": profile.ID, "runCommand": runCommand,
 	})
 	wantStatus(t, status, http.StatusAccepted, body)
@@ -373,6 +341,7 @@ func (f *coreFixture) templateFor(t *testing.T, profile Profile, name, version, 
 
 func TestStagedCreateHoldsWorkloadUntilActivation(t *testing.T) {
 	f := newCoreFixture(t)
+	useK3sProfile(t, f)
 	input := map[string]any{"templateId": f.template(t), "ownerKey": "staged-owner", "staged": true}
 	status, body := f.call(t, "POST", "/v1/boxes", testClientToken, "staged-create", input)
 	wantStatus(t, status, 202, body)
@@ -516,9 +485,11 @@ func TestRESTWithoutClientCredentialsOrProfileAdmission(t *testing.T) {
 	}
 	status, body = f.call(t, "POST", "/v1/boxes", "", "anonymous-create", map[string]string{"templateId": templateID, "ownerKey": "owner"})
 	wantStatus(t, status, 202, body)
-	if decodeResponse[Operation](t, body).ID != op.ID {
-		t.Fatal("anonymous retries lost their idempotency namespace")
+	second := decodeResponse[Operation](t, body)
+	if second.ID == op.ID {
+		t.Fatal("independent anonymous create was deduplicated")
 	}
+	f.waitOperation(t, second.ID, "succeeded")
 }
 
 func TestReadinessRetriesAStalledEndpointWithinStartupDeadline(t *testing.T) {
@@ -551,144 +522,26 @@ func TestReadinessRetriesAStalledEndpointWithinStartupDeadline(t *testing.T) {
 	}
 }
 
-func TestResumeCompletesWithUnhealthyGuestAndCancelsBackgroundProbe(t *testing.T) {
-	for _, stalled := range []bool{false, true} {
-		name := "HTTP503"
-		if stalled {
-			name = "stalled"
-		}
-		t.Run(name, func(t *testing.T) {
-			f := newCoreFixture(t)
-			var unquiesced atomic.Bool
-			probeStarted := make(chan struct{}, 1)
-			probeCanceled := make(chan struct{}, 1)
-			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch r.URL.Path {
-				case "/v1/unquiesce":
-					unquiesced.Store(true)
-					w.WriteHeader(http.StatusNoContent)
-				case "/healthz":
-					select {
-					case probeStarted <- struct{}{}:
-					default:
-					}
-					if stalled {
-						<-r.Context().Done()
-						select {
-						case probeCanceled <- struct{}{}:
-						default:
-						}
-						return
-					}
-					w.WriteHeader(http.StatusServiceUnavailable)
-				default:
-					http.NotFound(w, r)
-				}
-			}))
-			t.Cleanup(func() { f.service.cancel(); endpoint.Close() })
-			f.provider.mu.Lock()
-			f.provider.guestURL = endpoint.URL
-			f.provider.created = true
-			f.provider.mu.Unlock()
-			f.service.providers["resumable-k8s-pod"] = f.provider
-			profile := f.config.Profiles[0]
-			profile.Provider = "resumable-k8s-pod"
-			if err := f.service.store.Update(func(st *State) error {
-				st.Boxes["box-resume"] = boxRecord{
-					Box:      Box{ID: "box-resume", Phase: "suspended", Generation: 1},
-					ClientID: "client-a", Profile: profile,
-					Handle:      boxprovider.Handle{Provider: profile.Provider, ID: "runtime-resume"},
-					ExecutionID: "previous-execution",
-				}
-				return nil
-			}); err != nil {
-				t.Fatal(err)
-			}
-			op, err := f.service.action("client-a", "resume-async", "box-resume", "resume")
-			if err != nil {
-				t.Fatal(err)
-			}
-			f.waitOperation(t, op.ID, "succeeded")
-			if !unquiesced.Load() {
-				t.Fatal("resume completed before Guest accepted work")
-			}
-			select {
-			case <-probeStarted:
-			case <-time.After(time.Second):
-				t.Fatal("background health check did not start")
-			}
-			// A later lifecycle transition must not be overwritten by an old probe.
-			if err := f.service.store.Update(func(st *State) error {
-				b := st.Boxes[op.TargetID]
-				b.Box.Phase = "suspending"
-				b.Box.OperationID = "next-operation"
-				st.Boxes[op.TargetID] = b
-				return nil
-			}); err != nil {
-				t.Fatal(err)
-			}
-			if err := f.service.Close(); err != nil {
-				t.Fatal(err)
-			}
-			if stalled {
-				select {
-				case <-probeCanceled:
-				case <-time.After(time.Second):
-					t.Fatal("service shutdown did not cancel the background probe")
-				}
-			}
-			b, err := f.service.rawBox(op.TargetID)
-			if err != nil || b.Box.Phase != "suspending" || b.Box.OperationID != "next-operation" || b.Box.Error != nil {
-				t.Fatalf("background probe changed lifecycle state: %+v, %v", b.Box, err)
-			}
-		})
-	}
-}
-
-func TestRESTIdempotencyPersistsAcrossReopen(t *testing.T) {
+func TestRESTRepeatedCreateIsIndependentAcrossRestart(t *testing.T) {
 	f := newCoreFixture(t)
 	templateID := f.template(t)
-	createRequest := map[string]string{"templateId": templateID, "ownerKey": "owner-a"}
-	status, body := f.call(t, "POST", "/v1/boxes", testClientToken, "create-persist", createRequest)
-	wantStatus(t, status, 202, body)
-	createOp := decodeResponse[Operation](t, body)
-	f.waitOperation(t, createOp.ID, "succeeded")
-	status, body = f.call(t, "GET", "/v1/boxes/"+createOp.TargetID, testClientToken, "", nil)
-	wantStatus(t, status, 200, body)
-	box := decodeResponse[Box](t, body)
-	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "create-persist", createRequest)
-	wantStatus(t, status, 202, body)
-	if op := decodeResponse[Operation](t, body); op.ID != createOp.ID {
-		t.Fatalf("create replay returned %s, want %s", op.ID, createOp.ID)
+	input := map[string]string{"templateId": templateID, "ownerKey": "owner-a"}
+	var previous string
+	for i := 0; i < 3; i++ {
+		if i == 2 {
+			f.reopen(t)
+		}
+		status, body := f.call(t, "POST", "/v1/boxes", testClientToken, "same-ignored-key", input)
+		wantStatus(t, status, 202, body)
+		op := decodeResponse[Operation](t, body)
+		if op.ID == previous {
+			t.Fatal("independent create reused an operation")
+		}
+		previous = op.ID
+		f.waitOperation(t, op.ID, "succeeded")
 	}
-	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "create-persist", map[string]string{"templateId": templateID, "ownerKey": "changed"})
-	wantStatus(t, status, 409, body)
-	input := map[string]any{"argv": []string{"echo", "ok"}, "expectedGeneration": box.Generation, "timeoutMs": 30000}
-	status, body = f.call(t, "POST", "/v1/boxes/"+box.ID+"/execs", testClientToken, "exec-persist", input)
-	wantStatus(t, status, 202, body)
-	execOp := decodeResponse[Operation](t, body)
-	completed := f.waitOperation(t, execOp.ID, "succeeded")
-	if f.execCalls.Load() != 1 {
-		t.Fatalf("guest exec calls = %d, want 1", f.execCalls.Load())
-	}
-	f.reopen(t)
-	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "create-persist", createRequest)
-	wantStatus(t, status, 202, body)
-	if op := decodeResponse[Operation](t, body); op.ID != createOp.ID {
-		t.Fatalf("reopened create replay returned %s", op.ID)
-	}
-	status, body = f.call(t, "POST", "/v1/boxes/"+box.ID+"/execs", testClientToken, "exec-persist", input)
-	wantStatus(t, status, 202, body)
-	if op := decodeResponse[Operation](t, body); op.ID != completed.ID || op.Status != "succeeded" {
-		t.Fatalf("reopened exec replay: %+v", op)
-	}
-	status, body = f.call(t, "POST", "/v1/boxes/"+box.ID+"/execs", testClientToken, "exec-persist", map[string]any{"argv": []string{"echo", "changed"}, "expectedGeneration": box.Generation, "timeoutMs": 30000})
-	wantStatus(t, status, 409, body)
-	if creates, _ := f.provider.counts(); creates != 1 {
-		t.Fatalf("provider create calls = %d, want 1", creates)
-	}
-	if f.execCalls.Load() != 1 {
-		t.Fatalf("guest exec replayed %d times", f.execCalls.Load())
+	if creates, _ := f.provider.counts(); creates != 3 {
+		t.Fatalf("create calls = %d, want 3", creates)
 	}
 }
 
@@ -709,56 +562,37 @@ func TestRESTRejectsStaleGenerationBeforeGuestExec(t *testing.T) {
 	if latest.Generation <= box.Generation {
 		t.Fatalf("generation did not advance: %d -> %d", box.Generation, latest.Generation)
 	}
-	status, body = f.call(t, "POST", "/v1/boxes/"+box.ID+"/execs", testClientToken, "stale-exec", map[string]any{"argv": []string{"echo", "unsafe"}, "expectedGeneration": box.Generation})
+	status, body = f.call(t, "POST", "/v1/boxes/"+box.ID+"/execs", testClientToken, "", map[string]any{"argv": []string{"echo", "unsafe"}, "expectedGeneration": box.Generation})
 	wantStatus(t, status, 409, body)
 	if f.execCalls.Load() != 0 {
 		t.Fatalf("stale request reached guest %d times", f.execCalls.Load())
 	}
 }
 
-func TestRESTLeaseBlocksDestroy(t *testing.T) {
-	f := newCoreFixture(t)
-	_, box := f.createBox(t, "create-lease")
-	status, body := f.call(t, "POST", "/v1/boxes/"+box.ID+"/leases", testClientToken, "", map[string]any{"purpose": "active work", "ttlSeconds": 60})
-	wantStatus(t, status, 201, body)
-	lease := decodeResponse[Lease](t, body)
-	status, body = f.call(t, "POST", "/v1/boxes/"+box.ID+":destroy", testClientToken, "destroy-with-lease", nil)
-	wantStatus(t, status, 409, body)
-	if _, destroys := f.provider.counts(); destroys != 0 {
-		t.Fatalf("destroy called with active lease: %d", destroys)
-	}
-	status, body = f.call(t, "DELETE", "/v1/leases/"+lease.ID, testClientToken, "", nil)
-	wantStatus(t, status, 204, body)
-	status, body = f.call(t, "POST", "/v1/boxes/"+box.ID+":destroy", testClientToken, "destroy-after-lease", nil)
-	wantStatus(t, status, 202, body)
-	op := decodeResponse[Operation](t, body)
-	f.waitOperation(t, op.ID, "succeeded")
-	if _, destroys := f.provider.counts(); destroys != 1 {
-		t.Fatalf("destroy calls = %d, want 1", destroys)
-	}
-}
-
 func TestInterruptedExecIsUnknownAndNeverReplayed(t *testing.T) {
 	f := newCoreFixture(t)
 	_, box := f.createBox(t, "create-interrupted")
-	input := execInput{ExecRequest: guestapi.ExecRequest{Argv: []string{"echo", "once"}, TimeoutMS: 30000}, ExpectedGeneration: box.Generation}
-	var eid string
-	op, fresh, err := f.service.prepareOperation("client-a", "interrupted-exec", "exec", box.ID, input, func(st *State, op *Operation) error {
-		eid = randomID("exec-")
-		st.Executions[eid] = executionRecord{Execution: Execution{ID: eid, BoxID: box.ID, OperationID: op.ID, State: "running"}}
-		b := st.Boxes[box.ID]
+	eid := randomID("exec-")
+	op, err := f.service.prepareOperation("client-a", "exec", box.ID, func(tx *storeTx, op *Operation) error {
+		if err := tx.PutExecution(executionRecord{Execution: Execution{ID: eid, BoxID: box.ID, OperationID: op.ID, State: "running"}}); err != nil {
+			return err
+		}
+		b, err := tx.Box("client-a", box.ID)
+		if err != nil {
+			return err
+		}
 		b.Box.OperationID = op.ID
-		st.Boxes[box.ID] = b
-		return nil
+		return tx.PutBox(b)
 	})
-	if err != nil || !fresh {
+	if err != nil {
 		t.Fatalf("seed operation: %+v %v", op, err)
 	}
+
 	f.reopen(t)
 	status, body := f.call(t, "GET", "/v1/operations/"+op.ID, testClientToken, "", nil)
 	wantStatus(t, status, 200, body)
 	after := decodeResponse[Operation](t, body)
-	if after.Status != "failed" || after.Error == nil || after.Error.Code != "OPERATION_INTERRUPTED" {
+	if after.Status != "failed" || after.Error == nil || after.Error.Code != "UNKNOWN_OUTCOME" {
 		t.Fatalf("interrupted operation: %+v", after)
 	}
 	status, body = f.call(t, "GET", "/v1/execs/"+eid, testClientToken, "", nil)
@@ -767,11 +601,6 @@ func TestInterruptedExecIsUnknownAndNeverReplayed(t *testing.T) {
 	if execution.State != "unknown" {
 		t.Fatalf("interrupted execution: %+v", execution)
 	}
-	status, body = f.call(t, "POST", "/v1/boxes/"+box.ID+"/execs", testClientToken, "interrupted-exec", map[string]any{"argv": []string{"echo", "once"}, "timeoutMs": 30000, "expectedGeneration": box.Generation})
-	wantStatus(t, status, 202, body)
-	if replay := decodeResponse[Operation](t, body); replay.ID != op.ID || replay.Status != "failed" {
-		t.Fatalf("interrupted replay: %+v", replay)
-	}
 	if f.execCalls.Load() != 0 {
 		t.Fatalf("interrupted exec replayed %d times", f.execCalls.Load())
 	}
@@ -779,6 +608,7 @@ func TestInterruptedExecIsUnknownAndNeverReplayed(t *testing.T) {
 
 func TestFailedRestoreCandidateCannotActivate(t *testing.T) {
 	f := newCoreFixture(t)
+	useK3sProfile(t, f)
 	_, box := f.createBox(t, "create-staged")
 	if err := f.service.store.Update(func(st *State) error {
 		b := st.Boxes[box.ID]
@@ -866,79 +696,31 @@ func TestProfilesExposeOnlySupportedRuntimeBehaviorKinds(t *testing.T) {
 	}
 }
 
-type homeRebuildProvider struct {
-	*fakeCoreProvider
-	calls atomic.Int32
-}
-
-func (p *homeRebuildProvider) Action(_ context.Context, _ boxprovider.Handle, action string) error {
-	if action != "rebuild" {
-		return errors.New("unexpected action")
-	}
-	p.calls.Add(1)
-	p.setExecutionID("rebuilt-execution")
-	return nil
-}
-func TestHomeRebuildGuardsAndIdempotencyRetainBox(t *testing.T) {
+func TestExecSubmissionsAreIndependent(t *testing.T) {
 	f := newCoreFixture(t)
-	_, box := f.createBox(t, "home-rebuild-create")
-	provider := &homeRebuildProvider{fakeCoreProvider: f.provider}
-	f.service.providers["resumable-k8s-pod"] = provider
-	change := func(phase string, persistent bool, lease bool) {
-		t.Helper()
-		if err := f.service.store.Update(func(st *State) error {
-			b := st.Boxes[box.ID]
-			b.Box.Phase = phase
-			b.Profile.Provider = "resumable-k8s-pod"
-			b.Profile.PersistentHome = persistent
-			st.Boxes[box.ID] = b
-			if lease {
-				st.Leases["busy-lease"] = Lease{ID: "busy-lease", BoxID: box.ID, ExpiresAt: time.Now().Add(time.Minute)}
-			} else {
-				delete(st.Leases, "busy-lease")
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
+	_, box := f.createBox(t, "create-exec")
+	path := "/v1/boxes/" + box.ID + "/execs"
+	input := map[string]any{"argv": []string{"/bin/echo", "ok"}, "expectedGeneration": box.Generation}
+	var previous string
+	for range 2 {
+		status, body := f.call(t, "POST", path, testClientToken, "ignored-key", input)
+		wantStatus(t, status, 202, body)
+		op := decodeResponse[Operation](t, body)
+		if op.ID == previous {
+			t.Fatal("independent submission was deduplicated")
 		}
+		previous = op.ID
+		f.waitOperation(t, op.ID, "succeeded")
 	}
-	for _, c := range []struct {
-		phase             string
-		persistent, lease bool
-	}{{"running", true, false}, {"failed", false, false}, {"failed", true, true}} {
-		change(c.phase, c.persistent, c.lease)
-		if _, err := f.service.action("client-a", "reject-"+c.phase+fmt.Sprint(c.persistent, c.lease), box.ID, "rebuild"); err == nil {
-			t.Fatal("unsafe rebuild accepted", c)
-		}
+	if f.execCalls.Load() != 2 {
+		t.Fatalf("guest calls = %d, want 2", f.execCalls.Load())
 	}
-	change("failed", true, false)
-	op, err := f.service.action("client-a", "same-home-rebuild", box.ID, "rebuild")
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.waitOperation(t, op.ID, "succeeded")
-	again, err := f.service.action("client-a", "same-home-rebuild", box.ID, "rebuild")
-	if err != nil || again.ID != op.ID || provider.calls.Load() != 1 {
-		t.Fatal("rebuild was not idempotent", again, err)
-	}
-	record, err := f.service.rawBox(box.ID)
-	if err != nil || record.Box.Phase != "running" || record.Box.Generation <= box.Generation {
-		t.Fatal(record, err)
-	}
-	creates, deletes := f.provider.counts()
-	if creates != 1 || deletes != 0 {
-		t.Fatal("Box identity replaced", creates, deletes)
-	}
-	if f.activateCalls.Load() != 1 {
-		t.Fatal("cold rebuild did not activate workload")
-	}
-	reconcile, err := f.service.action("client-a", "reconcile-rebuilt", box.ID, "reconcile")
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.waitOperation(t, reconcile.ID, "succeeded")
-	if f.activateCalls.Load() != 2 {
-		t.Fatal("ready retry did not ensure workload activation")
-	}
+}
 
+func TestRemovedAPIsAreNotExposed(t *testing.T) {
+	f := newCoreFixture(t)
+	for _, path := range []string{"/v1/images", "/v1/images:build", "/v1/images:import", "/v1/routes", "/v1/boxes/any:ensure-running", "/v1/boxes/any:reconcile", "/v1/boxes/any:rebuild", "/v1/boxes/any:upgrade", "/v1/boxes/any/leases"} {
+		status, body := f.call(t, "POST", path, testClientToken, "ignored", map[string]any{})
+		wantStatus(t, status, http.StatusNotFound, body)
+	}
 }

@@ -12,6 +12,23 @@ import (
 )
 
 func (p *Provider) WatchChanges(ctx context.Context, h boxprovider.Handle) (<-chan struct{}, error) {
+	if p.Local != nil {
+		observations, err := p.WatchObservations(ctx, h)
+		if err != nil {
+			return nil, err
+		}
+		changes := make(chan struct{}, 1)
+		go func() {
+			defer close(changes)
+			for range observations {
+				select {
+				case changes <- struct{}{}:
+				default:
+				}
+			}
+		}()
+		return changes, nil
+	}
 	c, ok := p.Client.(client.WithWatch)
 	if !ok {
 		return nil, nil

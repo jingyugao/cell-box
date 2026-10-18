@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,25 +23,38 @@ func replaceQueryProvider(f *coreFixture, inspect func(context.Context, boxprovi
 	f.service.providers["docker"] = &queryProviderHook{Provider: f.provider, inspect: inspect}
 }
 
-func TestObserveRestoresSuspendedGenerationAfterServiceRestart(t *testing.T) {
-	objects := &ledgerObjects{}
-	initial := openRecords(t, objects)
-	updateRecords(t, initial, func(st *State) {
+func TestObservePreservesSuspendedGenerationAfterServiceRestart(t *testing.T) {
+	dir := t.TempDir()
+	initial, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initial.Update(func(st *State) error {
 		b := coreBox("paused-after-restart")
 		b.Profile.Provider = "resumable-k8s-pod"
 		b.Box.Phase = "suspended"
+		b.Box.Generation = 17
+		b.ExecutionID = ""
 		st.Boxes[b.Box.ID] = b
-	})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 
-	// Object-store recovery deliberately drops runtime observations. The CR is
-	// the durable source for this generation, including while no Pod is running.
-	restarted := openRecords(t, objects)
+	if err := initial.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { restarted.Close() })
 	record, err := restarted.BoxRecord("paused-after-restart")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.Box.Generation != 0 || record.ExecutionID != "" {
-		t.Fatalf("restart retained derived runtime identity: generation=%d execution=%q", record.Box.Generation, record.ExecutionID)
+	if record.Box.Generation != 17 || record.ExecutionID != "" {
+		t.Fatalf("restart lost durable runtime observation: generation=%d execution=%q", record.Box.Generation, record.ExecutionID)
 	}
 
 	generation := uint64(17)
@@ -99,11 +111,12 @@ func TestObserveRestoresSuspendedGenerationAfterServiceRestart(t *testing.T) {
 	}
 }
 
-func TestObserveUnchangedBoxDoesNotRewriteStateFile(t *testing.T) {
+func TestObserveUnchangedBoxDoesNotWriteDatabase(t *testing.T) {
 	f := newCoreFixture(t)
 	_, box := f.createBox(t, "query-no-write")
-	path := f.config.DataDir + "/state.json"
-	before, err := os.Stat(path)
+	// A trigger observes any accidental write to the sandbox record.
+	_, err := f.service.store.db.Exec(`CREATE TRIGGER reject_unchanged_observation BEFORE UPDATE ON runtime_records
+ WHEN OLD.kind='boxes' AND OLD.id='` + box.ID + `' BEGIN SELECT RAISE(ABORT,'unexpected observation write'); END`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,13 +126,6 @@ func TestObserveUnchangedBoxDoesNotRewriteStateFile(t *testing.T) {
 	}
 	if _, err = f.service.observe(context.Background(), record); err != nil {
 		t.Fatal(err)
-	}
-	after, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !os.SameFile(before, after) || !before.ModTime().Equal(after.ModTime()) {
-		t.Fatalf("unchanged observation rewrote state file: before=%v after=%v", before.ModTime(), after.ModTime())
 	}
 }
 

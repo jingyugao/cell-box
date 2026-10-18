@@ -40,8 +40,6 @@ type Identity struct {
 }
 
 type executionState struct {
-	UpgradeNonce     string `json:"upgradeNonce,omitempty"`
-	RebuildNonce     string `json:"rebuildNonce,omitempty"`
 	Phase            string `json:"phase"`
 	Pod              string `json:"pod,omitempty"`
 	Snapshot         string `json:"snapshot,omitempty"`
@@ -677,75 +675,4 @@ func checkPathNoSymlink(base, target string) error {
 		}
 	}
 	return nil
-}
-
-// Rearm permits an explicit cold start only after the controller has removed the old execution.
-// It keeps the validated HOME identity and contents, and never replays consumed checkpoints.
-func Rearm(base, owner, node, spec, oldPod, nonce string) error {
-	if nonce == "" {
-		return errors.New("rebuild nonce is required")
-	}
-	unlock, err := lockOwner(base, owner, false)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	if _, err := Verify(base, owner, node, spec, ""); err != nil {
-		return err
-	}
-	_, dir, _, _ := paths(base, owner)
-	state, err := readState(filepath.Join(dir, stateName))
-	if err != nil {
-		return err
-	}
-	if state.RebuildNonce == nonce {
-		return nil
-	}
-	if state.Phase != "new" && (oldPod == "" || state.Pod != oldPod) {
-		return errors.New("HOME belongs to a different execution")
-	}
-	state.Phase, state.Pod, state.Snapshot, state.RebuildNonce = "new", "", "", nonce
-	return writeJSONAtomic(filepath.Join(dir, stateName), state, 0600)
-}
-
-// Upgrade rebinds the same disk inode after the old execution has been removed.
-// Accepting the target fingerprint makes a retry safe across the two atomic
-// metadata writes; disk contents and ownership are never replaced.
-func Upgrade(base, owner, node, oldSpec, newSpec, oldPod, oldSnapshot, nonce string) error {
-	if nonce == "" || oldSpec == "" || newSpec == "" {
-		return errors.New("upgrade identity is required")
-	}
-	unlock, err := lockOwner(base, owner, false)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	identity, err := Verify(base, owner, node, oldSpec, "")
-	if err != nil {
-		identity, err = Verify(base, owner, node, newSpec, "")
-		if err != nil {
-			return err
-		}
-	}
-	_, dir, _, _ := paths(base, owner)
-	state, err := readState(filepath.Join(dir, stateName))
-	if err != nil {
-		return err
-	}
-	if state.UpgradeNonce == nonce {
-		if identity.SpecHash != newSpec {
-			return errors.New("upgrade nonce reused with a different fingerprint")
-		}
-		return nil
-	}
-	if (state.Phase == "active" && (oldPod == "" || state.Pod != oldPod)) ||
-		(state.Phase == "suspended" && (oldSnapshot == "" || state.Snapshot != oldSnapshot)) {
-		return errors.New("HOME belongs to a different execution")
-	}
-	identity.SpecHash = newSpec
-	if err := writeJSONAtomic(filepath.Join(dir, identityName), identity, 0600); err != nil {
-		return err
-	}
-	state.Phase, state.Pod, state.Snapshot, state.UpgradeNonce = "new", "", "", nonce
-	return writeJSONAtomic(filepath.Join(dir, stateName), state, 0600)
 }

@@ -1,6 +1,6 @@
 # Cellbox
 
-Cellbox 通过 HTTP API 提供隔离沙箱。沙箱从模板或指定修订版本创建，可执行有时限的命令、访问工作区文件，并使用运行时 profile 支持的生命周期操作。
+Cellbox 通过 HTTP API 提供隔离沙箱。单机 Kubernetes 部署使用一个固定到指定节点的 `cellbox-server` 进程，提供 API 并管理该节点的 sandbox runtime。沙箱从模板或指定修订版本创建，可执行有时限的命令、访问工作区文件，并使用运行时 profile 支持的生命周期操作。
 
 ## 快速开始
 
@@ -8,8 +8,11 @@ Cellbox 通过 HTTP API 提供隔离沙箱。沙箱从模板或指定修订版�
 - [Go SDK 使用指南](doc/go-sdk.md)：从本地源码引用尚未发布的 SDK，创建模板和修订版本、创建沙箱，并使用生命周期与文件接口。
 - [REST 快速开始](doc/rest-quickstart.md)：使用 `curl` 调用模板、构建任务和沙箱接口。
 - [OpenAPI 接口契约](api/openapi.yaml)：完整的 HTTP 请求和响应结构。
+- [部署与端到端验收](doc/e2e-validation.md)：完整 e2e 用例、运行命令和证据标准。
 
-模板、修订版本和构建任务保存在 API 服务本地 SQLite catalog 中。模板管理接口使用本地 catalog，不查询 Kubernetes。沙箱创建和运行时操作由配置的 runtime provider 执行。
+服务元数据、模板、修订版本和构建任务共用 server 本地 `cellbox.db`；构建日志也保存在同一持久数据目录。归档操作需要配置 S3 兼容对象存储，否则会返回 `UNSUPPORTED_CAPABILITY`。Kubernetes profile 的 sandbox 期望状态和运行状态仍由 Cellbox 自定义资源持久化并拥有其 Pod/Service；API 和节点运行时在进程内通过队列与完成快照直接协作。这样减少一个进程间通知链路，仍保留 Kubernetes 对象写入和 Pod/CRI 操作。
+
+Kubernetes profile 支持模板、预热、暂停/恢复、受保护工具与归档等完整功能。Docker provider 是基础能力：创建、查询、命令、文件、按 ID 访问服务和销毁；其他能力会返回 `UNSUPPORTED_CAPABILITY`。
 
 ## 构建与检查
 
@@ -22,4 +25,4 @@ make build
 
 ## 部署
 
-参阅[单机 Kubernetes 部署与升级](doc/deployment.md)，配置持久 catalog、对象存储、运行时 profile 和镜像构建器，再应用 Helm Chart。节点组件需先按[节点安装指南](doc/node-installation.md)准备。
+参阅[单机 Kubernetes 部署与升级](doc/deployment.md)，配置持久 `storage` 目录、可选归档对象存储、运行时 profile 和镜像构建器，再应用 Helm Chart。节点组件需先按[节点安装指南](doc/node-installation.md)准备。

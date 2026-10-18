@@ -55,7 +55,7 @@ func (f *Files) Open(ctx context.Context, name string) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	res, err := f.sandbox.client.request(ctx, http.MethodGet, path, "", nil, "")
+	res, err := f.sandbox.client.request(ctx, http.MethodGet, path, nil, "")
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +90,7 @@ func (f *Files) Write(ctx context.Context, name string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	res, err := f.sandbox.client.request(ctx, http.MethodPut, path, "", bytes.NewReader(data), "application/octet-stream")
+	res, err := f.sandbox.client.request(ctx, http.MethodPut, path, bytes.NewReader(data), "application/octet-stream")
 	if err != nil {
 		return err
 	}
@@ -107,6 +107,6 @@ func (f *Files) List(ctx context.Context, name string) ([]FileEntry, error) {
 		return nil, err
 	}
 	var entries []FileEntry
-	err = f.sandbox.client.do(ctx, http.MethodGet, path, "", nil, &entries)
+	err = f.sandbox.client.do(ctx, http.MethodGet, path, nil, &entries)
 	return entries, err
 }

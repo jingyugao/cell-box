@@ -77,23 +77,26 @@ func configuredWorkspace(r *api.ResumablePod) (string, error) {
 }
 
 func (b *Backend) CaptureWorkspaceArchive(ctx context.Context, r *api.ResumablePod, request api.ArchiveCaptureRequest) (api.ArchiveCaptureResult, error) {
-	result := api.ArchiveCaptureResult{ID: request.ID, Snapshot: request.Snapshot, DiskOnly: request.DiskOnly}
+	result := api.ArchiveCaptureResult{ID: request.ID, Snapshot: request.Snapshot}
+	if r != nil {
+		result.SourceUID, result.SourceGeneration = string(r.UID), r.Generation
+	}
 	if b.Objects == nil {
 		return result, errors.New("object storage is required for suspended workspace archives")
 	}
 	if !workspaceArchiveID.MatchString(request.ID) {
 		return result, errors.New("invalid workspace archive identifier")
 	}
-	if r == nil || r.Spec.DesiredState != "Suspended" || !r.Spec.PersistentHome ||
+	if r == nil || !r.Spec.PersistentHome ||
 		r.Status.PodUID != "" || r.Status.PodName != "" || r.DeletionTimestamp != nil {
-		return result, errors.New("workspace archive source is not a suspended persistent HOME")
+		return result, errors.New("workspace archive source must be stopped with a persistent HOME")
 	}
-	if request.DiskOnly {
-		if r.Status.Phase != "Suspended" && r.Status.Phase != "Failed" {
-			return result, errors.New("disk-only archive source must have stopped execution")
+	if r.Status.Phase == "Suspended" {
+		if r.Spec.DesiredState != "Suspended" || r.Status.Snapshot == "" || r.Status.Snapshot != request.Snapshot {
+			return result, errors.New("workspace archive checkpoint changed")
 		}
-	} else if r.Status.Phase != "Suspended" || r.Status.Snapshot == "" || r.Status.Snapshot != request.Snapshot || request.Snapshot == "" {
-		return result, errors.New("workspace archive source is not a suspended persistent HOME")
+	} else if r.Status.Phase != "Failed" || request.Snapshot != r.Status.Snapshot {
+		return result, errors.New("workspace archive source must be suspended or failed")
 	}
 	workspace, err := configuredWorkspace(r)
 	if err != nil {
@@ -103,7 +106,7 @@ func (b *Backend) CaptureWorkspaceArchive(ctx context.Context, r *api.ResumableP
 	if err != nil {
 		return result, err
 	}
-	if !request.DiskOnly {
+	if r.Status.Phase == "Suspended" {
 		if err = homevolume.ValidateCheckpoint(b.Base, string(r.UID), home.ID, r.Status.Snapshot); err != nil {
 			return result, err
 		}
@@ -111,7 +114,7 @@ func (b *Backend) CaptureWorkspaceArchive(ctx context.Context, r *api.ResumableP
 	key := "archives/" + request.ID + ".tar.gz"
 	if existing, _, _, getErr := b.Objects.Get(ctx, key); getErr == nil {
 		_ = existing.Close()
-		return b.existingWorkspaceArchive(ctx, key, request)
+		return b.existingWorkspaceArchive(ctx, key, request, r)
 	} else if !errors.Is(getErr, objectstorage.ErrNotFound) {
 		return result, retryableStorage(getErr)
 	}
@@ -178,7 +181,7 @@ func (b *Backend) CaptureWorkspaceArchive(ctx context.Context, r *api.ResumableP
 		err = closeErr
 	}
 	if errors.Is(err, objectstorage.ErrConflict) {
-		return b.existingWorkspaceArchive(ctx, key, request)
+		return b.existingWorkspaceArchive(ctx, key, request, r)
 	}
 	if err != nil {
 		return result, retryableStorage(err)
@@ -187,8 +190,8 @@ func (b *Backend) CaptureWorkspaceArchive(ctx context.Context, r *api.ResumableP
 	return result, nil
 }
 
-func (b *Backend) existingWorkspaceArchive(ctx context.Context, key string, request api.ArchiveCaptureRequest) (api.ArchiveCaptureResult, error) {
-	result := api.ArchiveCaptureResult{ID: request.ID, Snapshot: request.Snapshot, DiskOnly: request.DiskOnly}
+func (b *Backend) existingWorkspaceArchive(ctx context.Context, key string, request api.ArchiveCaptureRequest, source *api.ResumablePod) (api.ArchiveCaptureResult, error) {
+	result := api.ArchiveCaptureResult{SourceUID: string(source.UID), SourceGeneration: source.Generation, ID: request.ID, Snapshot: request.Snapshot}
 	body, size, _, err := b.Objects.Get(ctx, key)
 	if err != nil {
 		return result, retryableStorage(err)

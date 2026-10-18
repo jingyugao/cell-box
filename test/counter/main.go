@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"sync/atomic"
 	"time"
 )
@@ -26,6 +27,9 @@ func main() {
 				time.Sleep(time.Hour)
 			}
 		case "get":
+			if len(os.Args) != 3 {
+				log.Fatal("usage: server get <url>")
+			}
 			client := &http.Client{Timeout: 20 * time.Second}
 			resp, err := client.Get(os.Args[2])
 			if err != nil {
@@ -39,8 +43,12 @@ func main() {
 			return
 		}
 	}
+	memoryMiB, err := counterMemoryMiB(os.Getenv("COUNTER_MEMORY_MIB"))
+	if err != nil {
+		log.Fatal(err)
+	}
 	started := time.Now().UTC().Format(time.RFC3339Nano)
-	memory := make([]byte, 32<<20)
+	memory := make([]byte, memoryMiB<<20)
 	if _, err := rand.Read(memory); err != nil {
 		log.Fatal(err)
 	}
@@ -102,4 +110,15 @@ func main() {
 		json.NewEncoder(w).Encode(results)
 	})
 	log.Fatal(http.ListenAndServe(":8000", nil))
+}
+
+func counterMemoryMiB(value string) (int, error) {
+	if value == "" {
+		return 32, nil
+	}
+	memory, err := strconv.Atoi(value)
+	if err != nil || memory < 1 || memory > 512 {
+		return 0, fmt.Errorf("COUNTER_MEMORY_MIB must be an integer from 1 to 512")
+	}
+	return memory, nil
 }

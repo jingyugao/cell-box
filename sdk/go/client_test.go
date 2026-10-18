@@ -54,8 +54,8 @@ func TestCreateWaitsForOperationAndConnects(t *testing.T) {
 			if body.TemplateID != "tpl-python-v1" || body.OwnerKey != "job-7" {
 				t.Errorf("create body = %+v", body)
 			}
-			if got := r.Header.Get("Idempotency-Key"); got != "create-key" {
-				t.Errorf("idempotency key = %q", got)
+			if got := r.Header.Get("Idempotency-Key"); got != "" {
+				t.Errorf("unexpected idempotency header = %q", got)
 			}
 			w.WriteHeader(http.StatusAccepted)
 			writeJSONTest(w, Operation{ID: "op-1", Kind: "create", TargetID: "box-1", Status: "running"})
@@ -74,7 +74,7 @@ func TestCreateWaitsForOperationAndConnects(t *testing.T) {
 	defer server.Close()
 
 	client := testClient(t, server, "/gateway")
-	sandbox, err := client.Create(context.Background(), CreateOptions{TemplateID: "tpl-python-v1", OwnerKey: "job-7", IdempotencyKey: "create-key"})
+	sandbox, err := client.Create(context.Background(), CreateOptions{TemplateID: "tpl-python-v1", OwnerKey: "job-7"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestTemplateFamilyAndRevisionAPIContract(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Error(err)
 			}
-			if body.UserVersion != "1.01" || body.BaseImage != "python:3" || body.BuildCommand == "" || r.Header.Get("Idempotency-Key") != "build-key" {
+			if body.UserVersion != "1.01" || body.BaseImage != "python:3" || body.BuildCommand == "" || r.Header.Get("Idempotency-Key") != "" {
 				t.Errorf("revision submission body/header = %+v / %q", body, r.Header.Get("Idempotency-Key"))
 			}
 			w.WriteHeader(http.StatusAccepted)
@@ -194,7 +194,7 @@ func TestTemplateFamilyAndRevisionAPIContract(t *testing.T) {
 		t.Fatalf("UpdateTemplate = %+v, %v", updated, err)
 	}
 	warm := 4
-	op, err := client.BuildRevision(context.Background(), "tpl-1", CreateRevisionOptions{UserVersion: "1.01", BaseImage: "python:3", ProfileID: "small", BuildCommand: "npm install -g codex"}, "build-key")
+	op, err := client.BuildRevision(context.Background(), "tpl-1", CreateRevisionOptions{UserVersion: "1.01", BaseImage: "python:3", ProfileID: "small", BuildCommand: "npm install -g codex"})
 	if err != nil || op.ID != "op-build" {
 		t.Fatalf("BuildRevision = %+v, %v", op, err)
 	}
@@ -226,7 +226,7 @@ func TestCreateRequiresTemplateIDAndWarmSlotsCannotBeNegative(t *testing.T) {
 	if _, err := client.CreateTemplate(context.Background(), CreateTemplateOptions{Name: "python", DefaultWarmSlots: -1}); err == nil {
 		t.Fatal("CreateTemplate accepted negative warm slots")
 	}
-	if _, err := client.BuildRevision(context.Background(), "tpl", CreateRevisionOptions{UserVersion: "1.0", BaseImage: "base", ProfileID: "p", WarmSlots: func() *int { x := -1; return &x }()}, "k"); err == nil {
+	if _, err := client.BuildRevision(context.Background(), "tpl", CreateRevisionOptions{UserVersion: "1.0", BaseImage: "base", ProfileID: "p", WarmSlots: func() *int { x := -1; return &x }()}); err == nil {
 		t.Fatal("BuildRevision accepted negative warm slots")
 	}
 	if requests.Load() != 0 {
@@ -308,10 +308,10 @@ func TestTemplateBuildOperationDecodesPublicFields(t *testing.T) {
 		t.Fatalf("operation fields were not decoded: %+v", op)
 	}
 	var capabilities Capabilities
-	if err := json.Unmarshal([]byte(`{"diskArchives":true,"protectedTools":true,"credentialBatch":true,"internalServices":true,"rootDebug":true,"sharedDirectory":true,"mountedToolRuntime":true,"mountedDebugHome":true,"persistentHome":true}`), &capabilities); err != nil {
+	if err := json.Unmarshal([]byte(`{"archives":"stopped-workspace","protectedTools":true,"credentialBatch":true,"internalServices":true,"rootDebug":true,"sharedDirectory":true,"mountedToolRuntime":true,"mountedDebugHome":true,"persistentHome":true}`), &capabilities); err != nil {
 		t.Fatal(err)
 	}
-	if !capabilities.DiskArchives || !capabilities.ProtectedTools || !capabilities.CredentialBatch || !capabilities.InternalServices || !capabilities.RootDebug || !capabilities.SharedDirectory || !capabilities.MountedToolRuntime || !capabilities.MountedDebugHome || !capabilities.PersistentHome {
+	if capabilities.Archives != "stopped-workspace" || !capabilities.ProtectedTools || !capabilities.CredentialBatch || !capabilities.InternalServices || !capabilities.RootDebug || !capabilities.SharedDirectory || !capabilities.MountedToolRuntime || !capabilities.MountedDebugHome || !capabilities.PersistentHome {
 		t.Fatalf("capability fields missing: %+v", capabilities)
 	}
 }
@@ -390,10 +390,10 @@ func TestRunAndRunArgvSendDistinctCommandContracts(t *testing.T) {
 		want []string
 	}{
 		{name: "shell", run: func(c *Commands) (*CommandResult, error) {
-			return c.Run(context.Background(), "printf '%s' 'a b; $HOME'", &CommandOptions{Cwd: "work", Env: map[string]string{"X": "a b"}, Timeout: 1500 * time.Millisecond, IdempotencyKey: "shell-key"})
+			return c.Run(context.Background(), "printf '%s' 'a b; $HOME'", &CommandOptions{Cwd: "work", Env: map[string]string{"X": "a b"}, Timeout: 1500 * time.Millisecond})
 		}, want: []string{"/bin/sh", "-c", "printf '%s' 'a b; $HOME'"}},
 		{name: "argv", run: func(c *Commands) (*CommandResult, error) {
-			return c.RunArgv(context.Background(), []string{"/usr/bin/printf", "%s", "a b; $HOME"}, &CommandOptions{IdempotencyKey: "argv-key"})
+			return c.RunArgv(context.Background(), []string{"/usr/bin/printf", "%s", "a b; $HOME"}, nil)
 		}, want: []string{"/usr/bin/printf", "%s", "a b; $HOME"}},
 	}
 	for _, tc := range tests {
@@ -423,9 +423,8 @@ func TestRunAndRunArgvSendDistinctCommandContracts(t *testing.T) {
 					if tc.name == "shell" && (body.Cwd != "work" || body.Env["X"] != "a b" || body.TimeoutMS != 1500) {
 						t.Errorf("command options = %+v", body)
 					}
-					wantKey := tc.name + "-key"
-					if got := r.Header.Get("Idempotency-Key"); got != wantKey {
-						t.Errorf("key = %q, want %q", got, wantKey)
+					if got := r.Header.Get("Idempotency-Key"); got != "" {
+						t.Errorf("unexpected idempotency key %q", got)
 					}
 					writeJSONTest(w, Operation{ID: "op-exec", Kind: "exec", Status: "succeeded", Result: map[string]string{"execId": "exec-1"}})
 				case r.Method == http.MethodGet && r.URL.Path == "/v1/execs/exec-1":
@@ -501,7 +500,7 @@ func TestFailedOperationAndUnknownExecutionDoNotResubmit(t *testing.T) {
 			}))
 			defer server.Close()
 			client := testClient(t, server, "")
-			cmd, err := client.sandbox(SandboxInfo{ID: "box", Generation: 1}).Commands.StartArgv(context.Background(), []string{"/bin/true"}, &CommandOptions{IdempotencyKey: "stable"})
+			cmd, err := client.sandbox(SandboxInfo{ID: "box", Generation: 1}).Commands.StartArgv(context.Background(), []string{"/bin/true"}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -593,19 +592,45 @@ func TestHTTPStructuredAndFallbackErrors(t *testing.T) {
 	}
 }
 
-func TestSubmitErrorRetainsIdempotencyKey(t *testing.T) {
+func TestSubmitFailureDoesNotSendIdempotencyHeader(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Idempotency-Key"); got != "recover-this" {
-			t.Errorf("key = %q", got)
+		if got := r.Header.Get("Idempotency-Key"); got != "" {
+			t.Errorf("unexpected idempotency header %q", got)
 		}
 		http.Error(w, "temporary", http.StatusBadGateway)
 	}))
 	defer server.Close()
 	client := testClient(t, server, "")
-	_, err := client.CreateAsync(context.Background(), CreateOptions{TemplateID: "tpl", OwnerKey: "o", IdempotencyKey: "recover-this"})
+	_, err := client.CreateAsync(context.Background(), CreateOptions{TemplateID: "tpl", OwnerKey: "o"})
 	var requestErr *RequestError
-	if !errors.As(err, &requestErr) || requestErr.IdempotencyKey != "recover-this" {
+	if !errors.As(err, &requestErr) || requestErr.Error() == "" {
 		t.Fatalf("error = %#v", err)
+	}
+}
+
+func TestCommandSubmissionResponseLossIsNotRetried(t *testing.T) {
+	var posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts.Add(1)
+		if got := r.Header.Get("Idempotency-Key"); got != "" {
+			t.Errorf("unexpected idempotency key %q", got)
+		}
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack response: %v", err)
+			return
+		}
+		_ = conn.Close()
+	}))
+	defer server.Close()
+	client := testClient(t, server, "")
+	_, err := client.sandbox(SandboxInfo{ID: "box", Generation: 1}).Commands.Start(context.Background(), "touch /tmp/side-effect", nil)
+	var requestErr *RequestError
+	if !errors.As(err, &requestErr) {
+		t.Fatalf("error = %#v, want a one-shot RequestError without a recovery key", err)
+	}
+	if got := posts.Load(); got != 1 {
+		t.Fatalf("POSTs = %d, want exactly one", got)
 	}
 }
 

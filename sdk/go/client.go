@@ -3,8 +3,6 @@ package cellbox
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -61,7 +59,7 @@ func NewClient(config Config) (*Client, error) {
 	return &Client{baseURL: strings.TrimRight(u.String(), "/"), clientID: config.ClientID, token: config.Token, http: &hc}, nil
 }
 
-func (c *Client) do(ctx context.Context, method, path, key string, body, out any) error {
+func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
 	var data []byte
 	var err error
 	if body != nil {
@@ -76,7 +74,7 @@ func (c *Client) do(ctx context.Context, method, path, key string, body, out any
 		reader = bytes.NewReader(data)
 		contentType = "application/json"
 	}
-	res, err := c.request(ctx, method, path, key, reader, contentType)
+	res, err := c.request(ctx, method, path, reader, contentType)
 	if err != nil {
 		return err
 	}
@@ -100,7 +98,7 @@ func (c *Client) do(ctx context.Context, method, path, key string, body, out any
 
 // request applies the shared Cellbox headers and transport rules for JSON and
 // raw file endpoints. The caller owns the body on success; errors close it.
-func (c *Client) request(ctx context.Context, method, path, key string, body io.Reader, contentType string) (*http.Response, error) {
+func (c *Client) request(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return nil, err
@@ -114,11 +112,6 @@ func (c *Client) request(ctx context.Context, method, path, key string, body io.
 	}
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-	if key != "" {
-		req.Header.Set("Idempotency-Key", key)
-		// Callers control recovery. Prevent transport-level body replay.
-		req.GetBody = nil
 	}
 	res, err := c.http.Do(req)
 	if err != nil {
@@ -138,24 +131,13 @@ func (c *Client) request(ctx context.Context, method, path, key string, body io.
 	return nil, &APIError{StatusCode: res.StatusCode, Code: "HTTP_ERROR", Message: http.StatusText(res.StatusCode)}
 }
 
-func (c *Client) submit(ctx context.Context, path, key string, body any) (*Operation, error) {
-	if key == "" {
-		var random [16]byte
-		if _, err := rand.Read(random[:]); err != nil {
-			return nil, err
-		}
-		key = hex.EncodeToString(random[:])
-	}
-	if len(key) > 200 {
-		return nil, fmt.Errorf("cellbox: idempotency key exceeds 200 bytes")
-	}
+func (c *Client) submit(ctx context.Context, path string, body any) (*Operation, error) {
 	var op Operation
-	if err := c.do(ctx, http.MethodPost, path, key, body, &op); err != nil {
-		return nil, &RequestError{IdempotencyKey: key, Err: err}
+	if err := c.do(ctx, http.MethodPost, path, body, &op); err != nil {
+		return nil, &RequestError{Err: err}
 	}
-	op.IdempotencyKey = key
 	if op.ID == "" {
-		return nil, &RequestError{IdempotencyKey: key, Err: fmt.Errorf("cellbox: response missing operation ID")}
+		return nil, &RequestError{Err: fmt.Errorf("cellbox: response missing operation ID")}
 	}
 	return &op, nil
 }
@@ -182,7 +164,7 @@ func validateListOptions(count, limit, offset int) error {
 
 func (c *Client) ListProfiles(ctx context.Context) ([]Profile, error) {
 	var profiles []Profile
-	err := c.do(ctx, http.MethodGet, "/v1/profiles", "", nil, &profiles)
+	err := c.do(ctx, http.MethodGet, "/v1/profiles", nil, &profiles)
 	return profiles, err
 }
 
@@ -195,7 +177,7 @@ func (c *Client) CreateTemplate(ctx context.Context, opts CreateTemplateOptions)
 		return nil, fmt.Errorf("cellbox: default warm slots must be 0..1024")
 	}
 	var template Template
-	if err := c.do(ctx, http.MethodPost, "/v1/templates", "", opts, &template); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/v1/templates", opts, &template); err != nil {
 		return nil, err
 	}
 	return &template, nil
@@ -227,7 +209,7 @@ func (c *Client) ListTemplates(ctx context.Context, opts ...TemplateListOptions)
 	if encoded := q.Encode(); encoded != "" {
 		path += "?" + encoded
 	}
-	err := c.do(ctx, http.MethodGet, path, "", nil, &templates)
+	err := c.do(ctx, http.MethodGet, path, nil, &templates)
 	return templates, err
 }
 
@@ -238,7 +220,7 @@ func (c *Client) GetTemplate(ctx context.Context, id string) (*Template, error) 
 		return nil, err
 	}
 	var template Template
-	if err := c.do(ctx, http.MethodGet, path, "", nil, &template); err != nil {
+	if err := c.do(ctx, http.MethodGet, path, nil, &template); err != nil {
 		return nil, err
 	}
 	return &template, nil
@@ -260,7 +242,7 @@ func (c *Client) UpdateTemplate(ctx context.Context, id string, opts UpdateTempl
 		return nil, err
 	}
 	var template Template
-	err = c.do(ctx, http.MethodPatch, path, "", opts, &template)
+	err = c.do(ctx, http.MethodPatch, path, opts, &template)
 	if err != nil {
 		return nil, err
 	}
@@ -277,8 +259,10 @@ func (c *Client) SetTemplateStableRevision(ctx context.Context, id, revisionID s
 	return c.UpdateTemplate(ctx, id, UpdateTemplateOptions{StableRevisionID: &revisionID, ExpectedGeneration: expectedGeneration})
 }
 
-// BuildRevision submits an asynchronous build and returns its durable operation.
-func (c *Client) BuildRevision(ctx context.Context, templateID string, opts CreateRevisionOptions, idempotencyKey string) (*Operation, error) {
+// BuildRevision submits an asynchronous build once and returns its durable
+// operation. Build scripts can have arbitrary side effects, so the SDK does
+// not attach an idempotency key or retry a submission whose response is lost.
+func (c *Client) BuildRevision(ctx context.Context, templateID string, opts CreateRevisionOptions) (*Operation, error) {
 	if strings.TrimSpace(opts.UserVersion) == "" || strings.TrimSpace(opts.BaseImage) == "" || strings.TrimSpace(opts.ProfileID) == "" {
 		return nil, fmt.Errorf("cellbox: user version, base image, and profile ID are required")
 	}
@@ -289,7 +273,7 @@ func (c *Client) BuildRevision(ctx context.Context, templateID string, opts Crea
 	if err != nil {
 		return nil, err
 	}
-	return c.submit(ctx, path+"/revisions", idempotencyKey, opts)
+	return c.submit(ctx, path+"/revisions", opts)
 }
 
 // WaitBuildRevision waits for a build and loads the resulting immutable revision.
@@ -347,7 +331,7 @@ func (c *Client) ListTemplateRevisions(ctx context.Context, templateID string, o
 		path += "?" + encoded
 	}
 	var revisions []TemplateRevision
-	err = c.do(ctx, http.MethodGet, path, "", nil, &revisions)
+	err = c.do(ctx, http.MethodGet, path, nil, &revisions)
 	return revisions, err
 }
 
@@ -357,7 +341,7 @@ func (c *Client) GetTemplateRevision(ctx context.Context, id string) (*TemplateR
 		return nil, err
 	}
 	var revision TemplateRevision
-	err = c.do(ctx, http.MethodGet, path, "", nil, &revision)
+	err = c.do(ctx, http.MethodGet, path, nil, &revision)
 	return &revision, err
 }
 
@@ -379,7 +363,7 @@ func (c *Client) UpdateTemplateRevision(ctx context.Context, id string, opts Upd
 		return nil, err
 	}
 	var revision TemplateRevision
-	err = c.do(ctx, http.MethodPatch, path, "", opts, &revision)
+	err = c.do(ctx, http.MethodPatch, path, opts, &revision)
 	return &revision, err
 }
 
@@ -413,7 +397,7 @@ func (c *Client) ListOperations(ctx context.Context, opts ...OperationListOption
 		path += "?" + encoded
 	}
 	var operations []Operation
-	err := c.do(ctx, http.MethodGet, path, "", nil, &operations)
+	err := c.do(ctx, http.MethodGet, path, nil, &operations)
 	return operations, err
 }
 
@@ -442,7 +426,7 @@ func (c *Client) GetOperationLogs(ctx context.Context, id string, offset int64, 
 		path += "/logs"
 	}
 	var logs OperationLogs
-	err = c.do(ctx, http.MethodGet, path, "", nil, &logs)
+	err = c.do(ctx, http.MethodGet, path, nil, &logs)
 	return &logs, err
 }
 
@@ -453,7 +437,7 @@ func (c *Client) CancelOperation(ctx context.Context, id string) (*Operation, er
 		return nil, err
 	}
 	var operation Operation
-	err = c.do(ctx, http.MethodPost, path+":cancel", "", struct{}{}, &operation)
+	err = c.do(ctx, http.MethodPost, path+":cancel", struct{}{}, &operation)
 	return &operation, err
 }
 
@@ -464,7 +448,7 @@ func (c *Client) DeleteTemplate(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	return c.do(ctx, http.MethodDelete, path, "", nil, nil)
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
 }
 
 func (c *Client) GetOperation(ctx context.Context, id string) (*Operation, error) {
@@ -480,7 +464,7 @@ func (c *Client) getOperation(ctx context.Context, id string, wait bool) (*Opera
 		path += "?waitMs=10000"
 	}
 	var op Operation
-	if err := c.do(ctx, http.MethodGet, path, "", nil, &op); err != nil {
+	if err := c.do(ctx, http.MethodGet, path, nil, &op); err != nil {
 		return nil, err
 	}
 	if op.ID != id {
@@ -519,7 +503,6 @@ func (c *Client) wait(ctx context.Context, op *Operation) (*Operation, error) {
 		if err != nil {
 			return op, &OperationError{Operation: op, Err: err}
 		}
-		next.IdempotencyKey = op.IdempotencyKey
 		op = next
 		// Avoid busy polling if an intermediary/server returns early.
 		if (op.Status == "running" || op.Status == "queued" || op.Status == "cancelling") && time.Since(started) < 100*time.Millisecond {
@@ -540,7 +523,7 @@ func (c *Client) GetExecution(ctx context.Context, id string) (*Execution, error
 		return nil, err
 	}
 	var execution Execution
-	if err := c.do(ctx, http.MethodGet, path, "", nil, &execution); err != nil {
+	if err := c.do(ctx, http.MethodGet, path, nil, &execution); err != nil {
 		return nil, err
 	}
 	return &execution, nil

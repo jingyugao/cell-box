@@ -1,27 +1,28 @@
 {{- if .Values.api.enabled }}
 {{- $apiNamespace := include "cellbox.apiNamespace" . }}
-{{- $localMetadata := .Values.localMetadata | default dict }}
-{{- $localMetadataEnabled := get $localMetadata "enabled" | default false }}
-{{- $localMetadataInitialize := get $localMetadata "initialize" | default false }}
-{{- $localMetadataNode := get $localMetadata "nodeName" | default "" | toString | trim }}
-{{- $localMetadataHostPath := get $localMetadata "hostPath" | default "/var/lib/cellbox-metadata" | toString }}
-{{- $catalogClaim := .Values.api.catalogExistingClaim | default "" | toString | trim }}
-{{- if and (not $localMetadataEnabled) (eq $catalogClaim "") }}{{- fail "SQLite catalog requires localMetadata.enabled or api.catalogExistingClaim on persistent local/block storage" }}{{- end }}
+{{- $storage := .Values.storage | default dict }}
+{{- $storageHostPath := get $storage "hostPath" | default "/var/lib/cellbox-data" | toString | trim }}
+{{- $storageClaim := get $storage "existingClaim" | default "" | toString | trim }}
+{{- $dataDir := get (.Values.api.config | default dict) "dataDir" | default "/var/lib/cellbox-data" | toString | trim }}
+{{- $serverNode := .Values.server.nodeName | default "" | toString | trim }}
+{{- if eq $serverNode "" }}{{- fail "server.nodeName is required; the single server must be pinned to its runtime node" }}{{- end }}
+{{- if ne $apiNamespace .Release.Namespace }}{{- fail "api.namespace must match the release namespace for the single-server runtime" }}{{- end }}
+{{- range $selectorName, $selector := dict "api.nodeSelector" (.Values.api.nodeSelector | default dict) "controller.nodeSelector" (.Values.controller.nodeSelector | default dict) }}
+  {{- if and (hasKey $selector "kubernetes.io/hostname") (ne (get $selector "kubernetes.io/hostname" | toString) $serverNode) }}{{- fail (printf "%s kubernetes.io/hostname conflicts with server.nodeName" $selectorName) }}{{- end }}
+{{- end }}
+{{- if ne $dataDir "/var/lib/cellbox-data" }}{{- fail "api.config.dataDir must be /var/lib/cellbox-data to use the configured persistent storage" }}{{- end }}
 {{- if ne (int .Values.api.replicas) 1 }}{{- fail "api.replicas must be 1; the API has a single active Lease owner" }}{{- end }}
-{{- if and $localMetadataInitialize (not $localMetadataEnabled) }}{{- fail "localMetadata.initialize requires localMetadata.enabled" }}{{- end }}
-{{- if $localMetadataEnabled }}
-  {{- if not .Values.controller.enabled }}{{- fail "localMetadata.enabled requires controller.enabled" }}{{- end }}
-  {{- if eq $localMetadataNode "" }}{{- fail "localMetadata.nodeName is required when localMetadata.enabled" }}{{- end }}
-  {{- if or (not (hasPrefix "/" $localMetadataHostPath)) (eq $localMetadataHostPath "/") (hasSuffix "/" $localMetadataHostPath) (contains "//" $localMetadataHostPath) (regexMatch "(^|/)\\.{1,2}(/|$)" $localMetadataHostPath) }}{{- fail "localMetadata.hostPath must be a clean absolute path other than /" }}{{- end }}
-  {{- $apiNodeSelector := .Values.api.nodeSelector | default dict }}
-  {{- if and (hasKey $apiNodeSelector "kubernetes.io/hostname") (ne (get $apiNodeSelector "kubernetes.io/hostname" | toString) $localMetadataNode) }}{{- fail "api.nodeSelector kubernetes.io/hostname conflicts with localMetadata.nodeName" }}{{- end }}
-  {{- $controllerNodeSelector := .Values.controller.nodeSelector | default dict }}
-  {{- if and (hasKey $controllerNodeSelector "kubernetes.io/hostname") (ne (get $controllerNodeSelector "kubernetes.io/hostname" | toString) $localMetadataNode) }}{{- fail "controller.nodeSelector kubernetes.io/hostname conflicts with localMetadata.nodeName" }}{{- end }}
+{{- if eq $storageClaim "" }}
+  {{- if or (not (hasPrefix "/" $storageHostPath)) (eq $storageHostPath "/") (hasSuffix "/" $storageHostPath) (contains "//" $storageHostPath) (regexMatch "(^|/)\\.{1,2}(/|$)" $storageHostPath) }}{{- fail "storage.hostPath must be a clean absolute path other than /" }}{{- end }}
+{{- end }}
+{{- range $i, $profile := (.Values.api.config.profiles | default list) }}
+  {{- if and (hasKey $profile "namespace") (ne (get $profile "namespace" | toString) $.Release.Namespace) }}{{- fail (printf "api.config.profiles[%d].namespace must match the release namespace" $i) }}{{- end }}
+  {{- if and (hasKey $profile "nodeName") (ne (get $profile "nodeName" | toString) $serverNode) }}{{- fail (printf "api.config.profiles[%d].nodeName must match server.nodeName" $i) }}{{- end }}
 {{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: cellbox-api
+  name: cellbox-server
   namespace: {{ $apiNamespace }}
 spec:
   replicas: {{ .Values.api.replicas }}
@@ -29,11 +30,11 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: cellbox-api
+      app: cellbox-server
   template:
     metadata:
       labels:
-        app: cellbox-api
+        app: cellbox-server
       annotations:
         checksum/object-storage: {{ include "cellbox.objectStorageConfig" . | sha256sum }}
         {{- if .Values.api.manageSecrets }}
@@ -43,45 +44,27 @@ spec:
         checksum/buildkit-config: {{ include (print $.Template.BasePath "/buildkit-config.yaml") . | sha256sum }}
         {{- end }}
     spec:
-      serviceAccountName: cellbox-api
+      serviceAccountName: cellbox-server
       automountServiceAccountToken: true
-      {{- if $localMetadataEnabled }}
       nodeSelector:
-        {{- toYaml (mergeOverwrite (deepCopy (.Values.api.nodeSelector | default dict)) (dict "kubernetes.io/hostname" $localMetadataNode)) | nindent 8 }}
-      {{- else }}
-      {{- with .Values.api.nodeSelector }}
-      nodeSelector:
+        {{- toYaml (mergeOverwrite (deepCopy (.Values.controller.nodeSelector | default dict)) (mergeOverwrite (deepCopy (.Values.api.nodeSelector | default dict)) (dict "kubernetes.io/hostname" $serverNode))) | nindent 8 }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- end }}
+      hostPID: true
+      terminationGracePeriodSeconds: 60
       securityContext:
-        runAsUser: 10001
-        runAsGroup: 10001
-        fsGroup: 10001
+        runAsUser: 0
+        runAsGroup: 0
+        fsGroup: 0
         {{- if .Values.buildkit.enabled }}
         supplementalGroups: [1000]
         {{- end }}
         seccompProfile:
           type: RuntimeDefault
-      {{- if or .Values.buildkit.enabled $localMetadataEnabled }}
+      {{- if .Values.buildkit.enabled }}
       initContainers:
-        {{- if $localMetadataEnabled }}
-        - name: prepare-local-metadata
-          image: {{ include "cellbox.image" (dict "root" . "image" .Values.api.initImage) | quote }}
-          command: [/bin/sh, -ec, 'chown 10001:10001 /var/lib/cellbox-metadata && chmod 0700 /var/lib/cellbox-metadata']
-          securityContext:
-            runAsUser: 0
-            runAsNonRoot: false
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: [ALL]
-              add: [CHOWN, FOWNER]
-          volumeMounts:
-            - name: local-metadata
-              mountPath: /var/lib/cellbox-metadata
-        {{- end }}
-        {{- if .Values.buildkit.enabled }}
         - name: prepare-buildkit-dirs
           image: {{ include "cellbox.image" (dict "root" . "image" .Values.api.initImage) | quote }}
           # fsGroup leaves a setgid group outside RootlessKit's UID/GID mapping.
@@ -100,13 +83,12 @@ spec:
               mountPath: /run/cellbox-buildkit
             - name: buildkit-cache
               mountPath: /home/user/.local/share/buildkit
-        {{- end }}
       {{- end }}
       containers:
-        - name: api
-          image: {{ include "cellbox.image" (dict "root" . "image" .Values.api.image) | quote }}
-          imagePullPolicy: {{ .Values.api.imagePullPolicy }}
-          command: [/usr/local/bin/cellbox-api]
+        - name: server
+          image: {{ include "cellbox.image" (dict "root" . "image" .Values.server.image) | quote }}
+          imagePullPolicy: {{ .Values.server.imagePullPolicy }}
+          command: [/opt/cellbox/bin/cellbox-server]
           args:
             - --config
             - /etc/cellbox/config.json
@@ -114,32 +96,37 @@ spec:
             - /etc/cellbox-storage/config.json
             - --leader-election-namespace
             - {{ $apiNamespace }}
-            {{- if not $localMetadataEnabled }}
-            - --catalog-dir=/var/lib/cellbox-catalog/catalog
-            {{- end }}
-            {{- if $localMetadataEnabled }}
-            - --local-metadata-dir=/var/lib/cellbox-metadata
-            {{- if $localMetadataInitialize }}
-            - --initialize-local-metadata
-            {{- end }}
-            {{- end }}
+            - --node=$(NODE_NAME)
+            - --namespace={{ .Release.Namespace }}
+            - --warm-pool-size={{ if hasKey .Values.controller "warmPoolSize" }}{{ .Values.controller.warmPoolSize }}{{ else }}2{{ end }}
+            - --host-mount-namespace
+            - --cri-socket={{ .Values.controller.criSocket }}
             {{- if .Values.buildkit.enabled }}
             - --buildkit-addr
             - unix:///run/cellbox-buildkit/buildkitd.sock
             - --image-repository
             - {{ required "buildkit.repository is required when enabled" .Values.buildkit.repository | quote }}
             - --guest-binary
-            - /usr/local/bin/cellbox-container-agent
+            - /opt/cellbox/bin/cellbox-container-agent
             - --buildctl
-            - /usr/local/bin/buildctl
+            - /opt/cellbox/bin/buildctl
             {{- if and .Values.buildkit.registryHTTP .Values.buildkit.registryHost }}
             - --image-insecure-registry
             - {{ .Values.buildkit.registryHost | quote }}
             {{- end }}
             {{- end }}
           env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
             - name: HOME
               value: /tmp
+            - name: PATH
+              value: /host/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+            {{- with .Values.controller.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
             {{- if and .Values.buildkit.enabled .Values.buildkit.registryCredentialsSecret }}
             - name: DOCKER_CONFIG
               value: /etc/cellbox-registry
@@ -167,18 +154,10 @@ spec:
               port: http
             periodSeconds: 3
           resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: "1"
-              memory: 512Mi
+            {{- toYaml .Values.server.resources | nindent 12 }}
           securityContext:
-            runAsNonRoot: true
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: [ALL]
+            privileged: true
+            runAsUser: 0
           volumeMounts:
             - name: object-storage
               mountPath: /etc/cellbox-storage
@@ -187,17 +166,20 @@ spec:
               mountPath: /etc/cellbox
               readOnly: true
             - name: data
-              mountPath: /var/lib/cellbox
-            {{- if not $localMetadataEnabled }}
-            - name: catalog
-              mountPath: /var/lib/cellbox-catalog
-            {{- end }}
-            {{- if $localMetadataEnabled }}
-            - name: local-metadata
-              mountPath: /var/lib/cellbox-metadata
-            {{- end }}
+              mountPath: /var/lib/cellbox-data
             - name: temp
               mountPath: /tmp
+            - name: cri-directory
+              mountPath: {{ .Values.controller.criDirectory }}
+            - name: runsc-root
+              mountPath: /run/containerd/runsc/k8s.io
+            - name: snapshot-store
+              mountPath: /var/lib/cellbox
+            - name: host-binaries
+              # Checkpoint hashes /usr/local/bin/runsc before nsenter runs it
+              # at the same path in the host mount namespace.
+              mountPath: /usr/local/bin
+              readOnly: true
             {{- if .Values.buildkit.enabled }}
             - name: buildkit-socket
               mountPath: /run/cellbox-buildkit
@@ -259,22 +241,33 @@ spec:
               - key: config.json
                 path: config.json
         - name: data
-          emptyDir:
-            sizeLimit: {{ .Values.api.temporaryStorageSize }}
-        {{- if not $localMetadataEnabled }}
-        - name: catalog
+          {{- if ne $storageClaim "" }}
           persistentVolumeClaim:
-            claimName: {{ $catalogClaim | quote }}
-        {{- end }}
+            claimName: {{ $storageClaim | quote }}
+          {{- else }}
+          hostPath:
+            path: {{ $storageHostPath | quote }}
+            type: DirectoryOrCreate
+          {{- end }}
+        - name: cri-directory
+          hostPath:
+            path: {{ .Values.controller.criDirectory }}
+            type: Directory
+        - name: runsc-root
+          hostPath:
+            path: /run/containerd/runsc/k8s.io
+            type: DirectoryOrCreate
+        - name: snapshot-store
+          hostPath:
+            path: /var/lib/cellbox
+            type: DirectoryOrCreate
+        - name: host-binaries
+          hostPath:
+            path: /usr/local/bin
+            type: DirectoryOrCreate
         - name: temp
           emptyDir:
             sizeLimit: {{ ternary "1Gi" "64Mi" .Values.buildkit.enabled }}
-        {{- if $localMetadataEnabled }}
-        - name: local-metadata
-          hostPath:
-            path: {{ $localMetadataHostPath | quote }}
-            type: DirectoryOrCreate
-        {{- end }}
         {{- if .Values.buildkit.enabled }}
         {{- if .Values.buildkit.registryCredentialsSecret }}
         - name: registry-credentials
@@ -302,7 +295,7 @@ metadata:
   namespace: {{ $apiNamespace }}
 spec:
   selector:
-    app: cellbox-api
+    app: cellbox-server
   ports:
     - name: http
       port: 8090

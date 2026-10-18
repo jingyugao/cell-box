@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -113,7 +112,7 @@ func (f *fakeRuntime) CaptureWorkspaceArchive(ctx context.Context, w *api.Resuma
 	if f.archiveHook != nil {
 		f.archiveHook(ctx, w, request)
 	}
-	return api.ArchiveCaptureResult{ID: request.ID, Snapshot: request.Snapshot, DiskOnly: request.DiskOnly, Size: 12, SHA256: strings.Repeat("a", 64)}, nil
+	return api.ArchiveCaptureResult{SourceUID: string(w.UID), SourceGeneration: w.Generation, ID: request.ID, Snapshot: request.Snapshot, Size: 12, SHA256: strings.Repeat("a", 64)}, nil
 }
 
 func TestSuspendedWorkspaceArchiveDispatchAndStaleRequestProgress(t *testing.T) {
@@ -128,6 +127,7 @@ func TestSuspendedWorkspaceArchiveDispatchAndStaleRequestProgress(t *testing.T) 
 		if err := r.Update(context.Background(), w); err != nil {
 			t.Fatal(err)
 		}
+		w.Status.SpecHash = fingerprint(w)
 		w.Status.Phase = "Suspended"
 		w.Status.Snapshot = "checkpoint-1"
 		w.Status.PodName, w.Status.PodUID = "", ""
@@ -182,122 +182,43 @@ func TestSuspendedWorkspaceArchiveDispatchAndStaleRequestProgress(t *testing.T) 
 	})
 }
 
-func TestDiskOnlyArchiveStopsFailedExecutionBeforeCapturingHome(t *testing.T) {
+func TestFailedStoppedWorkspaceArchiveDoesNotChangeLifecycle(t *testing.T) {
 	r, runtime, w := fixture(t)
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(w), w); err != nil {
 		t.Fatal(err)
 	}
-	// Broken execution settings must not prevent reading an already-owned disk.
-	w.Spec.Container.ImagePullPolicy = core.PullAlways
 	w.Spec.PersistentHome = true
-	w.Spec.DesiredState = "Suspended"
-	w.Annotations = map[string]string{api.ArchiveRequestAnnotation: `{"id":"arc-0123456789abcdef0123456789abcdef","snapshot":"","expiresAt":"2099-01-01T00:00:00Z","diskOnly":true}`}
+	w.Annotations = map[string]string{api.ArchiveRequestAnnotation: `{"id":"arc-0123456789abcdef0123456789abcdef","snapshot":"","expiresAt":"2099-01-01T00:00:00Z"}`}
 	if err := r.Update(context.Background(), w); err != nil {
 		t.Fatal(err)
 	}
 	w.Status.SpecHash = fingerprint(w)
 	w.Status.Phase = "Failed"
+	w.Status.PodName, w.Status.PodUID = "", ""
 	w.Status.Snapshot = ""
-	w.Status.PodName, w.Status.PodUID = "old", "old-uid"
-	if err := r.Status().Update(context.Background(), w); err != nil {
-		t.Fatal(err)
-	}
-	runtime.archiveHook = func(ctx context.Context, source *api.ResumablePod, _ api.ArchiveCaptureRequest) {
-		pods := &core.PodList{}
-		if err := r.List(ctx, pods, client.InNamespace(source.Namespace)); err != nil {
-			t.Fatal(err)
-		}
-		for i := range pods.Items {
-			if owned(source, &pods.Items[i]) || pods.Items[i].Labels[api.OwnerLabel] == string(source.UID) {
-				t.Fatal("disk archive started before the execution Pod was absent")
-			}
-		}
-		if runtime.cleanups == 0 {
-			t.Fatal("disk archive started before runtime cleanup")
-		}
-	}
-	for i := 0; i < 4; i++ {
-		step(t, r, w)
-		if runtime.archiveCaptures == 1 {
-			break
-		}
-	}
-	if runtime.archiveCaptures != 1 || runtime.checkpoints != 0 || runtime.prepares != 0 || runtime.cleanups < 1 {
-		t.Fatalf("disk archive lifecycle: captures=%d checkpoints=%d prepares=%d cleanups=%d", runtime.archiveCaptures, runtime.checkpoints, runtime.prepares, runtime.cleanups)
-	}
-	if w.Status.Phase != "Failed" || w.Status.Snapshot != "" || w.Status.PodName != "" || w.Status.PodUID != "" ||
-		w.Status.Message != diskArchiveStoppedMessage || w.Status.RetryNonce != w.Spec.RetryNonce {
-		t.Fatalf("execution was not left stopped from persistent HOME: %+v", w.Status)
-	}
-	var result api.ArchiveCaptureResult
-	if err := json.Unmarshal([]byte(w.Annotations[api.ArchiveResultAnnotation]), &result); err != nil || result.Error != "" {
-		t.Fatalf("disk-only archive result=%+v err=%v", result, err)
-	}
-}
-
-func TestDiskOnlyArchiveDoesNotPublishAfterLifecycleChanges(t *testing.T) {
-	r, runtime, w := fixture(t)
-	if err := r.Get(context.Background(), client.ObjectKeyFromObject(w), w); err != nil {
-		t.Fatal(err)
-	}
-	w.Spec.PersistentHome = true
-	w.Spec.DesiredState = "Suspended"
-	w.Annotations = map[string]string{api.ArchiveRequestAnnotation: `{"id":"arc-0123456789abcdef0123456789abcdef","expiresAt":"2099-01-01T00:00:00Z","diskOnly":true}`}
-	if err := r.Update(context.Background(), w); err != nil {
-		t.Fatal(err)
-	}
-	w.Status.SpecHash = fingerprint(w)
-	w.Status.Phase = "Failed"
-	w.Status.PodName, w.Status.PodUID = "", ""
-	if err := r.Status().Update(context.Background(), w); err != nil {
-		t.Fatal(err)
-	}
-	runtime.archiveHook = func(ctx context.Context, source *api.ResumablePod, _ api.ArchiveCaptureRequest) {
-		changed := &api.ResumablePod{}
-		if err := r.Get(ctx, client.ObjectKeyFromObject(source), changed); err != nil {
-			t.Fatal(err)
-		}
-		changed.Spec.DesiredState = "Running"
-		if err := r.Update(ctx, changed); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for i := 0; i < 4 && runtime.archiveCaptures == 0; i++ {
-		step(t, r, w)
-	}
-	if runtime.archiveCaptures != 1 {
-		t.Fatalf("expected one capture, got %d", runtime.archiveCaptures)
-	}
-	if _, ok := w.Annotations[api.ArchiveResultAnnotation]; ok {
-		t.Fatal("published archive result after lifecycle changed")
-	}
-}
-
-func TestDiskOnlyArchivePreservesAlreadySuspendedCheckpoint(t *testing.T) {
-	r, runtime, w := fixture(t)
-	if err := r.Get(context.Background(), client.ObjectKeyFromObject(w), w); err != nil {
-		t.Fatal(err)
-	}
-	pod := &core.Pod{ObjectMeta: meta.ObjectMeta{Name: "old", Namespace: w.Namespace}}
-	if err := r.Delete(context.Background(), pod); err != nil {
-		t.Fatal(err)
-	}
-	w.Spec.PersistentHome = true
-	w.Spec.DesiredState = "Suspended"
-	w.Annotations = map[string]string{api.ArchiveRequestAnnotation: `{"id":"arc-0123456789abcdef0123456789abcdef","expiresAt":"2099-01-01T00:00:00Z","diskOnly":true}`}
-	if err := r.Update(context.Background(), w); err != nil {
-		t.Fatal(err)
-	}
-	w.Status.SpecHash = fingerprint(w)
-	w.Status.Phase = "Suspended"
-	w.Status.Snapshot = "checkpoint-1"
-	w.Status.PodName, w.Status.PodUID = "", ""
 	if err := r.Status().Update(context.Background(), w); err != nil {
 		t.Fatal(err)
 	}
 	step(t, r, w)
-	if runtime.archiveCaptures != 1 || runtime.checkpoints != 0 || w.Status.Phase != "Suspended" || w.Status.Snapshot != "checkpoint-1" {
-		t.Fatalf("suspended disk archive changed checkpoint state: captures=%d checkpoints=%d status=%+v", runtime.archiveCaptures, runtime.checkpoints, w.Status)
+	if runtime.archiveCaptures != 1 || w.Status.Phase != "Failed" || w.Status.PodName != "" || w.Status.PodUID != "" {
+		t.Fatalf("failed archive changed lifecycle: captures=%d status=%+v", runtime.archiveCaptures, w.Status)
+	}
+	var result api.ArchiveCaptureResult
+	if err := json.Unmarshal([]byte(w.Annotations[api.ArchiveResultAnnotation]), &result); err != nil || result.Error != "" || result.SourceUID != string(w.UID) {
+		t.Fatalf("failed archive result=%+v err=%v", result, err)
+	}
+}
+
+func TestArchiveSourceFencesPodIdentity(t *testing.T) {
+	before := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{UID: "uid", Generation: 3, Annotations: map[string]string{api.ArchiveRequestAnnotation: "request"}}, Spec: api.Spec{TransitionID: "transition", PersistentHome: true}, Status: api.Status{Phase: "Suspended", SpecHash: "spec", Snapshot: "checkpoint"}}
+	current := before.DeepCopy()
+	if !sameWorkspaceArchiveSource(before, current, "request") {
+		t.Fatal("unchanged stopped archive source was rejected")
+	}
+	current.Status.PodUID = "new-pod-uid"
+	current.Status.PodName = "new-pod"
+	if sameWorkspaceArchiveSource(before, current, "request") {
+		t.Fatal("archive result would be published after a new Pod appeared")
 	}
 }
 
@@ -719,123 +640,5 @@ func TestInventoryFailureKeepsPausePending(t *testing.T) {
 	step(t, r, w)
 	if w.Status.Phase != "Suspended" {
 		t.Fatalf("pause did not complete after index recovery: %s", w.Status.Phase)
-	}
-}
-
-type rebuildRuntime struct {
-	*fakeRuntime
-	rebuilds     int
-	rebuildError error
-}
-
-func (f *rebuildRuntime) Rebuild(context.Context, *api.ResumablePod) error {
-	f.rebuilds++
-	return f.rebuildError
-}
-
-func TestExplicitHomeRebuildColdStartsSameOwnerAndStopsOnMissingHome(t *testing.T) {
-	for _, missing := range []bool{false, true} {
-		t.Run(fmt.Sprint(missing), func(t *testing.T) {
-			ctx := context.Background()
-			r, f, w := fixture(t)
-			backend := &rebuildRuntime{fakeRuntime: f}
-			if missing {
-				backend.rebuildError = errors.New("persistent HOME missing")
-			}
-			r.Runtime = backend
-			w.Spec.PersistentHome = true
-			w.Status.SpecHash = fingerprint(w)
-			if err := r.Update(ctx, w); err != nil {
-				t.Fatal(err)
-			}
-			w.Status.SpecHash = fingerprint(w)
-			w.Status.Phase = "Failed"
-			w.Status.Snapshot = "obsolete-checkpoint"
-			if err := r.Status().Update(ctx, w); err != nil {
-				t.Fatal(err)
-			}
-			// No automatic restart or archive fallback when the execution fails.
-			step(t, r, w)
-			if backend.rebuilds != 0 || w.Status.Phase != "Failed" {
-				t.Fatal(w.Status)
-			}
-			w.Spec.RebuildNonce = "explicit-request"
-			if err := r.Update(ctx, w); err != nil {
-				t.Fatal(err)
-			}
-			for i := 0; i < 5 && w.Status.RebuildNonce == ""; i++ {
-				step(t, r, w)
-			}
-			if backend.rebuilds != 1 || w.UID != "12345678-aaaa" || w.Status.RebuildNonce != "explicit-request" {
-				t.Fatal(w.Status, backend.rebuilds)
-			}
-			if missing {
-				if w.Status.Phase != "Failed" || !strings.Contains(w.Status.Message, "persistent HOME missing") {
-					t.Fatal(w.Status)
-				}
-				step(t, r, w)
-				if backend.rebuilds != 1 {
-					t.Fatal("automatically retried failed rebuild")
-				}
-			} else if w.Status.Phase != "Creating" || w.Status.Snapshot != "" || w.Status.Cycle != 2 || w.Status.PodUID != "" {
-				t.Fatal("rebuild must cold-start without checkpoint", w.Status)
-			}
-		})
-	}
-}
-
-type upgradeRuntime struct {
-	*fakeRuntime
-	upgrades int
-	client   client.Client
-	t        *testing.T
-}
-
-func (f *upgradeRuntime) Upgrade(ctx context.Context, w *api.ResumablePod, target string) error {
-	var pods core.PodList
-	if err := f.client.List(ctx, &pods, client.InNamespace(w.Namespace)); err != nil {
-		return err
-	}
-	if len(pods.Items) != 0 {
-		f.t.Fatal("disk rebound before old Pod deletion completed")
-	}
-	if target == w.Status.SpecHash {
-		f.t.Fatal("upgrade retained old image fingerprint")
-	}
-	f.upgrades++
-	return nil
-}
-func TestImageUpgradeRemovesOldPodBeforeRebindingAndNeverReplaysCheckpoint(t *testing.T) {
-	ctx := context.Background()
-	r, f, w := fixture(t)
-	w.Spec.PersistentHome = true
-	if err := r.Update(ctx, w); err != nil {
-		t.Fatal(err)
-	}
-	w.Status.SpecHash = fingerprint(w)
-	w.Status.Snapshot = "old-memory"
-	if err := r.Status().Update(ctx, w); err != nil {
-		t.Fatal(err)
-	}
-	backend := &upgradeRuntime{fakeRuntime: f, client: r.Client, t: t}
-	r.Runtime = backend
-	w.Spec.Upgrade = &api.UpgradeRequest{Nonce: "upgrade", PreviousContainer: *w.Spec.Container.DeepCopy()}
-	w.Spec.Container.Image = "next:local"
-	if err := r.Update(ctx, w); err != nil {
-		t.Fatal(err)
-	}
-	tampered := w.DeepCopy()
-	tampered.Spec.NodeName = "different-node"
-	if validate(tampered) == nil {
-		t.Fatal("upgrade admitted disk relocation")
-	}
-	for i := 0; i < 6 && w.Status.UpgradeNonce == ""; i++ {
-		step(t, r, w)
-	}
-	if backend.upgrades != 1 || w.Status.UpgradeNonce != "upgrade" || w.Status.Snapshot != "" || w.Status.Cycle != 2 || w.Status.PodUID != "" || w.Status.Phase != "Creating" {
-		t.Fatal(w.Status, backend.upgrades)
-	}
-	if w.UID != "12345678-aaaa" {
-		t.Fatal("changed disk owner")
 	}
 }

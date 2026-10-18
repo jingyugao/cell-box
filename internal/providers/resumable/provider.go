@@ -3,25 +3,25 @@ package resumable
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"net"
 	"path"
-	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/boxprovider"
 	"cellbox.local/cellbox/internal/guestapi"
 	"cellbox.local/cellbox/internal/inventory"
+	"cellbox.local/cellbox/internal/runtimecontrol"
 	"cellbox.local/cellbox/internal/telemetry"
+	"cellbox.local/cellbox/internal/warmtemplates"
 	core "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -40,6 +40,12 @@ var validImage = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}
 
 type Provider struct {
 	Client client.Client
+	// Local connects the HTTP service to the embedded runtime. CRs remain the
+	// durable ledger; scheduling and completion notifications stay in process.
+	Local           *runtimecontrol.Client
+	CacheImageLocal func(context.Context, string, string, string) error
+	warmMu          sync.RWMutex
+	warmSnapshot    warmtemplates.Snapshot
 }
 
 func New(c client.Client) *Provider { return &Provider{Client: c} }
@@ -201,14 +207,6 @@ func (p *Provider) Inspect(ctx context.Context, h boxprovider.Handle) (boxprovid
 		obs.Phase = "deleting"
 		return obs, nil
 	}
-	if w.Spec.Upgrade != nil && w.Spec.Upgrade.Nonce != w.Status.UpgradeNonce {
-		obs.Phase, obs.ExecutionID = "creating", ""
-		return obs, nil
-	}
-	if w.Status.Phase == "Failed" && w.Spec.PersistentHome && w.Spec.DesiredState == "Running" && w.Spec.RebuildNonce != "" && w.Spec.RebuildNonce != w.Status.RebuildNonce {
-		obs.Phase, obs.ExecutionID = "creating", ""
-		return obs, nil
-	}
 	switch w.Status.Phase {
 	case "", "Creating":
 		obs.Phase = "creating"
@@ -316,7 +314,7 @@ func (p *Provider) ActionTransition(ctx context.Context, h boxprovider.Handle, a
 	switch action {
 	case "suspend":
 		desired = "Suspended"
-	case "resume", "rebuild":
+	case "resume":
 		desired = "Running"
 	case "freeze", "unfreeze":
 		return boxprovider.ErrUnsupported
@@ -333,7 +331,7 @@ func (p *Provider) ActionTransition(ctx context.Context, h boxprovider.Handle, a
 	if transitionID != "" {
 		if w.Spec.TransitionID == transitionID {
 			// Recovery/retry of the same durable Cellbox operation.
-			if w.Spec.DesiredState == desired && action != "rebuild" {
+			if w.Spec.DesiredState == desired {
 				return nil
 			}
 		} else {
@@ -352,23 +350,6 @@ func (p *Provider) ActionTransition(ctx context.Context, h boxprovider.Handle, a
 				return boxprovider.ErrStaleTransition
 			}
 		}
-	}
-	if action == "rebuild" {
-		if w.Status.Phase != "Failed" || !w.Spec.PersistentHome {
-			return errors.New("rebuild requires a failed Box with persistent HOME")
-		}
-		old := w.DeepCopy()
-		nonce := make([]byte, 16)
-		if _, err := rand.Read(nonce); err != nil {
-			return err
-		}
-		telemetry.InjectOperation(ctx, w)
-		w.Spec.RebuildNonce = hex.EncodeToString(nonce)
-		w.Spec.DesiredState = "Running"
-		if transitionID != "" {
-			w.Spec.TransitionID = transitionID
-		}
-		return p.Client.Patch(ctx, w, client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{}))
 	}
 	if w.Status.Phase == "Failed" || w.Status.Phase == "Failing" {
 		return errors.New("ResumablePod failed; explicit operator retry is required")
@@ -392,66 +373,44 @@ func (p *Provider) ActionTransition(ctx context.Context, h boxprovider.Handle, a
 var archiveIDPattern = regexp.MustCompile(`^arc-[0-9a-f]{32}$`)
 var archiveSHA256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-func validSuspendedArchiveTarget(w *api.ResumablePod, h boxprovider.Handle) error {
-	if w.DeletionTimestamp != nil || w.Spec.DesiredState != "Suspended" || w.Status.Phase != "Suspended" ||
-		!w.Spec.PersistentHome || w.Status.Snapshot == "" || w.Status.PodUID != "" || w.Status.PodName != "" || w.Spec.NodeName != h.NodeName {
-		return errors.New("workspace archive requires a suspended persistent HOME")
+func validWorkspaceArchiveTarget(w *api.ResumablePod, h boxprovider.Handle) error {
+	if w.DeletionTimestamp != nil || !w.Spec.PersistentHome || w.Status.PodUID != "" || w.Status.PodName != "" || w.Spec.NodeName != h.NodeName {
+		return errors.New("workspace archive requires a stopped persistent HOME")
 	}
-	return nil
+	if w.Status.Phase == "Suspended" && w.Spec.DesiredState == "Suspended" && w.Status.Snapshot != "" {
+		return nil
+	}
+	if w.Status.Phase == "Failed" {
+		return nil
+	}
+	return errors.New("workspace archive requires a suspended or failed execution")
 }
 
-// CaptureWorkspaceArchive asks the owning node controller to package the
-// configured workspace from the already-suspended persistent HOME. It never
-// changes DesiredState or creates a Pod.
+// CaptureWorkspaceArchive asks the owning node controller to package a stopped
+// persistent HOME. It never changes DesiredState or creates a Pod.
 func (p *Provider) CaptureWorkspaceArchive(ctx context.Context, h boxprovider.Handle, id string) (int64, string, error) {
-	return p.captureWorkspaceArchive(ctx, h, id, false)
-}
-
-func (p *Provider) CaptureDiskWorkspaceArchive(ctx context.Context, h boxprovider.Handle, id string) (int64, string, error) {
-	return p.captureWorkspaceArchive(ctx, h, id, true)
-}
-
-func validDiskArchiveTarget(w *api.ResumablePod, h boxprovider.Handle) error {
-	if w.DeletionTimestamp != nil || !w.Spec.PersistentHome || w.Spec.NodeName != h.NodeName {
-		return errors.New("disk archive requires an owned persistent HOME")
-	}
-	return nil
-}
-
-func (p *Provider) captureWorkspaceArchive(ctx context.Context, h boxprovider.Handle, id string, diskOnly bool) (int64, string, error) {
 	if !archiveIDPattern.MatchString(id) {
 		return 0, "", errors.New("invalid archive identifier")
 	}
-	if p == nil || p.Client == nil {
-		return 0, "", errors.New("Kubernetes client is required")
+	if p == nil || p.Client == nil || p.Local == nil {
+		return 0, "", errors.New("embedded Kubernetes runtime control is required")
 	}
 	w, err := p.get(ctx, h)
 	if err != nil {
 		return 0, "", err
 	}
-	validate := validSuspendedArchiveTarget
-	if diskOnly {
-		validate = validDiskArchiveTarget
-	}
-	if err = validate(w, h); err != nil {
+	if err = validWorkspaceArchiveTarget(w, h); err != nil {
 		return 0, "", err
 	}
 	expectedSnapshot := w.Status.Snapshot
-	if diskOnly {
-		expectedSnapshot = ""
-	}
 	if raw := w.Annotations[api.ArchiveResultAnnotation]; raw != "" {
 		var prior api.ArchiveCaptureResult
 		if json.Unmarshal([]byte(raw), &prior) == nil && prior.ID == id {
-			if prior.Snapshot != expectedSnapshot || prior.DiskOnly != diskOnly {
-				return 0, "", errors.New("workspace checkpoint changed since this archive request")
+			if prior.Snapshot != expectedSnapshot || prior.SourceUID != string(w.UID) || prior.SourceGeneration != w.Generation {
+				return 0, "", errors.New("workspace source changed since archive capture")
 			}
 			if prior.Error != "" || prior.Size < 1 || !archiveSHA256Pattern.MatchString(prior.SHA256) {
-				return 0, "", errors.New("prior workspace archive request did not complete successfully")
-			}
-			if diskOnly && (w.Spec.DesiredState != "Suspended" || w.Status.PodUID != "" || w.Status.PodName != "" ||
-				(w.Status.Phase != "Failed" && w.Status.Phase != "Suspended") || prior.SourceUID != string(w.UID) || prior.SourceGeneration != w.Generation) {
-				return 0, "", errors.New("disk archive source changed since capture")
+				return 0, "", errors.New("workspace archive request did not complete successfully")
 			}
 			p.clearArchiveCapture(h, id, true)
 			return prior.Size, prior.SHA256, nil
@@ -459,40 +418,25 @@ func (p *Provider) captureWorkspaceArchive(ctx context.Context, h boxprovider.Ha
 	}
 	if raw := w.Annotations[api.ArchiveRequestAnnotation]; raw != "" {
 		var request api.ArchiveCaptureRequest
-		if err = json.Unmarshal([]byte(raw), &request); err != nil || (request.ID != id && time.Now().Before(request.ExpiresAt)) || (request.ID == id && (request.Snapshot != expectedSnapshot || request.DiskOnly != diskOnly)) {
+		if err = json.Unmarshal([]byte(raw), &request); err != nil ||
+			(request.ID != id && time.Now().Before(request.ExpiresAt)) ||
+			(request.ID == id && request.Snapshot != expectedSnapshot) {
 			return 0, "", errors.New("another workspace archive request is pending")
 		}
-		if request.ID == id && time.Now().Before(request.ExpiresAt) {
-			// An identical live request is safe to observe after an API retry.
-		} else {
-			old := w.DeepCopy()
-			if w.Annotations == nil {
-				w.Annotations = map[string]string{}
-			}
-			request, _ := json.Marshal(api.ArchiveCaptureRequest{ID: id, Snapshot: expectedSnapshot, DiskOnly: diskOnly, ExpiresAt: time.Now().UTC().Add(14 * time.Minute)})
-			if diskOnly {
-				w.Spec.DesiredState = "Suspended"
-			}
-			w.Annotations[api.ArchiveRequestAnnotation] = string(request)
-			delete(w.Annotations, api.ArchiveResultAnnotation)
-			if err = p.Client.Patch(ctx, w, client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{})); err != nil {
-				return 0, "", err
-			}
+		if request.ID != id || !time.Now().Before(request.ExpiresAt) {
+			w.Annotations[api.ArchiveRequestAnnotation] = ""
 		}
-	} else {
-		old := w.DeepCopy()
-		if w.Annotations == nil {
-			w.Annotations = map[string]string{}
-		}
-		request, _ := json.Marshal(api.ArchiveCaptureRequest{ID: id, Snapshot: expectedSnapshot, DiskOnly: diskOnly, ExpiresAt: time.Now().UTC().Add(14 * time.Minute)})
-		if diskOnly {
-			w.Spec.DesiredState = "Suspended"
-		}
-		w.Annotations[api.ArchiveRequestAnnotation] = string(request)
-		delete(w.Annotations, api.ArchiveResultAnnotation)
-		if err = p.Client.Patch(ctx, w, client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{})); err != nil {
-			return 0, "", err
-		}
+	}
+	old := w.DeepCopy()
+	if w.Annotations == nil {
+		w.Annotations = map[string]string{}
+	}
+	request := api.ArchiveCaptureRequest{ID: id, Snapshot: expectedSnapshot, ExpiresAt: time.Now().UTC().Add(14 * time.Minute)}
+	encoded, _ := json.Marshal(request)
+	w.Annotations[api.ArchiveRequestAnnotation] = string(encoded)
+	delete(w.Annotations, api.ArchiveResultAnnotation)
+	if err = p.Client.Patch(ctx, w, client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{})); err != nil {
+		return 0, "", err
 	}
 	completed := false
 	defer func() {
@@ -503,21 +447,23 @@ func (p *Provider) captureWorkspaceArchive(ctx context.Context, h boxprovider.Ha
 
 	waitCtx, cancel := context.WithTimeout(ctx, 14*time.Minute)
 	defer cancel()
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
+	snapshots, stop, err := p.Local.Subscribe(waitCtx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name})
+	if err != nil {
+		return 0, "", err
+	}
+	defer stop()
 	for {
-		w, err = p.get(waitCtx, h)
-		if err != nil {
-			return 0, "", err
+		select {
+		case <-waitCtx.Done():
+			return 0, "", waitCtx.Err()
+		case snapshot := <-snapshots:
+			if snapshot.Deleted || !validObservationIdentity(snapshot.Resource, h) {
+				return 0, "", boxprovider.ErrNotFound
+			}
+			w = snapshot.Resource
 		}
-		if err = validate(w, h); err != nil {
-			return 0, "", err
-		}
-		if diskOnly && w.Spec.DesiredState != "Suspended" {
-			return 0, "", errors.New("disk archive was cancelled by a lifecycle change")
-		}
-		if !diskOnly && w.Status.Snapshot != expectedSnapshot {
-			return 0, "", errors.New("workspace checkpoint changed during archive capture")
+		if err = validWorkspaceArchiveTarget(w, h); err != nil || w.Status.Snapshot != expectedSnapshot {
+			return 0, "", errors.New("workspace archive source changed")
 		}
 		if raw := w.Annotations[api.ArchiveResultAnnotation]; raw != "" {
 			var result api.ArchiveCaptureResult
@@ -525,19 +471,12 @@ func (p *Provider) captureWorkspaceArchive(ctx context.Context, h boxprovider.Ha
 				return 0, "", errors.New("invalid workspace archive result")
 			}
 			if result.ID == id && result.Snapshot == expectedSnapshot {
-				if result.DiskOnly != diskOnly {
-					return 0, "", errors.New("workspace archive result mode changed")
-				}
 				if result.Error != "" {
 					p.clearArchiveCapture(h, id, false)
 					completed = true
 					return 0, "", errors.New("node workspace archive capture failed")
 				}
-				if diskOnly && (w.Status.PodUID != "" || w.Status.PodName != "" || (w.Status.Phase != "Failed" && w.Status.Phase != "Suspended") ||
-					result.SourceUID != string(w.UID) || result.SourceGeneration != w.Generation) {
-					return 0, "", errors.New("disk archive result does not have a stopped source")
-				}
-				if result.Size < 1 || !archiveSHA256Pattern.MatchString(result.SHA256) {
+				if result.SourceUID != string(w.UID) || result.SourceGeneration != w.Generation || result.Size < 1 || !archiveSHA256Pattern.MatchString(result.SHA256) {
 					return 0, "", errors.New("node returned invalid workspace archive metadata")
 				}
 				p.clearArchiveCapture(h, id, true)
@@ -545,17 +484,12 @@ func (p *Provider) captureWorkspaceArchive(ctx context.Context, h boxprovider.Ha
 				return result.Size, result.SHA256, nil
 			}
 		}
-		var request api.ArchiveCaptureRequest
-		if raw := w.Annotations[api.ArchiveRequestAnnotation]; raw == "" || json.Unmarshal([]byte(raw), &request) != nil || request.ID != id || request.Snapshot != expectedSnapshot || request.DiskOnly != diskOnly {
+		var current api.ArchiveCaptureRequest
+		if raw := w.Annotations[api.ArchiveRequestAnnotation]; raw == "" || json.Unmarshal([]byte(raw), &current) != nil || current.ID != id || current.Snapshot != expectedSnapshot {
 			return 0, "", errors.New("workspace archive request was replaced")
 		}
-		if !request.ExpiresAt.IsZero() && !time.Now().Before(request.ExpiresAt) {
+		if !time.Now().Before(current.ExpiresAt) {
 			return 0, "", errors.New("workspace archive request expired")
-		}
-		select {
-		case <-waitCtx.Done():
-			return 0, "", waitCtx.Err()
-		case <-ticker.C:
 		}
 	}
 }
@@ -577,53 +511,6 @@ func (p *Provider) clearArchiveCapture(h boxprovider.Handle, id string, preserve
 		delete(w.Annotations, api.ArchiveResultAnnotation)
 	}
 	_ = p.Client.Patch(ctx, w, client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{}))
-}
-
-func (p *Provider) Upgrade(ctx context.Context, h boxprovider.Handle, spec boxprovider.Spec, nonce string) (boxprovider.Handle, error) {
-	w, err := p.get(ctx, h)
-	if err != nil {
-		return h, err
-	}
-	if nonce == "" || len(nonce) > 128 || !validImage.MatchString(spec.Image) || !spec.Staged {
-		return h, errors.New("upgrade requires a nonce, immutable image and staged Guest")
-	}
-	if w.DeletionTimestamp != nil || !w.Spec.PersistentHome || !spec.PersistentHome ||
-		w.Spec.NodeName != spec.NodeName || w.Namespace != spec.Namespace ||
-		w.Spec.SharedReadOnlyHostPath != spec.SharedReadOnlyHostPath ||
-		w.Spec.DebugReadOnlyHostPath != spec.DebugReadOnlyHostPath || w.Spec.DebugReadWriteHostPath != spec.DebugReadWriteHostPath {
-		return h, errors.New("upgrade must retain the existing disk, node and mounts")
-	}
-	config, err := json.Marshal(spec.Config)
-	if err != nil {
-		return h, err
-	}
-	args := []string{"serve", "--config-base64", base64.StdEncoding.EncodeToString(config), "--staged"}
-	if w.Spec.Upgrade != nil && w.Spec.Upgrade.Nonce == nonce {
-		if w.Spec.Container.Image != spec.Image || !reflect.DeepEqual(w.Spec.Container.Args, args) {
-			return h, errors.New("upgrade nonce reused with different input")
-		}
-		h.ImageID = spec.Image
-		return h, nil
-	}
-	if w.Spec.Upgrade != nil && w.Spec.Upgrade.Nonce != w.Status.UpgradeNonce {
-		return h, errors.New("another disk upgrade is still pending")
-	}
-	if w.Status.Phase != "Running" && w.Status.Phase != "Suspended" && w.Status.Phase != "Failed" {
-		return h, errors.New("upgrade requires a running, suspended or failed execution")
-	}
-	old := w.DeepCopy()
-	w.Spec.Upgrade = &api.UpgradeRequest{Nonce: nonce, PreviousContainer: *w.Spec.Container.DeepCopy()}
-	w.Spec.Container.Image, w.Spec.Container.Args = spec.Image, args
-	w.Spec.DesiredState = "Running"
-	if w.Annotations == nil {
-		w.Annotations = map[string]string{}
-	}
-	w.Annotations[inventory.Annotation] = string(spec.Inventory)
-	if err := p.Client.Patch(ctx, w, client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{})); err != nil {
-		return h, err
-	}
-	h.ImageID = spec.Image
-	return h, nil
 }
 
 func (p *Provider) Destroy(ctx context.Context, h boxprovider.Handle) error {

@@ -68,8 +68,7 @@ func NewWithRunner(r Runner) *Provider { return &Provider{runner: r} }
 func (*Provider) Name() string         { return "docker" }
 
 func (p *Provider) CacheImage(ctx context.Context, image, _, _ string) error {
-	_, err := p.run(ctx, []string{"pull", image})
-	return err
+	return boxprovider.ErrUnsupported
 }
 
 type imageInfo struct {
@@ -132,7 +131,10 @@ func missing(err error) bool {
 }
 func validateSpec(s boxprovider.Spec) error {
 	if s.PersistentHome {
-		return errors.New("persistentHome is unsupported by Docker")
+		return boxprovider.ErrUnsupported
+	}
+	if s.Staged {
+		return boxprovider.ErrUnsupported
 	}
 	if !boxIDPattern.MatchString(s.BoxID) {
 		return errors.New("invalid box ID")
@@ -166,8 +168,7 @@ func fingerprint(s boxprovider.Spec, imageID string) (string, error) {
 		Config         guestapi.Config
 		CPU            float64
 		MemoryMiB      int64
-		Staged         bool
-	}{s.BoxID, imageID, s.Config, s.CPU, s.MemoryMiB, s.Staged})
+	}{s.BoxID, imageID, s.Config, s.CPU, s.MemoryMiB})
 	if err != nil {
 		return "", err
 	}
@@ -220,9 +221,6 @@ func (p *Provider) Create(ctx context.Context, s boxprovider.Spec) (boxprovider.
 		return boxprovider.Handle{}, err
 	}
 	args := []string{"create", "--name", name, "--label", ownerLabel + "=" + ownerValue, "--label", boxLabel + "=" + s.BoxID, "--label", specLabel + "=" + key, "--cpus", strconv.FormatFloat(s.CPU, 'f', -1, 64), "--memory", strconv.FormatInt(s.MemoryMiB, 10) + "m", "--user", "0:0", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "FOWNER", "--cap-add", "DAC_OVERRIDE", "--cap-add", "SETUID", "--cap-add", "SETGID", "--security-opt", "no-new-privileges", "--publish", fmt.Sprintf("127.0.0.1::%d", guestapi.Port), "--entrypoint", guestapi.Binary, img.ID, "serve", "--config-base64", encoded}
-	if s.Staged {
-		args = append(args, "--staged")
-	}
 	if _, err = p.run(ctx, args); err != nil {
 		// A concurrent retry may have won creation. Inspect and accept only exact ownership.
 		if c, e := p.container(ctx, name); e == nil && verify(c, s.BoxID, key) == nil && c.Image == img.ID {
@@ -318,31 +316,7 @@ func executionIdentity(c container) (string, error) {
 	return c.ID + "/" + started.UTC().Format(time.RFC3339Nano), nil
 }
 func (p *Provider) Action(ctx context.Context, h boxprovider.Handle, action string) error {
-	if action == "suspend" || action == "resume" {
-		return boxprovider.ErrUnsupported
-	}
-	if action != "freeze" && action != "unfreeze" {
-		return boxprovider.ErrUnsupported
-	}
-	c, err := p.owned(ctx, h)
-	if err != nil {
-		return err
-	}
-	if action == "freeze" {
-		if c.State.Paused {
-			return nil
-		}
-		if c.State.Status != "running" {
-			return errors.New("container is not running")
-		}
-		_, err = p.run(ctx, []string{"pause", c.ID})
-		return err
-	}
-	if !c.State.Paused {
-		return nil
-	}
-	_, err = p.run(ctx, []string{"unpause", c.ID})
-	return err
+	return boxprovider.ErrUnsupported
 }
 func (p *Provider) Destroy(ctx context.Context, h boxprovider.Handle) error {
 	c, err := p.owned(ctx, h)

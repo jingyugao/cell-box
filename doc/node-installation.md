@@ -1,6 +1,6 @@
 # Cellbox 节点手工安装
 
-在每个承载 `k8s-resumable` 工作空间的节点上完成本文步骤，再部署 Helm Chart。Chart 只创建 Kubernetes 资源，不安装 gVisor、wrapper，不修改宿主机运行时配置，也不重启节点服务。Controller 仍需特权和 hostPID 来执行 checkpoint / restore。
+在承载 `k8s-resumable` 工作空间的节点上完成本文步骤，再部署 Helm Chart。Chart 只创建 Kubernetes 资源，不安装 gVisor、wrapper，不修改宿主机运行时配置，也不重启节点服务。单进程 `cellbox-server` 需要特权和 hostPID 来执行 checkpoint / restore；部署时以 `server.nodeName` 固定到完成准备的节点。
 
 以下节点命令使用 Bash 和 sudo。普通 containerd 与 K3s 的配置步骤二选一；路径、节点名、服务名及版本需按实际环境确认。不要在已有工作空间运行或暂停时直接替换 gVisor；已有 checkpoint 的版本兼容性需要先验证。
 
@@ -190,20 +190,20 @@ kubectl --context <context> wait --for=condition=Ready node/<node> --timeout=180
 kubectl --context <context> uncordon <node>
 ```
 
-按[部署与升级指南](deployment.md)部署 Helm。K3s values 需设置 `controller.criDirectory: /run/k3s/containerd` 和 `controller.criSocket: /run/k3s/containerd/containerd.sock`。只让已完成节点准备的节点匹配 Controller 的 nodeSelector，并让 profile 的 nodeName 指向已准备节点。
+按[部署与升级指南](deployment.md)部署 Helm。K3s values 需设置 `controller.criDirectory: /run/k3s/containerd` 和 `controller.criSocket: /run/k3s/containerd/containerd.sock`；这两项由合并后的 server 使用。将 `server.nodeName` 设置为已准备节点的实际 Kubernetes 节点名，并确保所有 Kubernetes profile 的 `nodeName` 匹配它，`namespace` 匹配 release namespace。
 
 ```bash
 kubectl --context <context> get runtimeclass runsc-recoverable -o yaml
-kubectl --context <context> -n cell-box rollout status ds/cellbox-controller --timeout=180s
-kubectl --context <context> -n cell-box logs ds/cellbox-controller -c controller
+kubectl --context <context> -n cell-box rollout status deploy/cellbox-server --timeout=180s
+kubectl --context <context> -n cell-box logs deploy/cellbox-server -c server
 ```
 
-RuntimeClass 的 handler 应为 `runsc-recoverable`。服务 active、节点 Ready 和 Controller Running 只能证明基础状态；最后使用项目测试工作空间确认创建、执行及同节点 suspend / resume。已有 Running 的 counter 测试 CR 时，可使用 `test/scripts/e2e-k8s.sh <context>`。
+RuntimeClass 的 handler 应为 `runsc-recoverable`。服务 active、节点 Ready 和 `cellbox-server` Running 只能证明基础状态；最后使用项目测试工作空间确认创建、执行及同节点 suspend / resume。已有 Running 的 counter 测试 CR 时，可使用 `test/scripts/e2e-k8s.sh <context>`。
 
 ## 升级、已有安装迁移和回滚
 
 - 已由旧安装器配置好的节点无需重新安装。升级新 Chart 后将不再有安装 init container；旧 `runtimeInstaller` 和 `adapterImage` values 应从本地覆盖文件删除。已有 wrapper、配置和 checkpoint 保留。
-- Controller 镜像升级不再同步升级 wrapper。需要更新适配器时，从同版本发布包取 wrapper，核对 `--adapter-version`，按第 3 节人工安装。单独更新 wrapper 或 shim TOML 不要求重启 containerd，但已有 shim 可能继续使用旧配置；需验证新建工作空间，避免假定存量工作空间已更新。
+- Cellbox server 镜像升级不更新宿主机 wrapper。需要更新适配器时，从同版本发布包取 wrapper，核对 `--adapter-version`，按第 3 节人工安装。单独更新 wrapper 或 shim TOML 不要求重启 containerd，但已有 shim 可能继续使用旧配置；需验证新建工作空间，避免假定存量工作空间已更新。
 - 更换 gVisor 或 containerd handler 按节点维护流程处理，先验证已有 checkpoint 的兼容性。
 - 配置重启失败时保持节点 cordon，恢复备份的实际配置、模板或 drop-in；移除此次新增且原本不存在的配置文件，恢复原 wrapper、shim TOML 及完整 gVisor 安装，再由运维重启对应服务并验证。K3s 应恢复输入模板/drop-in，不能仅恢复生成文件。
 - 不要删除 `/var/lib/cellbox` 下的 tickets、requests、claims、workloads 或运行时状态来“重装”。`helm uninstall` 不移除节点组件；正式卸载前先处理已有工作空间，再人工撤销 handler 和组件。

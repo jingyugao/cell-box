@@ -2,19 +2,175 @@ package resumable
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/boxprovider"
+	"cellbox.local/cellbox/internal/runtimecontrol"
 	"cellbox.local/cellbox/internal/telemetry"
 	"go.opentelemetry.io/otel/trace"
-	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
+
+func createSuspendedForResume(t *testing.T, p *Provider, s boxprovider.Spec, ctx context.Context, transition string) boxprovider.Handle {
+	t.Helper()
+	h, err := p.Create(ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &api.ResumablePod{}
+	if err := p.Client.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
+		t.Fatal(err)
+	}
+	w.Spec.DesiredState = "Suspended"
+	w.Spec.TransitionID = transition
+	if err := p.Client.Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	w.Status.Phase = "Suspended"
+	w.Status.ObservedTransitionID = transition
+	if err := p.Client.Status().Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+func TestEmbeddedArchiveCompletionUsesDirectSnapshot(t *testing.T) {
+	p, s, ctx := fixture(t)
+	s.PersistentHome = true
+	h := createSuspendedForResume(t, p, s, ctx, "suspended")
+	w := &api.ResumablePod{}
+	key := client.ObjectKey{Namespace: h.Namespace, Name: h.Name}
+	if err := p.Client.Get(ctx, key, w); err != nil {
+		t.Fatal(err)
+	}
+	w.Status.Snapshot = "checkpoint-1"
+	if err := p.Client.Status().Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	counted := &observedClient{Client: p.Client}
+	local := runtimecontrol.New(counted)
+	p.Client, p.Local = local, local
+	q := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
+	defer q.ShutDown()
+	if err := local.Start(ctx, q); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	go func() { <-ctx.Done(); q.ShutDown() }()
+	type result struct {
+		size   int64
+		digest string
+		err    error
+	}
+	done := make(chan result, 1)
+	id := "arc-0123456789abcdef0123456789abcdef"
+	go func() { size, digest, err := p.CaptureWorkspaceArchive(ctx, h, id); done <- result{size, digest, err} }()
+	request, stopped := q.Get()
+	if stopped {
+		t.Fatal("archive was not dispatched directly")
+	}
+	if err := counted.Client.Get(ctx, request.NamespacedName, w); err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(api.ArchiveCaptureResult{SourceUID: string(w.UID), SourceGeneration: w.Generation, ID: id, Snapshot: w.Status.Snapshot, Size: 123, SHA256: strings.Repeat("a", 64)})
+	w.Annotations[api.ArchiveResultAnnotation] = string(encoded)
+	if err := local.Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	q.Done(request)
+	select {
+	case got := <-done:
+		if got.err != nil || got.size != 123 || got.digest != strings.Repeat("a", 64) {
+			t.Fatalf("archive completion: %+v", got)
+		}
+	case <-ctx.Done():
+		t.Fatal("archive missed local completion")
+	}
+	// Initial admission, subscription and request cleanup are the only reads.
+	if counted.gets.Load() != 3 || counted.watchedVersion.Load() != nil || counted.lists.Load() != 0 {
+		t.Fatalf("archive polled Kubernetes: GETs=%d", counted.gets.Load())
+	}
+}
+
+func TestEmbeddedResumeDispatchAndCompletionNeedNoKubernetesWatch(t *testing.T) {
+	p, s, ctx := fixture(t)
+	h := createSuspendedForResume(t, p, s, ctx, "previous")
+	counted := &observedClient{Client: p.Client}
+	local := runtimecontrol.New(counted)
+	p.Client, p.Local = local, local
+	q := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
+	defer q.ShutDown()
+	if err := local.Start(ctx, q); err != nil {
+		t.Fatal(err)
+	}
+	watchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	observations, err := p.WatchObservations(watchCtx, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := func() boxprovider.Observation {
+		select {
+		case event := <-observations:
+			return event
+		case <-time.After(3 * time.Second):
+			t.Fatal("missing direct completion")
+			return boxprovider.Observation{}
+		}
+	}
+	if event := next(); event.Phase != "suspended" {
+		t.Fatalf("initial state: %+v", event)
+	}
+	initialReads := counted.gets.Load()
+	if err = p.RequestResume(ctx, h, "previous", "resume"); err != nil {
+		t.Fatal(err)
+	}
+	if q.Len() != 1 {
+		t.Fatal("resume did not directly dispatch runtime work")
+	}
+	request, _ := q.Get()
+	if request.Name != h.Name || request.Namespace != h.Namespace {
+		t.Fatal("wrong runtime key")
+	}
+	// This is the runtime's durable completion, on the same client used by the
+	// embedded reconciler. Reads below bypass instrumentation to model its work.
+	w := &api.ResumablePod{}
+	if err = counted.Client.Get(ctx, request.NamespacedName, w); err != nil {
+		t.Fatal(err)
+	}
+	w.Status.Phase = "Running"
+	w.Status.PodUID = "new-execution"
+	w.Status.Cycle = 2
+	w.Status.ObservedGeneration = w.Generation
+	w.Status.ObservedTransitionID = "resume"
+	w.Status.ResumeReadyTransitionID = "resume"
+	if err = local.Status().Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	q.Done(request)
+	for {
+		event := next()
+		if event.Phase == "running" && event.GuestReady {
+			if event.ExecutionID != "new-execution" || event.Generation != 2 || event.TransitionID != "resume" {
+				t.Fatalf("wrong completion: %+v", event)
+			}
+			break
+		}
+	}
+	if counted.watchedVersion.Load() != nil || counted.lists.Load() != 0 || counted.gets.Load() != initialReads {
+		t.Fatalf("resume used a watch/LIST/follow-up GET: reads=%d initial=%d lists=%d", counted.gets.Load(), initialReads, counted.lists.Load())
+	}
+}
 
 type observedClient struct {
 	client.Client
@@ -114,121 +270,6 @@ func TestRequestResumeLegacyEmptyTokenCannotCrossTransition(t *testing.T) {
 	}
 }
 
-func TestWatchObservationsMapsEventsWithoutGETAndIgnoresBookmarks(t *testing.T) {
-	p, s, ctx := fixture(t)
-	h := createSuspendedForResume(t, p, s, ctx, "transition-1")
-	w := &api.ResumablePod{}
-	if err := p.Client.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
-		t.Fatal(err)
-	}
-	w.Spec.DesiredState = "Running"
-	w.Status.Phase = "Running"
-	w.Status.PodUID = "exec-1"
-	w.Status.Cycle = 7
-	w.Status.ObservedTransitionID = "transition-1"
-	w.Status.ResumeReadyTransitionID = "transition-1"
-	w.Status.ObservedGeneration = w.Generation
-	if err := p.Client.Update(ctx, w); err != nil {
-		t.Fatal(err)
-	}
-	if err := p.Client.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
-		t.Fatal(err)
-	}
-	w.Status.Phase = "Running"
-	w.Status.PodUID = "exec-1"
-	w.Status.Cycle = 7
-	w.Status.ObservedTransitionID = "transition-1"
-	w.Status.ResumeReadyTransitionID = "transition-1"
-	w.Status.ObservedGeneration = w.Generation
-	if err := p.Client.Status().Update(ctx, w); err != nil {
-		t.Fatal(err)
-	}
-
-	fakeWatch := watch.NewFake()
-	c := &observedClient{Client: p.Client, watcher: fakeWatch}
-	p.Client = c
-	watchCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	observations, err := p.WatchObservations(watchCtx, h)
-	if err != nil {
-		t.Fatal(err)
-	}
-	initial := receiveObservation(t, observations)
-	if initial.Phase != "running" || initial.Generation != 7 || initial.ExecutionID != "exec-1" || !initial.GuestReady {
-		t.Fatalf("unexpected initial observation: %#v", initial)
-	}
-	if c.gets.Load() != 0 || c.lists.Load() != 1 {
-		t.Fatal("watch initialization must use one LIST and no GET")
-	}
-	if c.watchedVersion.Load() != "current-collection-version" {
-		t.Fatal("watch used object's old version instead of collection version")
-	}
-
-	fakeWatch.Action(watch.Bookmark, &api.ResumablePod{ObjectMeta: meta.ObjectMeta{ResourceVersion: "2"}})
-	select {
-	case got := <-observations:
-		t.Fatalf("bookmark unexpectedly produced observation: %#v", got)
-	case <-time.After(30 * time.Millisecond):
-	}
-
-	updated := w.DeepCopy()
-	updated.ResourceVersion = "3"
-	updated.Status.Cycle = 8
-	updated.Status.PodUID = "exec-2"
-	updated.Spec.TransitionID = "transition-2"
-	updated.Status.ObservedTransitionID = "transition-2"
-	updated.Status.ResumeReadyTransitionID = "transition-2"
-	fakeWatch.Modify(updated)
-	event := receiveObservation(t, observations)
-	if event.Generation != 8 || event.ExecutionID != "exec-2" || event.TransitionID != "transition-2" || !event.GuestReady {
-		t.Fatalf("unexpected watch observation: %#v", event)
-	}
-	if c.gets.Load() != 0 || c.lists.Load() != 1 {
-		t.Fatal("watch event performed an extra read")
-	}
-
-	cancel()
-}
-
-func createSuspendedForResume(t *testing.T, p *Provider, s boxprovider.Spec, ctx context.Context, transition string) boxprovider.Handle {
-	t.Helper()
-	// Keep the fixture's CR identity while putting it at a durably observed
-	// suspended transition, the admission state required by RequestResume.
-	h, err := p.Create(ctx, s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w := &api.ResumablePod{}
-	if err := p.Client.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
-		t.Fatal(err)
-	}
-	w.Spec.DesiredState = "Suspended"
-	w.Spec.TransitionID = transition
-	if err := p.Client.Update(ctx, w); err != nil {
-		t.Fatal(err)
-	}
-	w.Status.Phase = "Suspended"
-	w.Status.ObservedTransitionID = transition
-	if err := p.Client.Status().Update(ctx, w); err != nil {
-		t.Fatal(err)
-	}
-	return h
-}
-
-func receiveObservation(t *testing.T, observations <-chan boxprovider.Observation) boxprovider.Observation {
-	t.Helper()
-	select {
-	case observation, ok := <-observations:
-		if !ok {
-			t.Fatal("observation stream closed")
-		}
-		return observation
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for observation")
-		return boxprovider.Observation{}
-	}
-}
-
 func TestRequestResumeSameTokenRecoveryDoesNotRestoreAgain(t *testing.T) {
 	p, spec, ctx := fixture(t)
 	h := createSuspendedForResume(t, p, spec, ctx, "previous")
@@ -242,41 +283,6 @@ func TestRequestResumeSameTokenRecoveryDoesNotRestoreAgain(t *testing.T) {
 	}
 	if c.patches.Load() != 0 || c.gets.Load() != 1 {
 		t.Fatal("recovery changed the existing command")
-	}
-}
-
-type reconnectClient struct {
-	*observedClient
-	calls atomic.Int32
-	final *watch.FakeWatcher
-}
-
-func (c *reconnectClient) Watch(context.Context, client.ObjectList, ...client.ListOption) (watch.Interface, error) {
-	switch c.calls.Add(1) {
-	case 1:
-		return c.watcher, nil
-	case 2:
-		return nil, errors.New("temporary connection failure")
-	default:
-		return c.final, nil
-	}
-}
-func TestWatchReconnectRetriesAfterOpenFailure(t *testing.T) {
-	p, spec, ctx := fixture(t)
-	h := createSuspendedForResume(t, p, spec, ctx, "previous")
-	c := &reconnectClient{observedClient: &observedClient{Client: p.Client, watcher: watch.NewFake()}, final: watch.NewFake()}
-	p.Client = c
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	observations, err := p.WatchObservations(ctx, h)
-	if err != nil {
-		t.Fatal(err)
-	}
-	receiveObservation(t, observations)
-	c.watcher.Stop()
-	receiveObservation(t, observations)
-	if c.calls.Load() != 3 {
-		t.Fatalf("watch attempts=%d", c.calls.Load())
 	}
 }
 
@@ -298,63 +304,5 @@ func TestTracedResumePreservesMetadataAndRepairsMissingAnnotations(t *testing.T)
 	w.Status.Phase = "Restoring"
 	if trace.SpanContextFromContext(telemetry.ExtractOperation(context.Background(), w)).TraceID() != sc.TraceID() {
 		t.Fatal("resume command lost trace")
-	}
-}
-
-func TestWatchReconnectPublishesDeletionMissedWhileDisconnected(t *testing.T) {
-	p, spec, ctx := fixture(t)
-	h := createSuspendedForResume(t, p, spec, ctx, "previous")
-	c := &observedClient{Client: p.Client, watcher: watch.NewFake()}
-	p.Client = c
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	observations, err := p.WatchObservations(ctx, h)
-	if err != nil {
-		t.Fatal(err)
-	}
-	receiveObservation(t, observations)
-	w := &api.ResumablePod{}
-	if err := c.Client.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
-		t.Fatal(err)
-	}
-	w.Finalizers = nil
-	if err := c.Client.Update(ctx, w); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.Client.Delete(ctx, w); err != nil {
-		t.Fatal(err)
-	}
-	c.watcher.Stop()
-	if got := receiveObservation(t, observations); got.Phase != "deleted" {
-		t.Fatalf("missed deletion: %+v", got)
-	}
-}
-
-type expiredWatchClient struct {
-	*observedClient
-	calls atomic.Int32
-}
-
-func (c *expiredWatchClient) Watch(context.Context, client.ObjectList, ...client.ListOption) (watch.Interface, error) {
-	c.calls.Add(1)
-	w := watch.NewRaceFreeFake()
-	w.Error(&meta.Status{Code: 410, Reason: meta.StatusReasonExpired})
-	return w, nil
-}
-func TestRepeatedExpiredWatchUsesBackoffInsteadOfResettingOnHTTP200(t *testing.T) {
-	p, spec, ctx := fixture(t)
-	h := createSuspendedForResume(t, p, spec, ctx, "previous")
-	c := &expiredWatchClient{observedClient: &observedClient{Client: p.Client}}
-	p.Client = c
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	out, err := p.WatchObservations(ctx, h)
-	if err != nil {
-		t.Fatal(err)
-	}
-	receiveObservation(t, out)
-	time.Sleep(750 * time.Millisecond)
-	if c.calls.Load() > 4 {
-		t.Fatalf("expired watch hot loop: %d attempts", c.calls.Load())
 	}
 }

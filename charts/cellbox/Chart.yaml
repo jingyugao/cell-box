@@ -1,6 +1,6 @@
 apiVersion: v2
 name: cellbox
-description: Cellbox API and checkpoint controller for Kubernetes
+description: Single-node Cellbox server and sandbox runtime
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

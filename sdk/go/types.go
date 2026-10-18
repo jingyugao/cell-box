@@ -1,7 +1,9 @@
 // Package cellbox provides a Go client for managing Cellbox templates, sandbox
 // lifecycles, workspace files and bounded commands. Context cancellation stops
-// waiting; it does not cancel accepted server operations. Use operation IDs or the same idempotency
-// key and identical input to recover their results without repeating work.
+// waiting; it does not cancel accepted server operations. Use operation IDs to
+// continue waiting for accepted work. Command and template build submissions
+// are sent once without automatic retry because their scripts may have side
+// effects that cannot be safely deduplicated.
 package cellbox
 
 import (
@@ -15,8 +17,7 @@ type CreateOptions struct {
 	TemplateID string `json:"templateId,omitempty"`
 	OwnerKey   string `json:"ownerKey"`
 	// Staged holds the configured workload until explicitly activated via the API.
-	Staged         bool   `json:"staged,omitempty"`
-	IdempotencyKey string `json:"-"`
+	Staged bool `json:"staged,omitempty"`
 }
 
 // SandboxInfo is a lifecycle snapshot. Running does not imply application health.
@@ -34,7 +35,6 @@ type SandboxInfo struct {
 	ResourceVersion uint64       `json:"resourceVersion"`
 	Image           string       `json:"image"`
 	ImageID         string       `json:"imageId,omitempty"`
-	ImportedImageID string       `json:"importedImageId,omitempty"`
 	Workspace       string       `json:"workspace"`
 	Capabilities    Capabilities `json:"capabilities"`
 	OperationID     string       `json:"operationId,omitempty"`
@@ -44,14 +44,12 @@ type SandboxInfo struct {
 }
 
 type Capabilities struct {
-	DiskArchives       bool   `json:"diskArchives,omitempty"`
 	Exec               bool   `json:"exec"`
 	Files              bool   `json:"files"`
 	HTTP               bool   `json:"http"`
 	WebSocket          bool   `json:"websocket"`
 	PTY                bool   `json:"pty"`
 	ReconnectExec      bool   `json:"reconnectExec"`
-	Freeze             bool   `json:"freeze"`
 	Suspend            string `json:"suspend"`
 	Archives           string `json:"archives"`
 	ProtectedTools     bool   `json:"protectedTools"`
@@ -218,24 +216,23 @@ type OperationLogs struct {
 	EOF        bool   `json:"eof"`
 }
 
-// Operation records durable server work. IdempotencyKey is populated locally
-// on submission, and is not returned by the server's GET operation endpoint.
+// Operation records server work. After a server restart, an interrupted
+// operation may have an unknown outcome; Cellbox does not replay it.
 type Operation struct {
-	ID             string                 `json:"id"`
-	Kind           string                 `json:"kind"`
-	TargetID       string                 `json:"targetId"`
-	Status         string                 `json:"status"`
-	Stage          string                 `json:"stage,omitempty"`
-	Version        uint64                 `json:"version"`
-	CreatedAt      time.Time              `json:"createdAt"`
-	StartedAt      *time.Time             `json:"startedAt,omitempty"`
-	FinishedAt     *time.Time             `json:"finishedAt,omitempty"`
-	UpdatedAt      time.Time              `json:"updatedAt"`
-	Input          *CreateRevisionOptions `json:"input,omitempty"`
-	Result         map[string]string      `json:"result,omitempty"`
-	Box            *SandboxInfo           `json:"box,omitempty"`
-	Error          *APIError              `json:"error,omitempty"`
-	IdempotencyKey string                 `json:"-"`
+	ID         string                 `json:"id"`
+	Kind       string                 `json:"kind"`
+	TargetID   string                 `json:"targetId"`
+	Status     string                 `json:"status"`
+	Stage      string                 `json:"stage,omitempty"`
+	Version    uint64                 `json:"version"`
+	CreatedAt  time.Time              `json:"createdAt"`
+	StartedAt  *time.Time             `json:"startedAt,omitempty"`
+	FinishedAt *time.Time             `json:"finishedAt,omitempty"`
+	UpdatedAt  time.Time              `json:"updatedAt"`
+	Input      *CreateRevisionOptions `json:"input,omitempty"`
+	Result     map[string]string      `json:"result,omitempty"`
+	Box        *SandboxInfo           `json:"box,omitempty"`
+	Error      *APIError              `json:"error,omitempty"`
 }
 
 type Execution struct {
@@ -265,17 +262,16 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("cellbox: %s: %s", e.Code, e.Message)
 }
 
-// RequestError preserves the submission key, including when a connection fails
-// before the operation ID is received. Retry only with this key and identical input.
+// RequestError reports a submission failure. The server may have accepted the
+// request if the response was lost; callers should inspect state before retrying.
 type RequestError struct {
-	IdempotencyKey string
-	Err            error
+	Err error
 }
 
 func (e *RequestError) Error() string { return e.Err.Error() }
 func (e *RequestError) Unwrap() error { return e.Err }
 
-// OperationError retains the last known operation for recovery or inspection.
+// OperationError retains the last known operation for inspection.
 // errors.Is/As also work with its underlying context error or APIError.
 type OperationError struct {
 	Operation *Operation

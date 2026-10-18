@@ -53,13 +53,6 @@ func (s *Service) archivesDir() (string, error) {
 	return dir, nil
 }
 
-func archivePath(dir, id string) (string, error) {
-	if !archiveIDPattern.MatchString(id) {
-		return "", apiError("INVALID_REQUEST", "Invalid archive ID")
-	}
-	return filepath.Join(dir, id+".tar.gz"), nil
-}
-
 func openArchive(name string) (*os.File, error) {
 	fd, err := unix.Open(name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
@@ -189,107 +182,73 @@ func verifyArchive(f *os.File, a Archive) error {
 }
 
 func (s *Service) captureArchive(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		DiskOnly bool `json:"diskOnly"`
-	}
-	if err := decodeOptionalLimit(w, r, &input, 1024); err != nil {
+	// Captures never change the source lifecycle. The caller must first suspend
+	// the box, or use a failed box whose provider can verify that its writer is
+	// stopped. Disk-only capture and automatic quiescing are not supported.
+	if err := decodeOptionalLimit(w, r, &struct{}{}, 1024); err != nil {
 		fail(w, err)
 		return
 	}
-	// Preserve the original idempotency fingerprint for captures without a body.
-	var parameters any
-	if input.DiskOnly {
-		parameters = input
-	}
 	client, id := clientID(r), r.PathValue("id")
 	var box boxRecord
-	op, fresh, err := s.prepareOperation(client, r.Header.Get("Idempotency-Key"), "archive", id, parameters, func(st *State, op *Operation) error {
+	op, err := s.prepareOperation(client, "archive", id, func(tx *storeTx, op *Operation) error {
 		var err error
-		box, err = owned(st, client, id)
+		box, err = tx.Box(client, id)
 		if err != nil {
 			return err
 		}
-		if err = busy(st, box, false); err != nil {
+		if err = busy(tx, box); err != nil {
 			return err
 		}
-		if activeExec(st, id) {
+		active, err := tx.HasActiveExecution(id)
+		if err != nil {
+			return err
+		}
+		if active {
 			return apiError("BUSY", "Box has an active execution")
 		}
-		if input.DiskOnly {
-			if box.Profile.Provider != "resumable-k8s-pod" || !box.Profile.PersistentHome || !workspaceUnderPersistentHome(box.Profile.Guest.Workspace) || s.objects == nil {
-				return apiError("UNSUPPORTED_CAPABILITY", "Disk archives require persistent HOME and object storage")
-			}
-			if _, ok := s.providers[box.Profile.Provider].(boxprovider.DiskWorkspaceArchiveProvider); !ok {
-				return apiError("UNSUPPORTED_CAPABILITY", "Provider does not support disk archives")
-			}
-			if box.Box.Phase != "running" && box.Box.Phase != "staged" && box.Box.Phase != "suspended" && box.Box.Phase != "failed" {
-				return apiError("CONFLICT", "Disk archive requires a stable source lifecycle")
-			}
-		} else if box.Box.Phase != "running" && box.Box.Phase != "staged" && box.Box.Phase != "suspended" {
-			return apiError("CONFLICT", "Archive requires an accessible box")
+		if box.Profile.Provider != "resumable-k8s-pod" || !box.Profile.PersistentHome || !workspaceUnderPersistentHome(box.Profile.Guest.Workspace) {
+			return apiError("UNSUPPORTED_CAPABILITY", "Archives require a resumable Kubernetes box with persistent HOME workspace")
 		}
-		if !input.DiskOnly && box.Box.Phase == "suspended" {
-			if box.Profile.Provider != "resumable-k8s-pod" || !workspaceUnderPersistentHome(box.Profile.Guest.Workspace) {
-				return apiError("UNSUPPORTED_CAPABILITY", "Suspended workspace archives require a workspace inside persistent HOME")
-			}
-			if _, ok := s.providers[box.Profile.Provider].(boxprovider.WorkspaceArchiveProvider); !ok || s.objects == nil {
-				return apiError("UNSUPPORTED_CAPABILITY", "Suspended workspace archives require node archive support and object storage")
-			}
+		if _, ok := s.providers[box.Profile.Provider].(boxprovider.WorkspaceArchiveProvider); !ok || s.objects == nil {
+			return apiError("UNSUPPORTED_CAPABILITY", "Archives require node archive support and object storage")
+		}
+		if box.Box.Phase != "suspended" && box.Box.Phase != "failed" {
+			return apiError("CONFLICT", "Archive requires a suspended or failed box")
 		}
 		if box.Box.ImageID == "" {
 			return apiError("CONFLICT", "Box has no immutable image identity")
 		}
 		box.Box.OperationID = op.ID
 		box.Box.Version++
-		st.Boxes[id] = box
-		return nil
+		return tx.PutBox(box)
 	})
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	if fresh {
-		s.launch(op, func(ctx context.Context) (map[string]string, error) {
-			var a Archive
-			var err error
-			if input.DiskOnly {
-				a, err = s.captureStoredWorkspaceArchive(ctx, box, true)
-			} else if box.Box.Phase == "suspended" {
-				a, err = s.captureSuspendedArchive(ctx, box)
-			} else {
-				a, err = s.captureArchiveHTTP(ctx, box)
-			}
-			if err != nil {
-				return nil, err
-			}
-			return map[string]string{"archiveId": a.ID}, nil
-		})
-	}
+	s.launch(op, func(ctx context.Context) (map[string]string, error) {
+		a, err := s.captureStoppedWorkspaceArchive(ctx, box)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{"archiveId": a.ID}, nil
+	})
 	writeJSON(w, http.StatusAccepted, op)
 }
 
-func (s *Service) captureSuspendedArchive(ctx context.Context, b boxRecord) (Archive, error) {
-	return s.captureStoredWorkspaceArchive(ctx, b, false)
-}
-
-func (s *Service) captureStoredWorkspaceArchive(ctx context.Context, b boxRecord, diskOnly bool) (Archive, error) {
-	var capture func(context.Context, boxprovider.Handle, string) (int64, string, error)
-	if diskOnly {
-		if provider, ok := s.providers[b.Profile.Provider].(boxprovider.DiskWorkspaceArchiveProvider); ok {
-			capture = provider.CaptureDiskWorkspaceArchive
-		}
-	} else {
-		if provider, ok := s.providers[b.Profile.Provider].(boxprovider.WorkspaceArchiveProvider); ok {
-			capture = provider.CaptureWorkspaceArchive
-		}
+func (s *Service) captureStoppedWorkspaceArchive(ctx context.Context, b boxRecord) (Archive, error) {
+	if b.Box.Phase != "suspended" && b.Box.Phase != "failed" {
+		return Archive{}, apiError("CONFLICT", "Archive requires a suspended or failed box")
 	}
-	if capture == nil || s.objects == nil || !workspaceUnderPersistentHome(b.Profile.Guest.Workspace) {
-		return Archive{}, apiError("UNSUPPORTED_CAPABILITY", "Suspended workspace archives are unavailable")
+	provider, ok := s.providers[b.Profile.Provider].(boxprovider.WorkspaceArchiveProvider)
+	if !ok || b.Profile.Provider != "resumable-k8s-pod" || !b.Profile.PersistentHome || s.objects == nil || !workspaceUnderPersistentHome(b.Profile.Guest.Workspace) {
+		return Archive{}, apiError("UNSUPPORTED_CAPABILITY", "Stopped workspace archives are unavailable")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 14*time.Minute)
 	defer cancel()
 	id := randomID("arc-")
-	size, digest, err := capture(ctx, b.Handle, id)
+	size, digest, err := provider.CaptureWorkspaceArchive(ctx, b.Handle, id)
 	if err != nil {
 		return Archive{}, err
 	}
@@ -301,8 +260,8 @@ func (s *Service) captureStoredWorkspaceArchive(ctx context.Context, b boxRecord
 	}
 	a := Archive{ID: id, SourceBoxID: b.Box.ID, TemplateID: b.Box.TemplateID, RevisionID: b.Box.RevisionID, TemplateName: b.Box.TemplateName, TemplateVersion: b.Box.TemplateVersion, ProfileID: b.Box.ProfileID, ImageID: b.Box.ImageID,
 		Agent: b.Profile.Guest.Agent, SHA256: digest, Size: size, Consistency: "workspace-best-effort", Portable: true,
-		CreatedAt: time.Now().UTC(), ManifestVersion: 1, ImportedImageID: b.Box.ImportedImageID, PreparedImage: b.Profile.Image}
-	if err = s.store.Update(func(st *State) error { st.Archives[id] = archiveRecord{Archive: a, ClientID: b.ClientID}; return nil }); err != nil {
+		CreatedAt: time.Now().UTC(), ManifestVersion: 1}
+	if err = s.store.Write(ctx, func(tx *storeTx) error { return tx.PutArchive(archiveRecord{Archive: a, ClientID: b.ClientID}) }); err != nil {
 		return Archive{}, err
 	}
 	return a, nil
@@ -363,93 +322,6 @@ func (s *Service) validateStoredCapture(ctx context.Context, id string, expected
 	return err
 }
 
-func (s *Service) captureArchiveHTTP(ctx context.Context, b boxRecord) (Archive, error) {
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
-	defer cancel()
-	res, err := s.guestRequest(ctx, b, "GET", "/v1/archive", nil)
-	if err != nil {
-		return Archive{}, err
-	}
-	defer res.Body.Close()
-	if err := guestSuccess(res); err != nil {
-		return Archive{}, err
-	}
-	dir, err := s.archivesDir()
-	if err != nil {
-		return Archive{}, err
-	}
-	f, err := os.CreateTemp(dir, captureTempPrefix(b.Box.ID)+"*")
-	if err != nil {
-		return Archive{}, err
-	}
-	temp := f.Name()
-	defer os.Remove(temp)
-	if err := f.Chmod(0600); err != nil {
-		f.Close()
-		return Archive{}, err
-	}
-	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(res.Body, archiveWireLimit+1))
-	if err == nil && n > archiveWireLimit {
-		err = errors.New("archive exceeds wire limit")
-	}
-	if err == nil {
-		err = f.Sync()
-	}
-	if err == nil {
-		_, err = f.Seek(0, 0)
-	}
-	if err == nil {
-		err = validateArchive(f)
-	}
-	closeErr := f.Close()
-	if err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return Archive{}, err
-	}
-	a := Archive{ID: randomID("arc-"), SourceBoxID: b.Box.ID, TemplateID: b.Box.TemplateID, RevisionID: b.Box.RevisionID, TemplateName: b.Box.TemplateName, TemplateVersion: b.Box.TemplateVersion, ProfileID: b.Box.ProfileID, ImageID: b.Box.ImageID, Agent: b.Profile.Guest.Agent, SHA256: hex.EncodeToString(h.Sum(nil)), Size: n, Consistency: "workspace-best-effort", Portable: true, CreatedAt: time.Now().UTC(), ManifestVersion: 1, ImportedImageID: b.Box.ImportedImageID, PreparedImage: b.Profile.Image}
-	final, err := archivePath(dir, a.ID)
-	if err != nil {
-		return Archive{}, err
-	}
-	if err := os.Rename(temp, final); err != nil {
-		return Archive{}, err
-	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return Archive{}, err
-	}
-	syncErr := d.Sync()
-	_ = d.Close()
-	if syncErr != nil {
-		return Archive{}, syncErr
-	}
-	if s.objects != nil {
-		file, err := openArchive(final)
-		if err != nil {
-			return Archive{}, err
-		}
-		_, uploadErr := s.objects.Put(ctx, "archives/"+a.ID+".tar.gz", file, a.Size, "")
-		closeErr := file.Close()
-		if uploadErr != nil {
-			return Archive{}, uploadErr
-		}
-		if closeErr != nil {
-			return Archive{}, closeErr
-		}
-		// S3 is authoritative after upload. API-local content is temporary only.
-		defer os.Remove(final)
-	}
-	// Commit the content before publishing metadata. A failed ledger write may
-	// have committed remotely, so never remove the S3 object on that failure.
-	if err := s.store.Update(func(st *State) error { st.Archives[a.ID] = archiveRecord{Archive: a, ClientID: b.ClientID}; return nil }); err != nil {
-		return Archive{}, err
-	}
-	return a, nil
-}
-
 func (s *Service) restoreArchive(ctx context.Context, boxID string, source Archive) error {
 	b, err := s.rawBox(boxID)
 	if err != nil {
@@ -458,6 +330,9 @@ func (s *Service) restoreArchive(ctx context.Context, boxID string, source Archi
 	imageChanged := source.ImageID != b.Box.ImageID
 	if source.ID != b.RestoreArchiveID || source.ImageID == "" || b.Box.ImageID == "" || imageChanged && !(source.Portable && b.AcceptImageChange) || source.Agent != b.Profile.Guest.Agent {
 		return apiError("ARCHIVE_INCOMPATIBLE", "Archive image or agent identity differs from target box")
+	}
+	if b.Profile.Provider != "resumable-k8s-pod" || !b.Profile.PersistentHome || !workspaceUnderPersistentHome(b.Profile.Guest.Workspace) {
+		return apiError("UNSUPPORTED_CAPABILITY", "Archive restore requires a resumable Kubernetes box with persistent HOME workspace")
 	}
 	if b.Box.Phase != "restoring" || !b.Staged || b.RestoreComplete {
 		return apiError("CONFLICT", "Box is not awaiting archive restore")
@@ -480,44 +355,35 @@ func (s *Service) restoreArchive(ctx context.Context, boxID string, source Archi
 	if err := s.setInventoryStage(ctx, b, "staged"); err != nil {
 		return err
 	}
-	return s.store.Update(func(st *State) error {
-		current, ok := st.Boxes[boxID]
-		if !ok || current.RestoreArchiveID != source.ID || current.Box.Phase != "restoring" {
+	return s.store.ChangeBox(ctx, boxID, func(current *boxRecord) error {
+		if current.RestoreArchiveID != source.ID || current.Box.Phase != "restoring" {
 			return apiError("CONFLICT", "Restore target changed")
 		}
 		current.RestoreComplete = true
 		current.Box.Version++
-		st.Boxes[boxID] = current
 		return nil
 	})
 }
 
 func (s *Service) archiveForClient(client, id string) (Archive, error) {
-	var a Archive
-	err := s.store.View(func(st State) error {
-		rec, ok := st.Archives[id]
-		if !ok || rec.ClientID != client || rec.Deleting {
-			return apiError("NOT_FOUND", "Archive not found")
-		}
-		a = rec.Archive
-		return nil
-	})
-	return a, err
+	rec, err := s.store.ArchiveRecord(client, id)
+	if err == nil && rec.Deleting {
+		return Archive{}, apiError("NOT_FOUND", "Archive not found")
+	}
+	return rec.Archive, err
 }
 
 func (s *Service) listArchives(w http.ResponseWriter, r *http.Request) {
-	out := []Archive{}
-	err := s.store.View(func(st State) error {
-		for _, rec := range st.Archives {
-			if rec.ClientID == clientID(r) && !rec.Deleting {
-				out = append(out, rec.Archive)
-			}
-		}
-		return nil
-	})
+	records, err := s.store.ArchiveRecords(clientID(r))
 	if err != nil {
 		fail(w, err)
 		return
+	}
+	out := make([]Archive, 0, len(records))
+	for _, rec := range records {
+		if !rec.Deleting {
+			out = append(out, rec.Archive)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	writeJSON(w, 200, out)
@@ -555,41 +421,37 @@ func (s *Service) archiveContent(w http.ResponseWriter, r *http.Request) {
 // Downloads are private, verified temporary files so a corrupt S3 object is
 // never sent to the guest or to an archive download client.
 func (s *Service) openStoredArchive(ctx context.Context, a Archive) (*os.File, func(), error) {
+	if s.objects == nil {
+		return nil, nil, apiError("UNSUPPORTED_CAPABILITY", "Archive object storage is not configured")
+	}
 	dir, err := s.archivesDir()
 	if err != nil {
 		return nil, nil, err
 	}
-	name, err := archivePath(dir, a.ID)
+	body, size, _, err := s.objects.Get(ctx, "archives/"+a.ID+".tar.gz")
+	if errors.Is(err, objectstorage.ErrNotFound) {
+		return nil, nil, apiError("ARCHIVE_CORRUPT", "Archive content is unavailable")
+	}
 	if err != nil {
 		return nil, nil, err
 	}
-	cleanup := func() {}
-	if s.objects != nil {
-		body, size, _, err := s.objects.Get(ctx, "archives/"+a.ID+".tar.gz")
-		if errors.Is(err, objectstorage.ErrNotFound) {
-			return nil, nil, apiError("ARCHIVE_CORRUPT", "Archive content is unavailable")
-		}
-		if err != nil {
-			return nil, nil, err
-		}
-		defer body.Close()
-		if size != a.Size || size < 1 || size > archiveWireLimit {
-			return nil, nil, apiError("ARCHIVE_CORRUPT", "Archive size differs from metadata")
-		}
-		file, err := os.CreateTemp(dir, ".download-*")
-		if err != nil {
-			return nil, nil, err
-		}
-		name = file.Name()
-		n, copyErr := io.Copy(file, io.LimitReader(body, a.Size+1))
-		closeErr := file.Close()
-		if copyErr != nil || closeErr != nil || n != a.Size {
-			os.Remove(name)
-			return nil, nil, apiError("ARCHIVE_CORRUPT", "Archive download is incomplete")
-		}
-		cleanup = func() { _ = os.Remove(name) }
+	defer body.Close()
+	if size != a.Size || size < 1 || size > archiveWireLimit {
+		return nil, nil, apiError("ARCHIVE_CORRUPT", "Archive size differs from metadata")
 	}
-	file, err := openArchive(name)
+	file, err := os.CreateTemp(dir, ".download-*")
+	if err != nil {
+		return nil, nil, err
+	}
+	name := file.Name()
+	cleanup := func() { _ = os.Remove(name) }
+	n, copyErr := io.Copy(file, io.LimitReader(body, a.Size+1))
+	closeErr := file.Close()
+	if copyErr != nil || closeErr != nil || n != a.Size {
+		cleanup()
+		return nil, nil, apiError("ARCHIVE_CORRUPT", "Archive download is incomplete")
+	}
+	file, err = openArchive(name)
 	if err != nil {
 		cleanup()
 		return nil, nil, apiError("ARCHIVE_CORRUPT", "Archive content is unavailable")
@@ -608,62 +470,38 @@ func (s *Service) deleteArchive(w http.ResponseWriter, r *http.Request) {
 		fail(w, apiError("INVALID_REQUEST", "Invalid archive ID"))
 		return
 	}
-	err := s.store.Update(func(st *State) error {
-		rec, ok := st.Archives[id]
-		if !ok || rec.ClientID != client {
-			return apiError("NOT_FOUND", "Archive not found")
+	if s.objects == nil {
+		fail(w, apiError("UNSUPPORTED_CAPABILITY", "Archive object storage is not configured"))
+		return
+	}
+	err := s.store.Write(r.Context(), func(tx *storeTx) error {
+		rec, err := tx.Archive(client, id)
+		if err != nil {
+			return err
 		}
-		for _, b := range st.Boxes {
-			if b.RestoreArchiveID != id {
-				continue
-			}
-			if b.Box.OperationID != "" {
-				if op, ok := st.Operations[b.Box.OperationID]; ok && (op.Operation.Status == "queued" || op.Operation.Status == "running") {
-					return apiError("BUSY", "Archive is used by a running restore")
-				}
-			}
+		used, err := tx.ArchiveInUse(id)
+		if err != nil {
+			return err
+		}
+		if used {
+			return apiError("BUSY", "Archive is used by a running restore")
 		}
 		rec.Deleting = true
-		st.Archives[id] = rec
-		return nil
+		return tx.PutArchive(rec)
 	})
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	if s.objects != nil {
-		if err := s.objects.Delete(r.Context(), "archives/"+id+".tar.gz"); err != nil {
-			fail(w, err)
-			return
-		}
-	} else {
-		dir, err := s.archivesDir()
-		if err != nil {
-			fail(w, err)
-			return
-		}
-		name, err := archivePath(dir, id)
-		if err != nil {
-			fail(w, err)
-			return
-		}
-		if err = os.Remove(name); err != nil && !os.IsNotExist(err) {
-			fail(w, err)
-			return
-		}
+	if err := s.objects.Delete(r.Context(), "archives/"+id+".tar.gz"); err != nil {
+		fail(w, err)
+		return
 	}
-	if err := s.store.Update(func(st *State) error { delete(st.Archives, id); return nil }); err != nil {
+	if err := s.store.Write(r.Context(), func(tx *storeTx) error { return tx.Delete("archives", id) }); err != nil {
 		fail(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// Fixed-length ownership avoids a missing short ID matching another box's
-// capture prefix. Capture scratch content is never a retained archive.
-func captureTempPrefix(boxID string) string {
-	digest := sha256.Sum256([]byte(boxID))
-	return ".capture-" + hex.EncodeToString(digest[:]) + "-"
 }
 
 func regularTemps(dir string, matches func(string) bool) ([]string, error) {
@@ -725,29 +563,13 @@ func removeRegularTemps(dir string, matches func(string) bool) error {
 	return file.Sync()
 }
 
-func (s *Service) captureTemps(boxID string) ([]string, error) {
-	if s.config.DataDir == "" {
-		return nil, nil
-	}
-	return regularTemps(filepath.Join(s.config.DataDir, "archives"), func(name string) bool { return strings.HasPrefix(name, captureTempPrefix(boxID)) })
-}
-func (s *Service) cleanupCaptureTemps(boxID string) error {
-	if s.config.DataDir == "" {
-		return nil
-	}
-	return removeRegularTemps(filepath.Join(s.config.DataDir, "archives"), func(name string) bool { return strings.HasPrefix(name, captureTempPrefix(boxID)) })
-}
-
 // Called before any HTTP request or operation starts, while service.lock owns
 // the local data directory. Valid archive files and service metadata survive.
 func (s *Service) cleanupStartupTemps() error {
 	if s.store.lock == nil {
 		return errors.New("startup cleanup requires the data directory lock")
 	}
-	if err := removeRegularTemps(s.config.DataDir, func(name string) bool { return strings.HasPrefix(name, ".state-") }); err != nil {
-		return err
-	}
 	return removeRegularTemps(filepath.Join(s.config.DataDir, "archives"), func(name string) bool {
-		return strings.HasPrefix(name, ".capture-") || strings.HasPrefix(name, ".download-")
+		return strings.HasPrefix(name, ".download-")
 	})
 }

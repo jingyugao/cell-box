@@ -15,18 +15,16 @@ type CommandOptions struct {
 	Env map[string]string
 	// Timeout limits server execution, independently of the caller's context.
 	// Zero uses 30 seconds. Nonzero values must be 1ms..5min, in whole milliseconds.
-	Timeout        time.Duration
-	IdempotencyKey string
+	Timeout time.Duration
 }
 
 // Command represents accepted execution. Wait may be called again after local
 // cancellation, with a fresh context. This does not rerun the command.
 type Command struct {
-	OperationID    string
-	ExecutionID    string
-	IdempotencyKey string
-	client         *Client
-	operation      *Operation
+	OperationID string
+	ExecutionID string
+	client      *Client
+	operation   *Operation
 }
 
 // Run executes a shell script using /bin/sh -c, which must exist in the image.
@@ -84,14 +82,14 @@ func (c *Commands) StartArgv(ctx context.Context, argv []string, opts *CommandOp
 		TimeoutMS          int64             `json:"timeoutMs,omitempty"`
 		ExpectedGeneration uint64            `json:"expectedGeneration"`
 	}{argv, options.Cwd, options.Env, options.Timeout.Milliseconds(), c.sandbox.Generation}
-	op, err := c.sandbox.client.submit(ctx, path+"/execs", options.IdempotencyKey, body)
+	op, err := c.sandbox.client.submit(ctx, path+"/execs", body)
 	if err != nil {
 		return nil, err
 	}
 	if op.Result["execId"] == "" {
 		return nil, &OperationError{Operation: op, Err: fmt.Errorf("missing execution ID")}
 	}
-	return &Command{OperationID: op.ID, ExecutionID: op.Result["execId"], IdempotencyKey: op.IdempotencyKey, client: c.sandbox.client, operation: op}, nil
+	return &Command{OperationID: op.ID, ExecutionID: op.Result["execId"], client: c.sandbox.client, operation: op}, nil
 }
 
 func (c *Command) Wait(ctx context.Context) (*CommandResult, error) {

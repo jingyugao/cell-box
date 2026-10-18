@@ -21,9 +21,6 @@ func TestResumeReturnsFreshGenerationWithoutMutatingOriginalHandle(t *testing.T)
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ExpectedGeneration != 3 {
 				t.Errorf("resume generation: %+v, %v", body, err)
 			}
-			if r.Header.Get("Idempotency-Key") != "resume-key" {
-				t.Error("lost caller's resume key")
-			}
 			writeJSONTest(w, Operation{ID: "op-resume", Status: "succeeded", Box: &SandboxInfo{ID: "box-1", Generation: 4, Phase: "running"}})
 		case "/v1/boxes/box-1/execs":
 			execs.Add(1)
@@ -41,7 +38,7 @@ func TestResumeReturnsFreshGenerationWithoutMutatingOriginalHandle(t *testing.T)
 	}))
 	defer server.Close()
 	original := testClient(t, server, "").sandbox(SandboxInfo{ID: "box-1", Generation: 3})
-	resumed, err := original.Resume(context.Background(), &LifecycleOptions{IdempotencyKey: "resume-key"})
+	resumed, err := original.Resume(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,17 +75,17 @@ func TestLifecycleRefreshFailureRetainsOperationAndUnprovisionedBoxCanBeDestroye
 	}))
 	defer server.Close()
 	c := testClient(t, server, "")
-	_, err := c.sandbox(SandboxInfo{ID: "box-1", Generation: 1}).Activate(context.Background(), nil)
+	_, err := c.sandbox(SandboxInfo{ID: "box-1", Generation: 1}).Activate(context.Background())
 	var opErr *OperationError
 	var apiErr *APIError
 	if !errors.As(err, &opErr) || opErr.Operation.ID != "op-activate" || !errors.As(err, &apiErr) || apiErr.StatusCode != 503 {
 		t.Fatalf("lost accepted operation or underlying error: %v", err)
 	}
 	failed := c.sandbox(SandboxInfo{ID: "failed-box"})
-	if _, err := failed.Resume(context.Background(), nil); err == nil {
+	if _, err := failed.Resume(context.Background()); err == nil {
 		t.Fatal("resume accepted a zero generation")
 	}
-	if err := failed.Destroy(context.Background(), nil); err != nil || destroyed.Load() != 1 {
+	if err := failed.Destroy(context.Background()); err != nil || destroyed.Load() != 1 {
 		t.Fatalf("failed sandbox cleanup: %v, destroys=%d", err, destroyed.Load())
 	}
 }

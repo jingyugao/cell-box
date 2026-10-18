@@ -172,11 +172,6 @@ func (m *Manager) claim() (string, Operation, BuildInput, context.Context, conte
 }
 
 func (m *Manager) executeBuild(ctx context.Context, client string, op Operation, in BuildInput) {
-	if err := m.images.Acquire(ctx, 1); err != nil {
-		m.complete(client, op.ID, in, BuildResult{}, nil, err)
-		return
-	}
-	defer m.images.Release(1)
 	f, err := os.OpenFile(m.logPath(op.ID), os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0600)
 	if err != nil {
 		m.complete(client, op.ID, in, BuildResult{}, nil, err)
@@ -257,7 +252,7 @@ func (m *Manager) finish(client, id string, in BuildInput, result BuildResult, s
 	} else if m.closed {
 		op.Status = "failed"
 		op.Stage = "interrupted"
-		op.Error = &Error{Code: "OPERATION_INTERRUPTED", Message: "Service stopped during build; inspect the result before submitting another request"}
+		op.Error = &Error{Code: "UNKNOWN_OUTCOME", Message: "Service stopped during build; the result is unknown and the build was not resumed"}
 	} else if buildErr != nil {
 		op.Status = "failed"
 		op.Stage = "failed"

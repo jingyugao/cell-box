@@ -64,12 +64,6 @@ type Provider interface {
 	Guest(context.Context, Handle) (Connection, error)
 }
 
-// HomeUpgradeProvider replaces an execution while retaining its owned HOME.
-// The new Guest starts staged; activation remains an explicit API operation.
-type HomeUpgradeProvider interface {
-	Upgrade(context.Context, Handle, Spec, string) (Handle, error)
-}
-
 // ImageCacheProvider warms the runtime image store without creating a workload.
 type ImageCacheProvider interface {
 	CacheImage(context.Context, string, string, string) error // image, node, namespace
@@ -81,9 +75,6 @@ type WarmTemplate struct {
 	ID    string `json:"id"`
 	Slots int    `json:"slots"`
 	Spec  Spec   `json:"spec"`
-}
-type WarmTemplateProvider interface {
-	SetWarmTemplates(context.Context, string, []WarmTemplate) error
 }
 
 // WarmPoolResources reports configured requests and limits for currently
@@ -111,10 +102,16 @@ type WarmPoolObservation struct {
 	Resources      WarmPoolResources `json:"resources"`
 }
 
+type WarmSnapshot struct {
+	DesiredHash string                `json:"desiredHash"`
+	ObservedAt  time.Time             `json:"observedAt"`
+	Pools       []WarmPoolObservation `json:"pools"`
+}
+
 // WarmTemplateObserver reads controller snapshots; callers must not infer
 // zero usage when the snapshot is absent or stale.
 type WarmTemplateObserver interface {
-	ObserveWarmTemplates(context.Context, string, []string) ([]WarmPoolObservation, error)
+	ObserveWarmTemplates(context.Context, string, []string) (WarmSnapshot, error)
 }
 
 // FencedGuestProvider validates the execution while resolving its
@@ -129,7 +126,7 @@ type ChangeProvider interface {
 }
 
 // TransitionProvider atomically fences a lifecycle request against the last
-// transition observed by Cellbox. Legacy providers continue to use Action.
+// transition observed by Cellbox.
 type TransitionProvider interface {
 	ActionTransition(context.Context, Handle, string, string, string) error // action, expected previous ID, new ID
 }
@@ -157,14 +154,8 @@ type ResourceInventoryProvider interface {
 	ListResources(context.Context, string, string) ([]inventory.Record, error)
 }
 
-// WorkspaceArchiveProvider captures a workspace from persistent storage while
-// its sandbox is suspended. The implementation must not resume the sandbox.
+// WorkspaceArchiveProvider captures a persistent workspace after its execution
+// has stopped. It never changes the sandbox lifecycle.
 type WorkspaceArchiveProvider interface {
 	CaptureWorkspaceArchive(context.Context, Handle, string) (int64, string, error)
-}
-
-// DiskWorkspaceArchiveProvider stops execution without a process checkpoint and
-// captures the owned persistent workspace. Failure never destroys the disk.
-type DiskWorkspaceArchiveProvider interface {
-	CaptureDiskWorkspaceArchive(context.Context, Handle, string) (int64, string, error)
 }
