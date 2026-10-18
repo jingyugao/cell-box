@@ -2,6 +2,7 @@
 package homevolume
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -31,6 +32,10 @@ const (
 )
 
 var ownerPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// ErrBusy indicates that another operation currently owns this volume lock.
+var ErrBusy = errors.New("persistent volume is busy")
+var ErrStaleVolume = errors.New("persistent volume identity is stale")
 
 // Identity ties a HOME directory to its logical owner and backing inode.
 type Identity struct {
@@ -302,6 +307,48 @@ func Prepare(base, owner, node, spec string, initialize bool) (Identity, error) 
 // Empty node or spec values skip that corresponding comparison.
 func Verify(base, owner, node, spec, id string) (Identity, error) {
 	return verify(base, owner, node, spec, id)
+}
+
+// WithVolume validates and exclusively accesses an independent volume while
+// holding the same per-owner lock used by lifecycle operations. Lock
+// acquisition is nonblocking and returns ErrBusy if the owner is in use.
+func WithVolume(ctx context.Context, base, owner, node string, work func(string) error) error {
+	if work == nil {
+		return errors.New("volume callback is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	unlock, err := lockOwnerContext(ctx, base, owner, false)
+	if err != nil {
+		if errors.Is(err, ErrBusy) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		return errors.New("persistent volume access unavailable")
+	}
+	defer unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	identity, err := Verify(base, owner, node, VolumeSpecHash, "")
+	if err != nil {
+		return ErrStaleVolume
+	}
+	_, _, data, err := paths(base, owner)
+	if err != nil {
+		return fmt.Errorf("%w: invalid volume identity", ErrStaleVolume)
+	}
+	current, err := identityForData(data, identity.ID, owner, node, VolumeSpecHash)
+	if err != nil || current.Device != identity.Device || current.Inode != identity.Inode {
+		return ErrStaleVolume
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := work(data); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 // VerifyExecution checks the parent sandbox's durable claim before a child
@@ -844,6 +891,38 @@ func lockOwner(base, owner string, create bool) (func(), error) {
 	return func() {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		_ = f.Close()
+	}, nil
+}
+
+func lockOwnerContext(ctx context.Context, base, owner string, create bool) (func(), error) {
+	if !validOwner(owner) {
+		return nil, errors.New("invalid persistent volume owner")
+	}
+	if err := ensureLockDir(base, create); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(base, "homes", lockDir, owner+".lock")
+	f, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		return nil, err
+	}
+	closeFile := func() { _ = f.Close() }
+	if err := ctx.Err(); err != nil {
+		closeFile()
+		return nil, err
+	}
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err == syscall.EWOULDBLOCK || err == syscall.EAGAIN {
+		closeFile()
+		return nil, ErrBusy
+	}
+	if err != nil {
+		closeFile()
+		return nil, err
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		closeFile()
 	}, nil
 }
 

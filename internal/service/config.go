@@ -29,6 +29,9 @@ func LoadConfig(r io.Reader) (Config, error) {
 	return c, c.Validate()
 }
 func (c *Config) Validate() error {
+	if err := c.VolumeBackups.Validate(); err != nil {
+		return err
+	}
 	if c.OperationRetentionSeconds == 0 {
 		c.OperationRetentionSeconds = 86400
 	}

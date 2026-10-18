@@ -1,14 +1,33 @@
 package node
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"syscall"
 
+	"cellbox.local/cellbox/internal/boxprovider"
 	"cellbox.local/cellbox/internal/guestapi"
 	"cellbox.local/cellbox/internal/homevolume"
 )
+
+// WithStoppedVolume exposes an independent volume's data directory while
+// validating its on-disk identity and holding its per-volume lifecycle lock.
+func (b *Backend) WithStoppedVolume(ctx context.Context, uid, node string, work func(string) error) error {
+	if strings.TrimSpace(node) == "" {
+		return fmt.Errorf("node name is required")
+	}
+	if b == nil || b.Base == "" {
+		return fmt.Errorf("node volume storage is unavailable")
+	}
+	err := homevolume.WithVolume(ctx, b.Base, uid, node, work)
+	if errors.Is(err, homevolume.ErrStaleVolume) {
+		return fmt.Errorf("%w: persistent volume identity is stale", boxprovider.ErrStaleVolume)
+	}
+	return err
+}
 
 // CreateVolume initializes an independently managed HOME volume.
 func (b *Backend) CreateVolume(uid, node string, agent guestapi.Identity) error {

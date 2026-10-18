@@ -59,6 +59,11 @@ api:
   configSecret: cellbox-api-config
   # Set false to use the existing configSecret.
   manageSecrets: true
+  volumeBackups:
+    # Reference an existing Secret. Empty leaves passwordEnv unset and disables backups.
+    # With api.manageSecrets=false, set passwordEnv in the external API config too.
+    passwordSecret: ""
+    passwordKey: RESTIC_PASSWORD
   # Overrides for the API JSON configuration; defaults start with no profiles.
   config: {}
 buildkit:

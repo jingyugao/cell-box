@@ -62,7 +62,8 @@ type CreateVolumeOptions struct {
 	ProfileID string `json:"profileId"`
 }
 
-// Volume describes an independently managed persistent volume.
+// Volume describes an independently managed persistent volume. Phase may be
+// backing-up while a direct disk backup is in progress.
 type Volume struct {
 	ID              string    `json:"id"`
 	OwnerKey        string    `json:"ownerKey"`
@@ -73,6 +74,34 @@ type Volume struct {
 	CreatedAt       time.Time `json:"createdAt"`
 	OperationID     string    `json:"operationId,omitempty"`
 	Error           *APIError `json:"error,omitempty"`
+}
+
+// BackupPolicy describes the server-wide policy for independent Volume backups.
+type BackupPolicy struct {
+	Engine   string `json:"engine"`
+	Scope    string `json:"scope"`
+	KeepLast int    `json:"keepLast"`
+	Enabled  bool   `json:"enabled"`
+}
+
+// VolumeBackup is a restorable snapshot of one independent Volume.
+// SizeBytes and AddedBytes may be omitted when the backend cannot report them.
+type VolumeBackup struct {
+	ID         string    `json:"id"`
+	CreatedAt  time.Time `json:"createdAt"`
+	SizeBytes  *int64    `json:"sizeBytes,omitempty"`
+	AddedBytes *int64    `json:"addedBytes,omitempty"`
+	VolumeID   string    `json:"volumeId"`
+	OwnerKey   string    `json:"ownerKey"`
+	ProfileID  string    `json:"profileId"`
+}
+
+// RestoreVolumeOptions restores a backup into a newly allocated Volume.
+type RestoreVolumeOptions struct {
+	SourceVolumeID string `json:"sourceVolumeId"`
+	BackupID       string `json:"backupId"`
+	OwnerKey       string `json:"ownerKey"`
+	ID             string `json:"id,omitempty"`
 }
 
 type Capabilities struct {

@@ -44,6 +44,9 @@ type volumeRecord struct {
 	Provider  string            `json:"provider"`
 	Namespace string            `json:"namespace"`
 	Agent     guestapi.Identity `json:"agent"`
+	// A backup reads the disk. Its failure must not replace the source's
+	// availability or filesystem error with an object-storage error.
+	BackupSourceState *volumeBackupSourceState `json:"backupSourceState,omitempty"`
 }
 
 type createVolumeRequest struct {

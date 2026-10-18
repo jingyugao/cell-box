@@ -8,6 +8,7 @@ import (
 	"cellbox.local/cellbox/internal/objectstorage"
 	"cellbox.local/cellbox/internal/runtimecontrol"
 	"cellbox.local/cellbox/internal/telemetry"
+	"cellbox.local/cellbox/internal/volumebackup"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -18,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path"
 	"slices"
 	"strings"
@@ -35,6 +37,7 @@ type Service struct {
 	store        *Store
 	catalog      *catalog.Manager
 	providers    map[string]boxprovider.Provider
+	backups      volumeBackupEngine
 	http         *http.Client
 	toolHTTP     *http.Client
 	ctx          context.Context
@@ -96,6 +99,19 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 		http:     &http.Client{Transport: &http.Transport{Proxy: nil, ResponseHeaderTimeout: 35 * time.Second}, CheckRedirect: noRedirect},
 		toolHTTP: &http.Client{Transport: &http.Transport{Proxy: nil, ResponseHeaderTimeout: 5*time.Minute + 5*time.Second}, CheckRedirect: noRedirect},
 		ctx:      ctx, cancel: cancel, streams: map[string]activeStream{}}
+	if config.VolumeBackups.PasswordEnv != "" {
+		if os.Getenv(config.VolumeBackups.PasswordEnv) == "" {
+			cancel()
+			store.Close()
+			return nil, errors.New("volume backup password environment is empty")
+		}
+		s.backups, err = volumebackup.New(config.VolumeBackups, config.ObjectStorage)
+		if err != nil {
+			cancel()
+			store.Close()
+			return nil, err
+		}
+	}
 	var imageBuild image.BuildKitOptions
 	if config.ImageBuild != (ImageBuildConfig{}) {
 		imageBuild = image.BuildKitOptions{
@@ -322,6 +338,11 @@ func (s *Service) launchWithCommitContext(request context.Context, op Operation,
 			if workErr != nil {
 				record.Operation.Status = "failed"
 				record.Operation.Error = cloneError(workErr)
+			}
+			if op.Kind == "volume-backup" || op.Kind == "volume-restore" {
+				if err := finishVolumeBackupOperation(tx, op, workErr); err != nil {
+					return err
+				}
 			}
 			b, boxErr := tx.Box("", op.TargetID)
 			if boxErr == nil && b.Box.OperationID == op.ID {
@@ -882,6 +903,11 @@ func (s *Service) actionContextWithGeneration(ctx context.Context, client, id, a
 		}
 		if err = busy(tx, b); err != nil {
 			return err
+		}
+		if action == "resume" || action == "activate" {
+			if err := requireAvailableBoxVolumes(tx, b); err != nil {
+				return err
+			}
 		}
 		active, err := tx.HasActiveExecution(id)
 		if err != nil {

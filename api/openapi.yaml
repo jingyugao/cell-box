@@ -315,13 +315,43 @@ components:
         nodeName: {type: string}
         phase:
           type: string
-          enum: [creating, available, deleting, deleted, failed]
+          enum: [creating, available, backing-up, deleting, deleted, failed]
         resourceVersion: {type: integer, format: int64, minimum: 0}
         createdAt: {type: string, format: date-time}
         operationId: {type: string}
         error:
           $ref: '#/components/schemas/ErrorDetail'
       required: [id, ownerKey, profileId, nodeName, phase, resourceVersion, createdAt]
+      type: object
+    BackupPolicy:
+      additionalProperties: false
+      properties:
+        engine: {type: string, enum: [restic]}
+        scope: {type: string, enum: [volume]}
+        keepLast: {type: integer, minimum: 1, maximum: 100, description: Configured retention count; defaults to three snapshots.}
+        enabled: {type: boolean}
+      required: [engine, scope, keepLast, enabled]
+      type: object
+    VolumeBackup:
+      additionalProperties: false
+      properties:
+        id: {type: string, pattern: '^[0-9a-f]{64}$'}
+        createdAt: {type: string, format: date-time}
+        sizeBytes: {type: integer, format: int64, minimum: 0, description: Total logical snapshot size when available.}
+        addedBytes: {type: integer, format: int64, minimum: 0, description: Bytes newly added to the deduplicated repository when available.}
+        volumeId: {type: string}
+        ownerKey: {type: string}
+        profileId: {type: string}
+      required: [id, createdAt, volumeId, ownerKey, profileId]
+      type: object
+    RestoreVolume:
+      additionalProperties: false
+      properties:
+        sourceVolumeId: {type: string, minLength: 1, maxLength: 55, pattern: '^[a-z0-9]([-a-z0-9]{0,53}[a-z0-9])?$'}
+        backupId: {type: string, pattern: '^[0-9a-f]{64}$'}
+        ownerKey: {type: string, minLength: 1, maxLength: 256}
+        id: {type: string, minLength: 1, maxLength: 55, pattern: '^[a-z0-9]([-a-z0-9]{0,53}[a-z0-9])?$'}
+      required: [sourceVolumeId, backupId, ownerKey]
       type: object
     Capabilities:
       additionalProperties: false
@@ -872,6 +902,19 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       summary: Create a box asynchronously
+  /v1/backup-policy:
+    get:
+      operationId: getBackupPolicy
+      summary: Get the independent-volume backup policy
+      description: Reports the configured backup engine, scope, retention count, and whether backup is enabled. The default retention is the latest three snapshots; the count is configurable between 1 and 100.
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BackupPolicy'}
+        default:
+          $ref: '#/components/responses/Error'
   /v1/volumes:
     get:
       operationId: listVolumes
@@ -948,6 +991,83 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/volumes/{id}/backups:
+    parameters:
+    - in: path
+      name: id
+      required: true
+      schema: {type: string, maxLength: 55, pattern: '^[a-z0-9]([-a-z0-9]{0,53}[a-z0-9])?$'}
+    get:
+      operationId: listVolumeBackups
+      summary: List retained backups for an independent Volume
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/VolumeBackup'}
+        default:
+          $ref: '#/components/responses/Error'
+    post:
+      operationId: createVolumeBackup
+      summary: Back up a stopped independent Volume asynchronously
+      description: Reads the independent Volume directly without creating or restoring a Sandbox. Every Box referencing the Volume must be stopped and detached. Restic deduplicates data in the configured object-storage repository and the server policy retains the configured number of latest snapshots (three by default). If the snapshot succeeds but pruning fails, the successful operation result includes retentionError. The request body may be empty or an empty object.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "202":
+          description: Volume backup operation accepted
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Operation'}
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/volumes/{id}/backups/{backupId}:
+    parameters:
+    - in: path
+      name: id
+      required: true
+      schema: {type: string, maxLength: 55, pattern: '^[a-z0-9]([-a-z0-9]{0,53}[a-z0-9])?$'}
+    - in: path
+      name: backupId
+      required: true
+      schema: {type: string, pattern: '^[0-9a-f]{64}$'}
+    get:
+      operationId: getVolumeBackup
+      summary: Get one retained Volume backup
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/VolumeBackup'}
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/volumes:restore:
+    post:
+      operationId: restoreVolume
+      summary: Restore a snapshot into a new independent Volume asynchronously
+      description: Always creates a new Volume and never creates a Sandbox. The source Volume may already be deleted; its retained backup remains restorable. The new Volume uses the supplied ownerKey and optionally supplied ID.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RestoreVolume'}
+      responses:
+        "202":
+          description: Volume restore operation accepted
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Operation'}
         default:
           $ref: '#/components/responses/Error'
   /v1/checkpoints:

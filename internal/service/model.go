@@ -6,6 +6,7 @@ import (
 	"cellbox.local/cellbox/internal/catalog"
 	"cellbox.local/cellbox/internal/guestapi"
 	"cellbox.local/cellbox/internal/objectstorage"
+	"cellbox.local/cellbox/internal/volumebackup"
 	"time"
 )
 
@@ -42,6 +43,7 @@ type Config struct {
 	// ClientID selects a data namespace; it is not an authenticated identity.
 	ClientID                  string               `json:"clientId,omitempty"`
 	ObjectStorage             objectstorage.Config `json:"objectStorage,omitempty"`
+	VolumeBackups             volumebackup.Config  `json:"volumeBackups,omitempty"`
 	Listen                    string               `json:"listen"`
 	DataDir                   string               `json:"dataDir"`
 	Profiles                  []Profile            `json:"profiles"`
