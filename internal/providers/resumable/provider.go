@@ -40,12 +40,12 @@ var validImage = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}
 
 type Provider struct {
 	Client client.Client
-	// Local connects the HTTP service to the embedded runtime. CRs remain the
-	// durable ledger; scheduling and completion notifications stay in process.
-	Local           *runtimecontrol.Client
-	CacheImageLocal func(context.Context, string, string, string) error
-	warmMu          sync.RWMutex
-	warmSnapshot    warmtemplates.Snapshot
+	// Local connects HTTP to the embedded runtime and its durable local journal.
+	Local                 *runtimecontrol.Client
+	CacheImageLocal       func(context.Context, string, string, string) error
+	ConfirmExecutionLocal func(context.Context, *api.ResumablePod, *core.Pod) (*api.Execution, error)
+	warmMu                sync.RWMutex
+	warmSnapshot          warmtemplates.Snapshot
 }
 
 func New(c client.Client) *Provider { return &Provider{Client: c} }
@@ -83,8 +83,12 @@ func buildWanted(spec boxprovider.Spec) (*api.ResumablePod, error) {
 		(spec.DebugReadOnlyHostPath != "" || !path.IsAbs(host) || path.Clean(host) != host || host == "/" || len(host) > 4096 || strings.ContainsAny(host, "\x00\r\n")) {
 		return nil, errors.New("debug read-write host path must be a clean absolute directory path other than /")
 	}
-	if math.IsNaN(spec.CPU) || math.IsInf(spec.CPU, 0) || spec.CPU <= 0 || spec.CPU > 1024 || spec.MemoryMiB <= 0 || spec.MemoryMiB > 1<<40 {
-		return nil, errors.New("positive bounded CPU and memory are required")
+	if math.IsNaN(spec.CPU) || math.IsInf(spec.CPU, 0) || spec.CPU < 0 || spec.MemoryMiB < 0 {
+		return nil, errors.New("resource limits must be finite and nonnegative")
+	}
+	// Guard unit conversion overflow, without imposing a resource allocation policy.
+	if math.Ceil(spec.CPU*1000) >= float64(math.MaxInt64) || spec.MemoryMiB > math.MaxInt64/(1024*1024) {
+		return nil, errors.New("resource limits overflow Kubernetes quantity units")
 	}
 	config, err := json.Marshal(spec.Config)
 	if err != nil {
@@ -94,19 +98,23 @@ func buildWanted(spec boxprovider.Spec) (*api.ResumablePod, error) {
 	if spec.Staged {
 		argv = append(argv, "--staged")
 	}
-	cpu := resource.NewMilliQuantity(int64(math.Ceil(spec.CPU*1000)), resource.DecimalSI)
-	memory := resource.NewQuantity(spec.MemoryMiB*1024*1024, resource.BinarySI)
-	resources := core.ResourceList{core.ResourceCPU: *cpu, core.ResourceMemory: *memory}
+	var limits core.ResourceList
+	if spec.CPU > 0 || spec.MemoryMiB > 0 {
+		limits = make(core.ResourceList)
+		if spec.CPU > 0 {
+			limits[core.ResourceCPU] = *resource.NewMilliQuantity(int64(math.Ceil(spec.CPU*1000)), resource.DecimalSI)
+		}
+		if spec.MemoryMiB > 0 {
+			limits[core.ResourceMemory] = *resource.NewQuantity(spec.MemoryMiB*1024*1024, resource.BinarySI)
+		}
+	}
 	zero := int64(0)
 	no := false
 	container := core.Container{
 		Name: "cellbox", Image: spec.Image, ImagePullPolicy: core.PullIfNotPresent,
 		Command: []string{guestapi.Binary}, Args: argv,
-		Ports: []core.ContainerPort{{Name: "guest", ContainerPort: guestapi.Port, Protocol: core.ProtocolTCP}},
-		Resources: core.ResourceRequirements{
-			Requests: core.ResourceList{core.ResourceCPU: resource.MustParse("0"), core.ResourceMemory: resource.MustParse("0")},
-			Limits:   resources,
-		},
+		Ports:     []core.ContainerPort{{Name: "guest", ContainerPort: guestapi.Port, Protocol: core.ProtocolTCP}},
+		Resources: core.ResourceRequirements{Requests: core.ResourceList{core.ResourceCPU: resource.MustParse("0"), core.ResourceMemory: resource.MustParse("0")}, Limits: limits},
 		SecurityContext: &core.SecurityContext{RunAsUser: &zero, RunAsNonRoot: &no, Privileged: &no, AllowPrivilegeEscalation: &no,
 			Capabilities: &core.Capabilities{Drop: []core.Capability{"ALL"}, Add: []core.Capability{"CHOWN", "SETUID", "SETGID", "FOWNER", "DAC_OVERRIDE"}}},
 		ReadinessProbe: &core.Probe{ProbeHandler: core.ProbeHandler{TCPSocket: &core.TCPSocketAction{Port: intstr.FromInt32(guestapi.Port)}}, PeriodSeconds: 1},
@@ -240,6 +248,12 @@ func (p *Provider) Inspect(ctx context.Context, h boxprovider.Handle) (boxprovid
 // inspectRunning observes execution identity and terminal Pod state only.
 // Asynchronous readiness probes do not change the box lifecycle phase.
 func (p *Provider) inspectRunning(ctx context.Context, h boxprovider.Handle, w *api.ResumablePod) (string, error) {
+	if record, err := p.localExecution(ctx, h, w.Status.PodUID); record != nil || err != nil {
+		if err != nil {
+			return "", err
+		}
+		return "running", nil
+	}
 	if w.Status.PodName == "" || w.Status.PodUID == "" {
 		return "failed", nil
 	}
@@ -320,6 +334,11 @@ func (p *Provider) ActionTransition(ctx context.Context, h boxprovider.Handle, a
 		return boxprovider.ErrUnsupported
 	default:
 		return boxprovider.ErrUnsupported
+	}
+	if p.Local != nil {
+		if err := p.Local.Flush(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}); err != nil {
+			return err
+		}
 	}
 	w, err := p.get(ctx, h)
 	if err != nil {
@@ -514,6 +533,11 @@ func (p *Provider) clearArchiveCapture(h boxprovider.Handle, id string, preserve
 }
 
 func (p *Provider) Destroy(ctx context.Context, h boxprovider.Handle) error {
+	if p.Local != nil {
+		if err := p.Local.Flush(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}); err != nil {
+			return err
+		}
+	}
 	w, err := p.get(ctx, h)
 	if errors.Is(err, boxprovider.ErrNotFound) {
 		return nil
@@ -546,6 +570,12 @@ func containerIdentity(pod *core.Pod, container string) string {
 }
 
 func (p *Provider) GuestForExecution(ctx context.Context, h boxprovider.Handle, expected string) (boxprovider.Connection, error) {
+	if execution, err := p.localExecution(ctx, h, expected); execution != nil || err != nil {
+		if err != nil {
+			return boxprovider.Connection{}, err
+		}
+		return boxprovider.Connection{URL: "http://" + net.JoinHostPort(execution.PodIP, fmt.Sprint(guestapi.Port))}, nil
+	}
 	w, err := p.get(ctx, h)
 	if err != nil {
 		return boxprovider.Connection{}, err
@@ -608,6 +638,47 @@ func (p *Provider) GuestForExecution(ctx context.Context, h boxprovider.Handle, 
 	// The API already resolved and fenced this execution. Avoid waiting for
 	// EndpointSlice and Service routing to catch up after a restore.
 	return boxprovider.Connection{URL: "http://" + net.JoinHostPort(ip, fmt.Sprint(guestapi.Port))}, nil
+}
+
+// A local completion is usable before Kubernetes publication. The persisted
+// claim fences identity; CRI must still confirm that the same container is live.
+func (p *Provider) localExecution(ctx context.Context, h boxprovider.Handle, expected string) (*api.Execution, error) {
+	if p.Local == nil {
+		return nil, nil
+	}
+	r, err := p.Local.LocalRecord(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name})
+	if err != nil || r == nil {
+		return nil, err
+	}
+	w := r.Resource
+	if !validObservationIdentity(w, h) {
+		return nil, boxprovider.ErrStaleExecution
+	}
+	if expected != "" && w.Status.PodUID != expected {
+		return nil, boxprovider.ErrStaleExecution
+	}
+	if !r.Complete || r.Pod == nil || w.DeletionTimestamp != nil || w.Spec.DesiredState != "Running" || w.Status.Phase != "Running" ||
+		w.Status.ObservedGeneration != w.Generation || w.Status.ObservedTransitionID != w.Spec.TransitionID || w.Status.ResumeReadyTransitionID != w.Spec.TransitionID ||
+		w.Status.Execution == nil || p.ConfirmExecutionLocal == nil {
+		return nil, boxprovider.ErrNotReady
+	}
+	execution, err := p.ConfirmExecutionLocal(ctx, w, r.Pod)
+	if err != nil {
+		return nil, err
+	}
+	if execution == nil || *execution != *w.Status.Execution || net.ParseIP(execution.PodIP) == nil {
+		return nil, boxprovider.ErrStaleExecution
+	}
+	// Recheck local intent after CRI access, including a concurrent suspend or
+	// external deletion observed by the background synchronizer.
+	current, err := p.Local.StoredResource(ctx, client.ObjectKeyFromObject(w))
+	if err != nil {
+		return nil, err
+	}
+	if current == nil || current.UID != w.UID || current.DeletionTimestamp != nil || current.Spec.DesiredState != "Running" || current.Spec.TransitionID != w.Spec.TransitionID || current.Status.Phase != "Running" || !apiequality.Semantic.DeepEqual(current.Status.Execution, execution) {
+		return nil, boxprovider.ErrStaleExecution
+	}
+	return execution, nil
 }
 
 var _ boxprovider.Provider = (*Provider)(nil)

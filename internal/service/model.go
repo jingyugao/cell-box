@@ -30,10 +30,11 @@ type Profile struct {
 	// switch. Config validation always enables it for new resumable Boxes;
 	// old stored profiles retain false. The initially empty HOME hides image
 	// contents and is retained across suspend/resume until the Box is deleted.
-	PersistentHome bool            `json:"persistentHome,omitempty"`
-	CPU            float64         `json:"cpu,omitempty"`
-	MemoryMiB      int64           `json:"memoryMiB,omitempty"`
-	Guest          guestapi.Config `json:"guest"`
+	PersistentHome bool `json:"persistentHome,omitempty"`
+	// Resource limits are opt-in. Omitted or zero values leave that resource unlimited.
+	CPU       float64         `json:"cpu,omitempty"`
+	MemoryMiB int64           `json:"memoryMiB,omitempty"`
+	Guest     guestapi.Config `json:"guest"`
 }
 type Config struct {
 	CatalogBuilder catalog.Builder `json:"-"`

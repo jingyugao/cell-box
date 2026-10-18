@@ -209,8 +209,10 @@ spec:
           resources:
             requests:
               {{- toYaml .Values.buildkit.requests | nindent 14 }}
+            {{- with .Values.buildkit.limits }}
             limits:
-              {{- toYaml .Values.buildkit.limits | nindent 14 }}
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
           securityContext:
             runAsUser: 1000
             runAsGroup: 1000

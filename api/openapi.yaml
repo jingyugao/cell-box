@@ -72,8 +72,8 @@ components:
         buildCommand: {type: string}
         runCommand: {type: string}
         platform: {type: string}
-        cpu: {type: number, exclusiveMinimum: 0}
-        memoryMiB: {type: integer, minimum: 1}
+        cpu: {type: number, minimum: 0, description: Configured CPU limit; zero means no limit.}
+        memoryMiB: {type: integer, minimum: 0, description: Configured memory limit in MiB; zero means no limit.}
         warmSlots: {type: integer, minimum: 0, maximum: 1024}
         status: {type: string, enum: [active, retired]}
         generation: {type: integer, minimum: 1}
@@ -542,7 +542,8 @@ components:
         capabilities:
           $ref: '#/components/schemas/Capabilities'
         cpu:
-          exclusiveMinimum: 0
+          minimum: 0
+          description: Configured CPU limit; zero means no limit.
           type: number
         id:
           type: string
@@ -554,7 +555,8 @@ components:
           - k8s-resumable
           type: string
         memoryMiB:
-          minimum: 1
+          minimum: 0
+          description: Configured memory limit in MiB; zero means no limit.
           type: integer
         provider:
           enum:

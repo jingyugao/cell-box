@@ -238,6 +238,36 @@ func (b *Backend) WarmState(ctx context.Context, p *core.Pod) (string, time.Time
 	l, err := b.WarmStatus(ctx, p)
 	return l.Phase, l.Deadline, err
 }
+
+// TryRetireWarm atomically retires an idle warm lease. A claimed or restoring
+// lease is owned by an execution and must not be removed by pool maintenance.
+// The caller remains responsible for deleting the Pod and cleaning its runtime.
+func (b *Backend) TryRetireWarm(ctx context.Context, p *core.Pod) (bool, error) {
+	if p == nil || !ValidID(string(p.UID)) {
+		return false, fmt.Errorf("invalid warm Pod UID")
+	}
+	claimed := false
+	_, err := warmUpdateContext(ctx, b.Base, string(p.UID), false, func(l *WarmLease) error {
+		if l.Name != p.Name || l.Namespace != p.Namespace {
+			return fmt.Errorf("warm Pod identity mismatch")
+		}
+		if l.Phase == "claimed" || l.Phase == "restoring" {
+			claimed = true
+			return nil
+		}
+		l.Phase = "retired"
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		// A gated Pod can be removed before RegisterWarm creates its lease.
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return !claimed, nil
+}
+
 func (b *Backend) ReapWarm(ctx context.Context, namespace string, existing map[string]bool) error {
 	entries, err := os.ReadDir(filepath.Join(b.Base, "warm"))
 	if errors.Is(err, os.ErrNotExist) {

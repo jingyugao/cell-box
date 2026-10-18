@@ -18,6 +18,7 @@ import (
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/homevolume"
 	"cellbox.local/cellbox/internal/runtime"
+	"cellbox.local/cellbox/internal/runtimecontrol"
 	"cellbox.local/cellbox/internal/telemetry"
 	"go.opentelemetry.io/otel/trace"
 	core "k8s.io/api/core/v1"
@@ -257,6 +258,18 @@ func owned(w *api.ResumablePod, o client.Object) bool {
 	return ref != nil && ref.UID == w.UID && ref.Kind == api.Kind && ref.APIVersion == api.GroupVersion.String()
 }
 func (r *Reconciler) pod(ctx context.Context, w *api.ResumablePod) (traceResult *core.Pod, retErr error) {
+	if local, ok := r.Client.(*runtimecontrol.Client); ok && w.DeletionTimestamp == nil && (w.Status.Phase == "Suspended" || w.Status.Phase == "Restoring") {
+		record, err := local.LocalRecord(ctx, client.ObjectKeyFromObject(w))
+		if err != nil {
+			return nil, err
+		}
+		if record != nil {
+			if record.Pod == nil {
+				return nil, nil
+			}
+			return record.Pod.DeepCopy(), nil
+		}
+	}
 	if w.Status.PodName == "" {
 		return nil, nil
 	}
@@ -269,6 +282,14 @@ func (r *Reconciler) pod(ctx context.Context, w *api.ResumablePod) (traceResult 
 		return nil, err
 	}
 	if !owned(w, p) || (w.Status.PodUID != "" && string(p.UID) != w.Status.PodUID) {
+		if local, ok := r.Client.(*runtimecontrol.Client); ok && (w.DeletionTimestamp != nil || w.Status.Phase == "Failing") && string(p.UID) != w.Status.PodUID {
+			if record, err := local.LocalRecord(ctx, client.ObjectKeyFromObject(w)); err != nil {
+				return nil, err
+			} else if record != nil && record.Pod != nil && string(record.Pod.UID) == w.Status.PodUID {
+				// Cleanup targets the recorded UID, never a same-name replacement.
+				return nil, nil
+			}
+		}
 		return nil, fmt.Errorf("Pod identity collision: refusing to operate on %s", p.Name)
 	}
 	return p, nil
@@ -335,6 +356,13 @@ func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (traceResul
 			w.Status.PodUID = string(p.UID)
 		}
 		ctrl.LoggerFrom(ctx).Info("warm Pod acquisition finished", "podUID", w.Status.PodUID, "durationMs", time.Since(started).Milliseconds())
+	}
+	if warm == nil {
+		if local, ok := r.Client.(*runtimecontrol.Client); ok {
+			if handled, err := local.FallbackResume(ctx, w); handled || err != nil {
+				return again, err
+			}
+		}
 	}
 	phase := "Creating"
 	if w.Status.Snapshot != "" {
@@ -495,6 +523,19 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (traceResu
 	if w.Spec.NodeName != r.NodeName {
 		return ctrl.Result{}, nil
 	}
+	localPending := false
+	if local, ok := r.Client.(*runtimecontrol.Client); ok {
+		record, err := local.LocalRecord(ctx, req.NamespacedName)
+		if err != nil {
+			return again, err
+		}
+		localPending = record != nil
+		if record != nil && record.Complete && w.DeletionTimestamp == nil {
+			// Completion is already actionable locally. Publication runs in the
+			// background and must not re-enter the lifecycle while it is pending.
+			return ctrl.Result{}, nil
+		}
+	}
 	ctx = telemetry.ExtractOperation(ctx, w)
 	if trace.SpanContextFromContext(ctx).IsValid() {
 		var span trace.Span
@@ -602,11 +643,13 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (traceResu
 		w.Status.RetryNonce = w.Spec.RetryNonce
 		return r.phase(ctx, w, "Failing", err.Error())
 	}
-	if err = r.service(ctx, w); err != nil {
-		if stderrors.Is(err, errServiceCollision) || errors.IsInvalid(err) {
-			return fail(err)
+	if !localPending {
+		if err = r.service(ctx, w); err != nil {
+			if stderrors.Is(err, errServiceCollision) || errors.IsInvalid(err) {
+				return fail(err)
+			}
+			return again, err
 		}
-		return again, err
 	}
 	switch w.Status.Phase {
 	case "":
@@ -664,6 +707,9 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (traceResu
 		if backend, ok := r.Runtime.(warmRuntime); ok && p.Labels[warmLabel] == "true" {
 			if _, err = backend.ActivateWarm(ctx, w, p); err != nil {
 				if stderrors.Is(err, runtime.ErrWarmExpired) {
+					if localPending {
+						return fail(err)
+					}
 					if _, err = r.removePod(ctx, w, p); err != nil {
 						return again, err
 					}

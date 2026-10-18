@@ -209,9 +209,9 @@ func TestCreateAndImmutableOwnership(t *testing.T) {
 	if _, err = p.Create(ctx, s); err == nil {
 		t.Fatal("changed immutable resources were accepted")
 	}
-	s.CPU = 0
+	s.CPU = -1
 	if _, err = p.Create(ctx, s); err == nil {
-		t.Fatal("zero CPU was accepted")
+		t.Fatal("negative CPU was accepted")
 	}
 	s.CPU = 0.5
 	s.Image = "mutable:latest"

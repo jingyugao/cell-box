@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -11,6 +12,7 @@ import (
 
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/boxprovider"
+	"cellbox.local/cellbox/internal/runtimecontrol"
 	"cellbox.local/cellbox/internal/warmtemplates"
 	core "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -41,6 +43,7 @@ type WarmPool struct {
 	ReadDesired        func(context.Context) ([]warmtemplates.Template, string, error)
 	PublishObservation func(warmtemplates.Snapshot)
 	mu                 sync.Mutex
+	cachedPods         []core.Pod
 	failureMu          sync.Mutex
 	failures           map[string]warmFailure
 }
@@ -120,6 +123,34 @@ func (p *WarmPool) remove(ctx context.Context, pod *core.Pod) error {
 		}
 	}
 	return r.Runtime.Cleanup(ctx, pod)
+}
+
+func (p *WarmPool) locallyClaimed(ctx context.Context, pod *core.Pod) (bool, error) {
+	if local, ok := p.Reconciler.Client.(*runtimecontrol.Client); ok {
+		return local.IsClaimed(ctx, pod)
+	}
+	return false, nil
+}
+
+// Serialize retirement against acquisition, then release the pool lock before
+// contacting Kubernetes. The lease cannot be claimed after it becomes retired.
+func (p *WarmPool) removeIdle(ctx context.Context, pod *core.Pod) error {
+	p.mu.Lock()
+	claimed, err := p.locallyClaimed(ctx, pod)
+	if err == nil && !claimed {
+		if backend, ok := p.Reconciler.Runtime.(interface {
+			TryRetireWarm(context.Context, *core.Pod) (bool, error)
+		}); ok {
+			var retired bool
+			retired, err = backend.TryRetireWarm(ctx, pod)
+			claimed = !retired
+		}
+	}
+	p.mu.Unlock()
+	if err != nil || claimed {
+		return err
+	}
+	return p.remove(ctx, pod)
 }
 
 // allocateWarmSlots uses max-min fair allocation: equally sized demands receive
@@ -203,6 +234,12 @@ func (p *WarmPool) reconcilePools(ctx context.Context, configured []warmtemplate
 	if err != nil {
 		return err
 	}
+	p.mu.Lock()
+	p.cachedPods = make([]core.Pod, len(pods))
+	for i := range pods {
+		p.cachedPods[i] = *pods[i].DeepCopy()
+	}
+	p.mu.Unlock()
 	existing := map[string]bool{}
 	for _, pod := range pods {
 		existing[string(pod.UID)] = true
@@ -250,6 +287,12 @@ func (p *WarmPool) reconcilePools(ctx context.Context, configured []warmtemplate
 	var aging []*core.Pod
 	for i := range pods {
 		pod := &pods[i]
+		if claimed, err := p.locallyClaimed(ctx, pod); err != nil {
+			return err
+		} else if claimed {
+			restoring = true
+			continue
+		}
 		if owner := meta.GetControllerOf(pod); owner != nil {
 			recorded := false
 			for _, w := range workloads.Items {
@@ -260,7 +303,7 @@ func (p *WarmPool) reconcilePools(ctx context.Context, configured []warmtemplate
 			}
 			phase, deadline, e := backend.WarmState(ctx, pod)
 			if !recorded && e == nil && (phase == "expired" || phase == "retired" || (phase == "waiting" && time.Now().After(deadline))) {
-				if err = p.remove(ctx, pod); err != nil {
+				if err = p.removeIdle(ctx, pod); err != nil {
 					return err
 				}
 			}
@@ -273,7 +316,7 @@ func (p *WarmPool) reconcilePools(ctx context.Context, configured []warmtemplate
 			if pod.Status.Phase == core.PodFailed || pod.Status.Phase == core.PodSucceeded {
 				p.recordFailure(string(pod.UID), hash)
 			}
-			if err = p.remove(ctx, pod); err != nil {
+			if err = p.removeIdle(ctx, pod); err != nil {
 				return err
 			}
 			continue
@@ -305,7 +348,7 @@ func (p *WarmPool) reconcilePools(ctx context.Context, configured []warmtemplate
 			// Drop excess idle capacity before filling other templates' fair
 			// shares. Keep the oldest compatible slots because pods are sorted by
 			// creation time.
-			if err = p.remove(ctx, pod); err != nil {
+			if err = p.removeIdle(ctx, pod); err != nil {
 				return err
 			}
 			continue
@@ -319,7 +362,7 @@ func (p *WarmPool) reconcilePools(ctx context.Context, configured []warmtemplate
 	// Retire the rotating slot only after another loop has prepared its successor.
 	if total >= p.Size+1 {
 		if available >= p.Size+1 && len(aging) > 0 {
-			return p.remove(ctx, aging[0])
+			return p.removeIdle(ctx, aging[0])
 		}
 		return nil
 	}
@@ -383,6 +426,11 @@ func (p *WarmPool) publishSnapshot(ctx context.Context, configured []warmtemplat
 	seenFailed := map[string]bool{}
 	for i := range pods {
 		pod := &pods[i]
+		if claimed, err := p.locallyClaimed(ctx, pod); err != nil {
+			return err
+		} else if claimed {
+			continue
+		}
 		if meta.GetControllerOf(pod) != nil || pod.DeletionTimestamp != nil {
 			continue
 		}
@@ -496,16 +544,38 @@ func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (result *co
 	if w.Spec.NodeName != r.NodeName {
 		return nil, nil
 	}
-	// Candidate discovery needs no quorum read: the node lease and the
-	// optimistic adoption write are the authority. Keep maintenance/reaping
-	// on fresh lists so a stale omission can never retire a live slot.
-	pods, err := p.pods(ctx, &client.ListOptions{Raw: &meta.ListOptions{ResourceVersion: "0", ResourceVersionMatch: meta.ResourceVersionMatchNotOlderThan}})
+	local, localMode := r.Client.(*runtimecontrol.Client)
+	if localMode {
+		record, e := local.LocalRecord(ctx, client.ObjectKeyFromObject(w))
+		if e != nil {
+			return nil, e
+		}
+		localMode = record != nil
+	}
+	// Local admission uses background-discovered candidates and a durable node
+	// lease. It does not contact Kubernetes to reserve an already running slot.
+	var pods []core.Pod
+	if localMode {
+		for i := range p.cachedPods {
+			pods = append(pods, *p.cachedPods[i].DeepCopy())
+		}
+	} else {
+		pods, err = p.pods(ctx, &client.ListOptions{Raw: &meta.ListOptions{ResourceVersion: "0", ResourceVersionMatch: meta.ResourceVersionMatchNotOlderThan}})
+	}
 	listed = time.Now()
 	if err != nil {
 		return nil, err
 	}
 	for i := range pods {
 		pod := &pods[i]
+		if claimed, e := p.locallyClaimed(ctx, pod); e != nil {
+			return nil, e
+		} else if claimed {
+			continue
+		}
+		if localMode && len(pod.Spec.SchedulingGates) != 0 {
+			continue
+		}
 		owner := meta.GetControllerOf(pod)
 		if owner != nil && !owned(w, pod) {
 			continue
@@ -540,6 +610,16 @@ func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (result *co
 			continue
 		}
 		if !owned(w, pod) {
+			if localMode {
+				_, err := local.ClaimWarm(ctx, w, pod)
+				if errors.Is(err, runtimecontrol.ErrPodClaimed) {
+					continue
+				}
+				if err != nil {
+					return nil, err
+				}
+				return pod, nil
+			}
 			old := pod.DeepCopy()
 			if err = controllerutil.SetControllerReference(w, pod, r.Scheme()); err != nil {
 				return nil, err

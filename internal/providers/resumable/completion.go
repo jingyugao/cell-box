@@ -132,6 +132,9 @@ func (p *Provider) RequestResume(ctx context.Context, h boxprovider.Handle, expe
 	if err := validateHandle(h); err != nil {
 		return err
 	}
+	if p.Local != nil && p.Local.HasJournal() {
+		return p.Local.RequestResume(ctx, h, expectedPrevious, transitionID)
+	}
 	if transitionID == expectedPrevious {
 		current, err := p.get(ctx, h)
 		if err != nil {

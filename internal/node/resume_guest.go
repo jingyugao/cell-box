@@ -26,32 +26,9 @@ func (b *Backend) ResumeGuest(ctx context.Context, w *api.ResumablePod, p *core.
 	ctx, span := telemetry.Start(ctx, "node.resume_guest")
 	defer func() { telemetry.End(span, resultErr) }()
 
-	if w == nil || p == nil || b == nil || b.Runtime == nil {
-		return fmt.Errorf("resume guest requires workload, Pod, and CRI runtime")
-	}
-	expected, err := resumeGuestExpectedExecution(w, p)
+	actual, err := b.ConfirmExecution(ctx, w, p)
 	if err != nil {
 		return err
-	}
-
-	// Reconfirm the supplied execution using only the node's CRI. A persisted
-	// warm execution is useful as a fence, but never authorizes a replaced
-	// container by itself.
-	criCtx, cancelCRI := context.WithTimeout(ctx, 2*time.Second)
-	defer cancelCRI()
-	sandboxes, err := b.sandboxes(criCtx, p)
-	if err != nil {
-		return fmt.Errorf("inspect local guest execution")
-	}
-	if len(sandboxes) != 1 || sandboxes[0] == nil || sandboxes[0].Id == "" {
-		return fmt.Errorf("local guest execution is missing or ambiguous")
-	}
-	actual, err := b.warmExecution(criCtx, w, p, sandboxes[0].Id)
-	if err != nil {
-		return fmt.Errorf("inspect local guest execution")
-	}
-	if actual == nil || actual.PodUID != expected.PodUID || actual.ContainerID != expected.ContainerID || actual.PodIP != expected.PodIP {
-		return fmt.Errorf("local guest execution identity changed")
 	}
 
 	// The guest endpoint is addressed through the exact Pod IP just confirmed
@@ -86,6 +63,39 @@ func (b *Backend) ResumeGuest(ctx context.Context, w *api.ResumablePod, p *core.
 	}
 	w.Status.Execution = actual
 	return nil
+}
+
+// ConfirmExecution verifies the supplied Pod execution against local CRI state
+// without making a request to the guest.
+func (b *Backend) ConfirmExecution(ctx context.Context, w *api.ResumablePod, p *core.Pod) (*api.Execution, error) {
+	if w == nil || p == nil || b == nil || b.Runtime == nil {
+		return nil, fmt.Errorf("execution confirmation requires workload, Pod, and CRI runtime")
+	}
+	expected, err := resumeGuestExpectedExecution(w, p)
+	if err != nil {
+		return nil, err
+	}
+
+	// Reconfirm the supplied execution using only the node's CRI. A persisted
+	// warm execution is useful as a fence, but never authorizes a replaced
+	// container by itself.
+	criCtx, cancelCRI := context.WithTimeout(ctx, 2*time.Second)
+	defer cancelCRI()
+	sandboxes, err := b.sandboxes(criCtx, p)
+	if err != nil {
+		return nil, fmt.Errorf("inspect local guest execution")
+	}
+	if len(sandboxes) != 1 || sandboxes[0] == nil || sandboxes[0].Id == "" {
+		return nil, fmt.Errorf("local guest execution is missing or ambiguous")
+	}
+	actual, err := b.warmExecution(criCtx, w, p, sandboxes[0].Id)
+	if err != nil {
+		return nil, fmt.Errorf("inspect local guest execution")
+	}
+	if actual == nil || actual.PodUID != expected.PodUID || actual.ContainerID != expected.ContainerID || actual.PodIP != expected.PodIP {
+		return nil, fmt.Errorf("local guest execution identity changed")
+	}
+	return actual, nil
 }
 
 func resumeGuestExpectedExecution(w *api.ResumablePod, p *core.Pod) (*api.Execution, error) {

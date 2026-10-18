@@ -21,8 +21,8 @@ type Spec struct {
 	BoxID                  string
 	Image                  string
 	Config                 guestapi.Config
-	CPU                    float64
-	MemoryMiB              int64
+	CPU                    float64 // Optional CPU limit; zero leaves it unset.
+	MemoryMiB              int64   // Optional memory limit; zero leaves it unset.
 	NodeName               string
 	Namespace              string
 	SharedReadOnlyHostPath string

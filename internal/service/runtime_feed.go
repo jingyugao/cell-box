@@ -131,6 +131,7 @@ func (s *Service) waitNodeResume(ctx context.Context, b boxRecord, transitionID 
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(s.config.StartupTimeoutSeconds)*time.Second)
 	defer cancel()
 	feed := s.ensureRuntimeFeed(b)
+	requestedObserved := false
 	for {
 		observation, observed, changed := s.feedSnapshot(feed)
 		current, err := s.rawBox(b.Box.ID)
@@ -142,6 +143,12 @@ func (s *Service) waitNodeResume(ctx context.Context, b boxRecord, transitionID 
 		}
 		if observed && observation.Phase == "deleted" {
 			return boxprovider.Observation{}, boxprovider.ErrNotFound
+		}
+		if observed && requestedObserved && observation.TransitionID != transitionID {
+			return boxprovider.Observation{}, boxprovider.ErrStaleTransition
+		}
+		if observed && observation.TransitionID == transitionID {
+			requestedObserved = true
 		}
 		if observed && observation.TransitionID == transitionID && observation.ObservedTransitionID == transitionID {
 			if observation.Phase == "failed" || observation.Phase == "deleted" {

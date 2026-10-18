@@ -7,8 +7,6 @@
       "id": "docker-dev",
       "provider": "docker",
       "image": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-      "cpu": 1,
-      "memoryMiB": 512,
       "guest": {
         "workspace": "/workspace",
         "agent": {

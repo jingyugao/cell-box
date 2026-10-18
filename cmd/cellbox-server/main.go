@@ -96,8 +96,10 @@ func run(args []string) error {
 		if err = json.Unmarshal(data, &config.ObjectStorage); err != nil {
 			return errors.New("invalid object storage configuration")
 		}
-		if err = config.ObjectStorage.Validate(); err != nil {
-			return err
+		if config.ObjectStorage != (objectstorage.Config{}) {
+			if err = config.ObjectStorage.Validate(); err != nil {
+				return err
+			}
 		}
 	}
 

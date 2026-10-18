@@ -100,6 +100,9 @@ func TestCreateLifecycle(t *testing.T) {
 			t.Errorf("create missing %q: %v", want, create)
 		}
 	}
+	if !hasArgPair(create, "--cpus", "1.5") || !hasArgPair(create, "--memory", "512m") {
+		t.Fatalf("explicit resource values were not preserved: %v", create)
+	}
 	if _, err = p.Create(ctx, spec()); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
@@ -265,9 +268,9 @@ func TestRejectUnsafeInputs(t *testing.T) {
 		t.Fatalf("Docker accepted staged execution: %v", err)
 	}
 	s.Staged = false
-	s.CPU = 0
+	s.CPU = -0.5
 	if _, err := p.Create(context.Background(), s); err == nil {
-		t.Fatal("accepted zero CPU")
+		t.Fatal("accepted negative CPU")
 	}
 	s.CPU = math.NaN()
 	if _, err := p.Create(context.Background(), s); err == nil {
@@ -281,6 +284,107 @@ func TestRejectUnsafeInputs(t *testing.T) {
 	if _, err = p.Guest(context.Background(), h); err == nil {
 		t.Fatal("accepted wildcard binding")
 	}
+}
+
+func TestCreateOptionalResourceFlags(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		cpu        float64
+		memoryMiB  int64
+		wantCPU    string
+		wantMemory string
+	}{
+		{name: "omitted by default"},
+		{name: "CPU only", cpu: 2.25, wantCPU: "2.25"},
+		{name: "memory only", memoryMiB: 768, wantMemory: "768m"},
+		{name: "explicit values", cpu: 1.5, memoryMiB: 512, wantCPU: "1.5", wantMemory: "512m"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFake()
+			p := NewWithRunner(f)
+			s := spec()
+			s.CPU, s.MemoryMiB = tc.cpu, tc.memoryMiB
+			if _, err := p.Create(context.Background(), s); err != nil {
+				t.Fatal(err)
+			}
+			var create []string
+			for _, call := range f.calls {
+				if len(call) > 0 && call[0] == "create" {
+					create = call
+				}
+			}
+			if create == nil {
+				t.Fatal("Docker create command was not issued")
+			}
+			if got := argValue(create, "--cpus"); got != tc.wantCPU {
+				t.Errorf("--cpus value = %q, want %q; command=%v", got, tc.wantCPU, create)
+			}
+			if got := argValue(create, "--memory"); got != tc.wantMemory {
+				t.Errorf("--memory value = %q, want %q; command=%v", got, tc.wantMemory, create)
+			}
+			imageIndex := indexOf(create, testImageID)
+			if imageIndex < 0 {
+				t.Fatalf("image missing from Docker create command: %v", create)
+			}
+			for _, flag := range []string{"--cpus", "--memory"} {
+				if i := indexOf(create, flag); i >= imageIndex {
+					t.Errorf("%s must occur before image: %v", flag, create)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateOptionalAndUnboundedResourceValues(t *testing.T) {
+	s := spec()
+	s.CPU, s.MemoryMiB = 0, 0
+	if err := validateSpec(s); err != nil {
+		t.Fatalf("zero resources should omit limits: %v", err)
+	}
+	s.CPU, s.MemoryMiB = 1025, 1048577
+	if err := validateSpec(s); err != nil {
+		t.Fatalf("values above former policy thresholds were rejected: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*boxprovider.Spec)
+	}{
+		{name: "negative CPU", edit: func(s *boxprovider.Spec) { s.CPU = -0.1 }},
+		{name: "NaN CPU", edit: func(s *boxprovider.Spec) { s.CPU = math.NaN() }},
+		{name: "positive infinite CPU", edit: func(s *boxprovider.Spec) { s.CPU = math.Inf(1) }},
+		{name: "negative infinite CPU", edit: func(s *boxprovider.Spec) { s.CPU = math.Inf(-1) }},
+		{name: "negative memory", edit: func(s *boxprovider.Spec) { s.MemoryMiB = -1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			invalid := spec()
+			tc.edit(&invalid)
+			if err := validateSpec(invalid); err == nil {
+				t.Fatal("invalid resource value was accepted")
+			}
+		})
+	}
+}
+
+func argValue(args []string, flag string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func indexOf(args []string, value string) int {
+	for i, arg := range args {
+		if arg == value {
+			return i
+		}
+	}
+	return -1
+}
+
+func hasArgPair(args []string, flag, value string) bool {
+	return argValue(args, flag) == value
 }
 
 func TestCacheImageUnsupportedWithoutDockerCommand(t *testing.T) {
