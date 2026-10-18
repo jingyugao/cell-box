@@ -10,6 +10,7 @@ import (
 
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/homevolume"
+	"cellbox.local/cellbox/internal/warmtemplates"
 	core "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -32,7 +33,10 @@ func TestPersistentHomeWarmMissKeepsColdMount(t *testing.T) {
 			}
 			backend := &persistentHomePoolRuntime{poolRuntime: &poolRuntime{fakeRuntime: f, deadlines: map[string]time.Time{}}}
 			r.Runtime = backend
-			r.WarmPool = &WarmPool{Reconciler: r, Namespace: w.Namespace, Size: size}
+			r.WarmPool = &WarmPool{Reconciler: r, Namespace: w.Namespace, Size: size, ReadDesired: func(context.Context) ([]warmtemplates.Template, string, error) {
+				hash, err := warmtemplates.HashTemplates(nil)
+				return nil, hash, err
+			}}
 			if _, err := r.begin(ctx, w); err != nil {
 				t.Fatal(err)
 			}
@@ -148,10 +152,13 @@ func (r *persistentHomePoolRuntime) ActivateWarm(context.Context, *api.Resumable
 func TestPersistentHomeWarmPodHasNoTemplateHomeAndCanBeClaimed(t *testing.T) {
 	ctx := context.Background()
 	r, f, w := fixture(t)
-	setWarmTemplate(t, r, w, "template-a")
 	w.Spec.PersistentHome = true
-	replaceWarmTemplateSpec(t, r, w.Namespace, "template-a", w.Spec)
 	w.Spec.DesiredState = "Running"
+	template := warmtemplates.Template{ID: "template-a", Slots: 1, Spec: w.Spec}
+	templateHash, err := warmtemplates.HashTemplates([]warmtemplates.Template{template})
+	if err != nil {
+		t.Fatal(err)
+	}
 	oldTemplate := w.DeepCopy()
 	oldTemplate.UID = "normal-box"
 	oldTemplate.Status.SpecHash = fingerprint(oldTemplate)
@@ -175,7 +182,9 @@ func TestPersistentHomeWarmPodHasNoTemplateHomeAndCanBeClaimed(t *testing.T) {
 	poolRuntime := &poolRuntime{fakeRuntime: f, deadlines: map[string]time.Time{"warm-slot": time.Now().Add(time.Minute)}}
 	backend := &persistentHomePoolRuntime{poolRuntime: poolRuntime}
 	r.Runtime = backend
-	pool := &WarmPool{Reconciler: r, Namespace: w.Namespace, Size: 2}
+	pool := &WarmPool{Reconciler: r, Namespace: w.Namespace, Size: 2, ReadDesired: func(context.Context) ([]warmtemplates.Template, string, error) {
+		return []warmtemplates.Template{template}, templateHash, nil
+	}, PublishObservation: func(warmtemplates.Snapshot) {}}
 	r.WarmPool = pool
 
 	if pod, err := pool.acquire(ctx, w); err != nil || pod == nil {

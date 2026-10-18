@@ -1,7 +1,6 @@
 {
   "listen": "127.0.0.1:8090",
   "dataDir": "data",
-  "publicUrl": "http://127.0.0.1:8090",
   "startupTimeoutSeconds": 120,
   "profiles": [
     {

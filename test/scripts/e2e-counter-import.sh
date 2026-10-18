@@ -27,11 +27,10 @@ template_id = revision_id = None
 def save(name, value):
     (evidence / (name + '.json')).write_text(json.dumps(value, indent=2) + '\n')
 
-def call(method, path, data=None, key=None):
+def call(method, path, data=None):
     headers = {}
     if os.environ.get('CELLBOX_CLIENT_ID'):
         headers['X-Cellbox-Client-ID'] = os.environ['CELLBOX_CLIENT_ID']
-    headers['Idempotency-Key'] = key or str(uuid.uuid4())
     if isinstance(data, bytes):
         headers['Content-Type'] = 'application/octet-stream'
     elif data is not None:
@@ -66,19 +65,15 @@ def create(path, body, name):
     save('report', report)
     return wait(op)['targetId']
 
-def route_for(box):
-    route = call('POST', '/v1/routes', {'boxId': box, 'port': 8000})
-    return route['id']
+def app(box, endpoint):
+    return call('GET', f'/v1/boxes/{box}/services/8000/{endpoint}')
 
-def app(route, endpoint):
-    return call('GET', f'/s/{route}/{endpoint}')
-
-def ready(route):
+def ready(box):
     last = None
     for _ in range(60):
         try:
-            assert app(route, 'healthz') == b'ok\n'
-            return app(route, 'state')
+            assert app(box, 'healthz') == b'ok\n'
+            return app(box, 'state')
         except RuntimeError as error:
             last = error
             time.sleep(1)
@@ -107,9 +102,7 @@ try:
     template = call('POST', '/v1/templates', {'name': 'counter-import-' + str(uuid.uuid4()), 'description': 'counter import and revision e2e'})
     template_id = template['id']
     build_request = {'userVersion': 'v1', 'baseImage': source, 'profileId': profile, 'runCommand': run}
-    key = str(uuid.uuid4())
-    op = call('POST', f'/v1/templates/{template_id}/revisions', build_request, key=key)
-    assert call('POST', f'/v1/templates/{template_id}/revisions', build_request, key=key)['id'] == op['id']
+    op = call('POST', f'/v1/templates/{template_id}/revisions', build_request)
     build = wait(op)
     revision_id = build['result']['revisionId']
     revision = call('GET', '/v1/template-revisions/' + revision_id)
@@ -121,22 +114,19 @@ try:
     if expected_digest:
         assert revision['resolvedBaseImage'].endswith('@' + expected_digest)
     assert revision['baseImage'] == source and revision['runCommand'] == run and revision['profileId'] == profile
-    print('PASS: registry base resolved, immutable template revision built, idempotency verified', flush=True)
+    print('PASS: registry base resolved, immutable template revision built', flush=True)
 
     box = create('/v1/boxes', {'revisionId': revision_id, 'ownerKey': 'counter-import-' + str(uuid.uuid4())}, 'boxId')
-    route = route_for(box)
-    report['sourceRouteId'] = route
-    ready(route)
+    ready(box)
     for i in range(1, 11):
-        assert app(route, 'increment') == f'{i}\n'.encode()
-    before = app(route, 'state')
+        assert app(box, 'increment') == f'{i}\n'.encode()
+    before = app(box, 'state')
     save('state-before-suspend', before)
     assert before['count'] == 10 and before['memory_bytes'] == 32 << 20
     assert call('GET', f'/v1/boxes/{box}/files?path=marker') == before['instance'].encode()
     proof = json.dumps(before, sort_keys=True).encode()
     call('PUT', f'/v1/boxes/{box}/files?path=counter-proof.json', proof)
     b = call('GET', '/v1/boxes/' + box)
-    assert b['capabilities']['protectedTools'] is False
     execution = wait(call('POST', f'/v1/boxes/{box}/execs', {'argv': ['/server', 'get', 'http://127.0.0.1:8000/state'], 'expectedGeneration': b['generation']}))
     result = call('GET', '/v1/execs/' + execution['result']['execId'])['result']
     assert result['exitCode'] == 0 and json.loads(result['stdout'])['instance'] == before['instance']
@@ -147,7 +137,7 @@ try:
     wait(call('POST', f'/v1/boxes/{box}:suspend'))
     assert call('GET', '/v1/boxes/' + box)['phase'] == 'suspended'
     wait(call('POST', f'/v1/boxes/{box}:resume'))
-    after = ready(route)
+    after = ready(box)
     save('state-after-resume', after)
     for field in ('count', 'started', 'instance', 'memory_bytes', 'memory_sha256', 'marker'):
         assert before[field] == after[field], field
@@ -159,27 +149,25 @@ try:
         assert runtime_before['serviceUID'] == runtime_after['serviceUID']
         assert runtime_before['clusterIP'] == runtime_after['clusterIP']
         assert all(x == 0 for x in runtime_after['restartCounts'])
-    assert app(route, 'increment') == b'11\n'
+    assert app(box, 'increment') == b'11\n'
     print('PASS: suspend/resume preserved count, process identity and 32 MiB of memory; counter continues at 11', flush=True)
 
+    wait(call('POST', f'/v1/boxes/{box}:suspend'))
     archive = wait(call('POST', f'/v1/boxes/{box}/archives'))['result']['archiveId']
     archives.append(archive)
     report['archiveId'] = archive
-    # Keep the source checkpoint, freeing running resources for archive restore.
-    wait(call('POST', f'/v1/boxes/{box}:suspend'))
+    # Capture leaves the source suspended; restore creates a separate staged sandbox.
     restored = create('/v1/boxes:restore', {'revisionId': revision_id, 'ownerKey': 'counter-restore-' + str(uuid.uuid4()), 'archiveId': archive}, 'restoredBoxId')
     restored_box = call('GET', '/v1/boxes/' + restored)
     assert restored_box['phase'] == 'staged' and restored_box['revisionId'] == revision_id
     assert call('GET', f'/v1/boxes/{restored}/files?path=marker') == before['instance'].encode()
     assert call('GET', f'/v1/boxes/{restored}/files?path=counter-proof.json') == proof
     wait(call('POST', f'/v1/boxes/{restored}:activate'))
-    restored_route = route_for(restored)
-    report['routeId'] = restored_route
-    restored_state = ready(restored_route)
+    restored_state = ready(restored)
     assert restored_state['count'] == 0 and restored_state['instance'] != before['instance']
     assert call('GET', f'/v1/boxes/{restored}/files?path=counter-proof.json') == proof
-    assert app(restored_route, 'increment') == b'1\n'
-    save('restored-state', app(restored_route, 'state'))
+    assert app(restored, 'increment') == b'1\n'
+    save('restored-state', app(restored, 'state'))
     print('PASS: archive restored workspace and imported image; activation starts a fresh counter', flush=True)
     report['status'] = 'passed'
     print(json.dumps(report, indent=2), flush=True)

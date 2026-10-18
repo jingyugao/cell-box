@@ -1,8 +1,7 @@
 #!/bin/bash
 # Against an API with BuildKit enabled. SOURCE_IMAGE must contain sh and sleep.
 set -euo pipefail
-[[ $# == 3 ]] || { echo "Usage: CELLBOX_CLIENT_TOKEN=... $0 API_URL PROFILE_ID SOURCE_IMAGE" >&2; exit 2; }
-: "${CELLBOX_CLIENT_TOKEN:?Set CELLBOX_CLIENT_TOKEN}"
+[[ $# == 3 ]] || { echo "Usage: $0 API_URL PROFILE_ID SOURCE_IMAGE" >&2; exit 2; }
 uv run python - "$@" <<'PY'
 import json
 import os
@@ -20,8 +19,11 @@ boxes, archives = [], []
 template_id = revision_id = None
 
 def call(method, path, data=None):
-    headers = {'Authorization': 'Bearer ' + os.environ['CELLBOX_CLIENT_TOKEN']}
-    headers['Idempotency-Key'] = str(uuid.uuid4())
+    headers = {}
+    if os.environ.get('CELLBOX_CLIENT_TOKEN'):
+        headers['Authorization'] = 'Bearer ' + os.environ['CELLBOX_CLIENT_TOKEN']
+    if os.environ.get('CELLBOX_CLIENT_ID'):
+        headers['X-Cellbox-Client-ID'] = os.environ['CELLBOX_CLIENT_ID']
     if data is not None:
         headers['Content-Type'] = 'application/json'
         data = json.dumps(data).encode()
@@ -74,7 +76,10 @@ try:
     assert 'Published image:' in logs['text'] and logs['eof']
     print('PASS: source tag resolved, BuildKit published immutable revision, build logs retained', flush=True)
 
-    box_id = create('/v1/boxes', {'revisionId': revision_id, 'ownerKey': 'image-import-e2e-' + str(uuid.uuid4())})
+    box_id = create('/v1/boxes', {'revisionId': revision_id, 'ownerKey': 'template-archive-e2e-' + str(uuid.uuid4())})
+    box = call('GET', '/v1/boxes/' + box_id)
+    if box['capabilities']['archives'] != 'stopped-workspace' or box['capabilities']['suspend'] != 'same-node-checkpoint':
+        raise RuntimeError('archive E2E requires a persistent-HOME Kubernetes profile with checkpoint support')
     for _ in range(30):
         try:
             if call('GET', f'/v1/boxes/{box_id}/files?path=imported-proof.txt') == b'image-import-ok':
@@ -102,6 +107,7 @@ try:
         assert call('GET', f'/v1/boxes/{box_id}/files?path=imported-proof.txt') == b'image-import-ok'
         print('PASS: imported sandbox suspends and resumes', flush=True)
 
+    wait(call('POST', f'/v1/boxes/{box_id}:suspend'))
     archive = wait(call('POST', f'/v1/boxes/{box_id}/archives'))['result']['archiveId']
     archives.append(archive)
     # Free the source's resources so restoration also works on a small test node.
@@ -142,5 +148,5 @@ finally:
         raise RuntimeError('Test resource cleanup incomplete; inspect the IDs above')
 if template_id:
     print(f'Preserved template {template_id} and revision {revision_id}; phase one does not delete built revisions', flush=True)
-print('PASS: image import lifecycle E2E completed; test sandboxes and archives removed')
+print('PASS: template build and archive E2E completed; test sandboxes and archives removed')
 PY

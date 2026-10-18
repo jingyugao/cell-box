@@ -43,9 +43,6 @@ func run(args []string) error {
 	configPath := flags.String("config", "", "path to the Cellbox JSON configuration")
 	kubeconfig := flags.String("kubeconfig", "", "explicit kubeconfig path (default: in-cluster credentials)")
 	storageConfigPath := flags.String("object-storage-config", "", "shared S3 storage JSON configuration")
-	localMetadataDir := flags.String("local-metadata-dir", "", "persistent node directory for control metadata; asset content remains in object storage")
-	catalogDir := flags.String("catalog-dir", "", "persistent local directory for the SQLite template catalog and build logs")
-	initializeLocalMetadata := flags.Bool("initialize-local-metadata", false, "one-time metadata import; stop all old API/controller writers first")
 	leaderNamespace := flags.String("leader-election-namespace", "", "server Lease namespace (defaults to managed namespace)")
 	var runtime nodeOptions
 	flags.StringVar(&runtime.Node, "node", "", "single managed Kubernetes node")
@@ -91,13 +88,6 @@ func run(args []string) error {
 	if *insecureRegistry != "" {
 		config.ImageBuild.InsecureRegistry = *insecureRegistry
 	}
-	if *localMetadataDir != "" {
-		config.LocalMetadataDir = *localMetadataDir
-	}
-	if *initializeLocalMetadata {
-		config.InitializeLocalMetadata = true
-	}
-
 	if *storageConfigPath != "" {
 		data, err := os.ReadFile(*storageConfigPath)
 		if err != nil {
@@ -111,9 +101,6 @@ func run(args []string) error {
 		}
 	}
 
-	if *catalogDir != "" {
-		config.CatalogDir = *catalogDir
-	}
 	if err = runtime.validate(config); err != nil {
 		return err
 	}

@@ -75,7 +75,7 @@ func newFake() *fakeDocker {
 	}{"40000/tcp": {{HostIP: "127.0.0.1", HostPort: "49152"}}}}
 }
 func spec() boxprovider.Spec {
-	return boxprovider.Spec{BoxID: "box1", Image: "cellbox-prepared:key", CPU: 1.5, MemoryMiB: 512, Config: guestapi.DefaultConfig(), Staged: true}
+	return boxprovider.Spec{BoxID: "box1", Image: "cellbox-prepared:key", CPU: 1.5, MemoryMiB: 512, Config: guestapi.DefaultConfig()}
 }
 
 func TestCreateLifecycle(t *testing.T) {
@@ -95,7 +95,7 @@ func TestCreateLifecycle(t *testing.T) {
 			create = call
 		}
 	}
-	for _, want := range []string{"127.0.0.1::40000", guestapi.Binary, "--staged", "--cap-drop", "ALL", "CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID", "no-new-privileges", "0:0"} {
+	for _, want := range []string{"127.0.0.1::40000", guestapi.Binary, "--cap-drop", "ALL", "CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID", "no-new-privileges", "0:0"} {
 		if !contains(create, want) {
 			t.Errorf("create missing %q: %v", want, create)
 		}
@@ -120,18 +120,14 @@ func TestCreateLifecycle(t *testing.T) {
 	if err != nil || conn.URL != "http://127.0.0.1:49152" {
 		t.Fatalf("guest: %+v %v", conn, err)
 	}
-	if err = p.Action(ctx, h, "freeze"); err != nil {
-		t.Fatal(err)
+	beforeActions := len(f.calls)
+	for _, action := range []string{"freeze", "unfreeze", "suspend", "resume", "unknown"} {
+		if err = p.Action(ctx, h, action); !errors.Is(err, boxprovider.ErrUnsupported) {
+			t.Errorf("Action(%q): %v", action, err)
+		}
 	}
-	obs, _ = p.Inspect(ctx, h)
-	if obs.Phase != "frozen" {
-		t.Fatal(obs)
-	}
-	if err = p.Action(ctx, h, "unfreeze"); err != nil {
-		t.Fatal(err)
-	}
-	if err = p.Action(ctx, h, "suspend"); !errors.Is(err, boxprovider.ErrUnsupported) {
-		t.Fatal(err)
+	if len(f.calls) != beforeActions {
+		t.Fatal("unsupported action ran Docker commands")
 	}
 	if err = p.Destroy(ctx, h); err != nil {
 		t.Fatal(err)
@@ -264,6 +260,11 @@ func TestRejectUnsafeInputs(t *testing.T) {
 		t.Fatal("Docker accepted persistentHome")
 	}
 	s.PersistentHome = false
+	s.Staged = true
+	if _, err := p.Create(context.Background(), s); !errors.Is(err, boxprovider.ErrUnsupported) {
+		t.Fatalf("Docker accepted staged execution: %v", err)
+	}
+	s.Staged = false
 	s.CPU = 0
 	if _, err := p.Create(context.Background(), s); err == nil {
 		t.Fatal("accepted zero CPU")
@@ -279,6 +280,17 @@ func TestRejectUnsafeInputs(t *testing.T) {
 	}
 	if _, err = p.Guest(context.Background(), h); err == nil {
 		t.Fatal("accepted wildcard binding")
+	}
+}
+
+func TestCacheImageUnsupportedWithoutDockerCommand(t *testing.T) {
+	f := newFake()
+	p := NewWithRunner(f)
+	if err := p.CacheImage(context.Background(), "example/image:latest", "", ""); !errors.Is(err, boxprovider.ErrUnsupported) {
+		t.Fatalf("CacheImage: %v", err)
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("unsupported image operation ran Docker commands: %v", f.calls)
 	}
 }
 func contains(xs []string, x string) bool {

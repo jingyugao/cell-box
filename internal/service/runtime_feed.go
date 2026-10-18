@@ -82,7 +82,7 @@ func (s *Service) runRuntimeFeed(id string, feed *runtimeFeed) {
 			if errors.Is(err, boxprovider.ErrNotFound) {
 				observation := boxprovider.Observation{Phase: "deleted"}
 				s.publishRuntimeFeed(id, feed, observation)
-				_, _ = s.applyRuntimeObservation(ctx, b, observation, true)
+				_, _ = s.applyRuntimeObservation(ctx, b, observation)
 				return
 			}
 			select {
@@ -111,14 +111,11 @@ func (s *Service) runRuntimeFeed(id string, feed *runtimeFeed) {
 				}
 				if b.Box.OperationID != "" {
 					op, opErr := s.store.Operation(b.ClientID, b.Box.OperationID)
-					if opErr == nil && resumeOperationKind(op.Kind) && (op.Status == "running" || op.Status == "queued") {
+					if opErr == nil && op.Kind == "resume" && (op.Status == "running" || op.Status == "queued") {
 						continue
 					}
 				}
-				projected, projectionErr := s.applyRuntimeObservation(ctx, b, observation, observation.Phase == "deleted")
-				if projectionErr == nil && projected.Phase == "staged" {
-					s.releaseFailedUpgrade(id)
-				}
+				_, _ = s.applyRuntimeObservation(ctx, b, observation)
 			}
 		}
 	reconnect:
@@ -128,21 +125,6 @@ func (s *Service) runRuntimeFeed(id string, feed *runtimeFeed) {
 		case <-time.After(backoff):
 		}
 	}
-}
-
-func (s *Service) cachedRuntimeObservation(ctx context.Context, b boxRecord) (boxprovider.Observation, error) {
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(s.config.StartupTimeoutSeconds)*time.Second)
-	defer cancel()
-	feed := s.ensureRuntimeFeed(b)
-	select {
-	case <-ctx.Done():
-		return boxprovider.Observation{}, ctx.Err()
-	case <-s.ctx.Done():
-		return boxprovider.Observation{}, s.ctx.Err()
-	case <-feed.ready:
-	}
-	observation, _, _ := s.feedSnapshot(feed)
-	return observation, nil
 }
 
 func (s *Service) waitNodeResume(ctx context.Context, b boxRecord, transitionID string) (boxprovider.Observation, error) {
@@ -166,9 +148,6 @@ func (s *Service) waitNodeResume(ctx context.Context, b boxRecord, transitionID 
 				return boxprovider.Observation{}, apiError("READINESS_FAILED", "Runtime entered failed state")
 			}
 			if observation.Phase == "running" && observation.GuestReady && observation.ExecutionID != "" {
-				if b.ResumeExecutionID != "" && b.ResumeExecutionID != observation.ExecutionID {
-					return boxprovider.Observation{}, boxprovider.ErrStaleExecution
-				}
 				return observation, nil
 			}
 		}

@@ -2,9 +2,7 @@ package catalog
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -321,9 +319,8 @@ func (m *Manager) submitBuild(r *http.Request) (any, int, error) {
 	if err := decode(r, &in); err != nil {
 		return nil, 0, err
 	}
-	key := r.Header.Get("Idempotency-Key")
-	if key == "" || len(key) > 256 || !versionPattern.MatchString(in.UserVersion) || in.ProfileID == "" || len(in.BaseImage) > 2048 || len(in.RunCommand) > 65536 || (in.WarmSlots != nil && !slots(*in.WarmSlots)) {
-		return nil, 0, failure("INVALID_REQUEST", "Valid userVersion, baseImage, profileId and Idempotency-Key are required")
+	if !versionPattern.MatchString(in.UserVersion) || in.ProfileID == "" || len(in.BaseImage) > 2048 || len(in.RunCommand) > 65536 || (in.WarmSlots != nil && !slots(*in.WarmSlots)) {
+		return nil, 0, failure("INVALID_REQUEST", "Valid userVersion, baseImage and profileId are required")
 	}
 	if _, err := image.ParseRegistryReference(in.BaseImage, m.config.InsecureRegistry); err != nil {
 		return nil, 0, failure("INVALID_REQUEST", err.Error())
@@ -341,25 +338,10 @@ func (m *Manager) submitBuild(r *http.Request) (any, int, error) {
 		return nil, 0, failure("INVALID_REQUEST", "Only linux/amd64 builds are supported")
 	}
 	client, templateID := m.client(r), r.PathValue("id")
-	h := sha256.Sum256([]byte(templateID + "\n" + encode(in)))
-	hash := hex.EncodeToString(h[:])
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed || m.fault != nil {
 		return nil, 0, failure("UNAVAILABLE", "Catalog is stopping")
-	}
-	var raw, priorHash string
-	err := m.db.QueryRowContext(r.Context(), "SELECT record,request_hash FROM operations WHERE client_id=? AND template_id=? AND idempotency_key=?", client, templateID, key).Scan(&raw, &priorHash)
-	if err == nil {
-		if priorHash != hash {
-			return nil, 0, failure("CONFLICT", "Idempotency-Key was used with different input")
-		}
-		var op Operation
-		err = json.Unmarshal([]byte(raw), &op)
-		return op, 202, err
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return nil, 0, err
 	}
 	t, err := getTemplate(r.Context(), m.db, client, templateID)
 	if err != nil {
@@ -385,7 +367,7 @@ func (m *Manager) submitBuild(r *http.Request) (any, int, error) {
 	now := time.Now().UTC()
 	op := Operation{ID: newID("build-"), Kind: "template-build", TargetID: t.ID, Status: "queued", Stage: "queued", Version: 1, Input: in, CreatedAt: now, UpdatedAt: now}
 	input := BuildInput{BuildRequest: in, Profile: profile, TemplateID: t.ID, OperationID: op.ID}
-	_, err = m.db.ExecContext(r.Context(), "INSERT INTO operations(id,client_id,template_id,idempotency_key,request_hash,status,created_at,record,input) VALUES(?,?,?,?,?,?,?,?,?)", op.ID, client, t.ID, key, hash, op.Status, now.Format(time.RFC3339Nano), encode(op), encode(input))
+	_, err = m.db.ExecContext(r.Context(), "INSERT INTO operations(id,client_id,template_id,status,created_at,record,input) VALUES(?,?,?,?,?,?,?)", op.ID, client, t.ID, op.Status, now.Format(time.RFC3339Nano), encode(op), encode(input))
 	if err == nil {
 		select {
 		case m.wake <- struct{}{}:

@@ -3,7 +3,6 @@ package service
 import (
 	"bytes"
 	"cellbox.local/cellbox/internal/guestapi"
-	"cellbox.local/cellbox/internal/telemetry"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -53,7 +52,7 @@ func fail(w http.ResponseWriter, err error) {
 		status = 403
 	case "NOT_FOUND":
 		status = 404
-	case "OPERATION_EXPIRED", "RESULT_EXPIRED":
+	case "RESULT_EXPIRED":
 		status = http.StatusGone
 	case "CONFLICT", "BUSY", "STALE_GENERATION", "STALE_TRANSITION", "ARCHIVE_INCOMPATIBLE":
 		status = 409
@@ -100,19 +99,13 @@ func (s *Service) Handler() http.Handler {
 		s.catalog.Register(mux, clientID)
 		s.registerTemplateRuntime(mux)
 	}
-	mux.HandleFunc("POST /v1/images", s.buildImage)
-	mux.HandleFunc("POST /v1/images:import", s.importImage)
-	mux.HandleFunc("GET /v1/images", s.listImportedImages)
-	mux.HandleFunc("GET /v1/images/{id}", s.getImportedImage)
-	mux.HandleFunc("GET /v1/images/{id}/usage", s.imageUsageHandler)
-	mux.HandleFunc("DELETE /v1/images/{id}", s.deleteImportedImage)
 	mux.HandleFunc("POST /v1/boxes", func(w http.ResponseWriter, r *http.Request) {
 		var input createRequest
 		if err := decode(w, r, &input); err != nil {
 			fail(w, err)
 			return
 		}
-		op, err := s.create(clientID(r), r.Header.Get("Idempotency-Key"), input, "", false)
+		op, err := s.create(clientID(r), input, "", false)
 		if err != nil {
 			fail(w, err)
 			return
@@ -133,7 +126,7 @@ func (s *Service) Handler() http.Handler {
 			fail(w, apiError("INVALID_REQUEST", "archiveId is required"))
 			return
 		}
-		op, err := s.create(clientID(r), r.Header.Get("Idempotency-Key"), input.createRequest, input.ArchiveID, input.AcceptImageChange)
+		op, err := s.create(clientID(r), input.createRequest, input.ArchiveID, input.AcceptImageChange)
 		if err != nil {
 			fail(w, err)
 			return
@@ -161,10 +154,6 @@ func (s *Service) Handler() http.Handler {
 			s.purgeBoxHandler(w, r, id)
 			return
 		}
-		if action == "upgrade" {
-			s.upgradeBox(w, r, id)
-			return
-		}
 		var input struct {
 			ExpectedGeneration *uint64 `json:"expectedGeneration,omitempty"`
 		}
@@ -176,38 +165,9 @@ func (s *Service) Handler() http.Handler {
 			fail(w, apiError("INVALID_REQUEST", "expectedGeneration must be positive"))
 			return
 		}
-		if action == "ensure-running" {
-			request, ensureSpan := telemetry.Start(r.Context(), "cellbox.ensure_running", telemetry.String("sandbox.id", id))
-			var ensureErr error
-			defer func() { telemetry.End(ensureSpan, ensureErr) }()
-			op, err := s.ensureRunning(request, clientID(r), r.Header.Get("Idempotency-Key"), id, input.ExpectedGeneration)
-			if err != nil {
-				ensureErr = err
-				fail(w, err)
-				return
-			}
-			ensureSpan.SetAttributes(telemetry.String("operation.id", op.ID))
-			op, err = s.waitResume(request, clientID(r), op.ID)
-			if err != nil {
-				ensureErr = err
-				fail(w, err)
-				return
-			}
-			writeJSON(w, http.StatusOK, op)
-			return
-		}
-		op, err := s.actionContextWithGeneration(r.Context(), clientID(r), r.Header.Get("Idempotency-Key"), id, action, input.ExpectedGeneration)
+		op, err := s.actionContextWithGeneration(r.Context(), clientID(r), id, action, input.ExpectedGeneration)
 		if err != nil {
 			fail(w, err)
-			return
-		}
-		if action == "resume" {
-			op, err = s.waitResume(r.Context(), clientID(r), op.ID)
-			if err != nil {
-				fail(w, err)
-				return
-			}
-			writeJSON(w, http.StatusOK, op)
 			return
 		}
 		writeJSON(w, 202, op)
@@ -218,7 +178,7 @@ func (s *Service) Handler() http.Handler {
 			fail(w, err)
 			return
 		}
-		op, err := s.execute(clientID(r), r.Header.Get("Idempotency-Key"), r.PathValue("id"), input)
+		op, err := s.execute(clientID(r), r.PathValue("id"), input)
 		if err != nil {
 			fail(w, err)
 			return
@@ -234,16 +194,12 @@ func (s *Service) Handler() http.Handler {
 		s.getOperation(w, r)
 	})
 	mux.HandleFunc("GET /v1/operations/{id}/events", s.operationEvents)
-	mux.HandleFunc("POST /v1/boxes/{id}/leases", s.createLease)
-	mux.HandleFunc("PATCH /v1/leases/{id}", s.renewLease)
-	mux.HandleFunc("DELETE /v1/leases/{id}", s.releaseLease)
 	mux.HandleFunc("GET /v1/boxes/{id}/files", s.files)
 	mux.HandleFunc("PUT /v1/boxes/{id}/files", s.files)
 	mux.HandleFunc("PUT /v1/boxes/{id}/credentials/{slot}", s.credentials)
 	mux.HandleFunc("PUT /v1/boxes/{id}/credentials", s.credentialBatch)
 	mux.HandleFunc("/v1/boxes/{id}/services/{port}/{path...}", s.internalService)
 	mux.HandleFunc("POST /v1/boxes/{id}/tools/{tool}", s.tool)
-	mux.HandleFunc("POST /v1/routes", s.createRoute)
 	mux.HandleFunc("POST /v1/boxes/{id}/archives", s.captureArchive)
 	mux.HandleFunc("GET /v1/archives", s.listArchives)
 	mux.HandleFunc("GET /v1/archives/{id}", s.getArchive)
@@ -260,19 +216,6 @@ func (s *Service) Handler() http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		if r.URL.Path == "/healthz" {
 			writeJSON(w, 200, map[string]string{"status": "ok"})
-			return
-		}
-		if routeID := s.hostRoute(r.Host); routeID != "" {
-			s.gateway(w, r, routeID, r.URL.Path)
-			return
-		}
-		if strings.HasPrefix(r.URL.Path, "/s/") {
-			parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/s/"), "/", 2)
-			tail := "/"
-			if len(parts) == 2 {
-				tail += parts[1]
-			}
-			s.gateway(w, r, parts[0], tail)
 			return
 		}
 		if !strings.HasPrefix(r.URL.Path, "/v1/") {
@@ -376,16 +319,7 @@ func (s *Service) getOperation(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, op)
 }
 func (s *Service) getExec(w http.ResponseWriter, r *http.Request) {
-	var e executionRecord
-	err := s.store.View(func(st State) error {
-		var ok bool
-		e, ok = st.Executions[r.PathValue("id")]
-		if !ok {
-			return apiError("NOT_FOUND", "Execution not found")
-		}
-		_, err := owned(&st, clientID(r), e.BoxID)
-		return err
-	})
+	e, err := s.store.ExecutionRecord(clientID(r), r.PathValue("id"))
 	if err != nil {
 		fail(w, err)
 		return
@@ -440,104 +374,6 @@ func (s *Service) operationEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-type leaseInput struct {
-	Purpose    string `json:"purpose"`
-	TTLSeconds int    `json:"ttlSeconds"`
-}
-
-func leaseTTL(input *leaseInput) error {
-	if input.TTLSeconds == 0 {
-		input.TTLSeconds = 60
-	}
-	if input.TTLSeconds < 1 || input.TTLSeconds > 3600 || len(input.Purpose) > 256 {
-		return apiError("INVALID_REQUEST", "Lease ttlSeconds must be 1..3600 and purpose at most 256 bytes")
-	}
-	return nil
-}
-func (s *Service) createLease(w http.ResponseWriter, r *http.Request) {
-	var in leaseInput
-	if err := decode(w, r, &in); err != nil {
-		fail(w, err)
-		return
-	}
-	if err := leaseTTL(&in); err != nil {
-		fail(w, err)
-		return
-	}
-	lease := Lease{ID: randomID("lease-"), BoxID: r.PathValue("id"), Purpose: in.Purpose, ExpiresAt: time.Now().Add(time.Duration(in.TTLSeconds) * time.Second)}
-	err := s.store.Update(func(st *State) error {
-		b, err := owned(st, clientID(r), lease.BoxID)
-		if err != nil {
-			return err
-		}
-		if err = busy(st, b, false); err != nil {
-			return err
-		}
-		if b.Box.Phase != "running" {
-			return apiError("CONFLICT", "Lease requires a ready box; request resume explicitly")
-		}
-		st.Leases[lease.ID] = lease
-		return nil
-	})
-	if err != nil {
-		fail(w, err)
-		return
-	}
-	writeJSON(w, 201, lease)
-}
-func (s *Service) renewLease(w http.ResponseWriter, r *http.Request) {
-	var in leaseInput
-	if err := decode(w, r, &in); err != nil {
-		fail(w, err)
-		return
-	}
-	if err := leaseTTL(&in); err != nil {
-		fail(w, err)
-		return
-	}
-	var out Lease
-	err := s.store.Update(func(st *State) error {
-		lease, ok := st.Leases[r.PathValue("id")]
-		if !ok {
-			return apiError("NOT_FOUND", "Lease not found")
-		}
-		b, err := owned(st, clientID(r), lease.BoxID)
-		if err != nil {
-			return err
-		}
-		if !lease.ExpiresAt.After(time.Now()) || b.Box.Phase != "running" {
-			return apiError("CONFLICT", "Expired or inactive lease cannot be renewed")
-		}
-		lease.ExpiresAt = time.Now().Add(time.Duration(in.TTLSeconds) * time.Second)
-		st.Leases[lease.ID] = lease
-		out = lease
-		return nil
-	})
-	if err != nil {
-		fail(w, err)
-		return
-	}
-	writeJSON(w, 200, out)
-}
-func (s *Service) releaseLease(w http.ResponseWriter, r *http.Request) {
-	err := s.store.Update(func(st *State) error {
-		lease, ok := st.Leases[r.PathValue("id")]
-		if !ok {
-			return nil
-		}
-		if _, err := owned(st, clientID(r), lease.BoxID); err != nil {
-			return err
-		}
-		delete(st.Leases, lease.ID)
-		return nil
-	})
-	if err != nil {
-		fail(w, err)
-		return
-	}
-	w.WriteHeader(204)
-}
-
 func (s *Service) beginIO(client, id string) (boxRecord, func(), error) {
 	return s.beginIOWithPolicy(client, id, false)
 }
@@ -549,26 +385,21 @@ func (s *Service) beginIOWithPolicy(client, id string, service bool) (boxRecord,
 	unlockAdmission := s.admissions.lock(id)
 	defer unlockAdmission()
 	key := randomID("io-")
-	var b boxRecord
-	err := s.store.View(func(st State) error {
-		var err error
-		b, err = owned(&st, client, id)
-		if err != nil {
-			return err
-		}
-		op := st.Operations[b.Box.OperationID].Operation
-		if !service || (op.Kind != "exec" && op.Kind != "archive") {
-			if err = busy(&st, b, false); err != nil {
-				return err
-			}
-		}
-		if b.Box.Phase != "running" && b.Box.Phase != "staged" {
-			return apiError("CONFLICT", "Box is not ready")
-		}
-		return nil
-	})
+	b, err := s.box(client, id)
 	if err != nil {
 		return b, nil, err
+	}
+	if b.Box.OperationID != "" {
+		op, err := s.store.Operation(client, b.Box.OperationID)
+		if err != nil {
+			return b, nil, err
+		}
+		if (op.Status == "running" || op.Status == "queued") && (!service || op.Kind != "exec") {
+			return b, nil, apiError("BUSY", "Box has an active operation")
+		}
+	}
+	if b.Box.Phase != "running" && b.Box.Phase != "staged" {
+		return b, nil, apiError("CONFLICT", "Box is not ready")
 	}
 	s.mu.Lock()
 	s.streams[key] = activeStream{boxID: id, cancel: func() {}}
@@ -586,7 +417,7 @@ func (s *Service) files(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("list") == "1" {
 		query.Set("list", "1")
 	}
-	// File reads keep their lease for the entire stream, including cancellation.
+	// File reads hold admission for the entire stream, including cancellation.
 	if (r.Method == "GET" || r.Method == "HEAD") && query.Get("list") != "1" {
 		ctx, cancel := context.WithCancel(r.Context())
 		stop := context.AfterFunc(s.ctx, cancel)
@@ -668,6 +499,11 @@ func (s *Service) credentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+	if b.Profile.Provider != "resumable-k8s-pod" {
+		fail(w, apiError("UNSUPPORTED_CAPABILITY", "Docker supports only basic sandbox operations"))
+		return
+	}
+
 	declared := false
 	for _, tool := range b.Profile.Guest.Tools {
 		for _, name := range tool.CredentialEnv {
@@ -725,6 +561,11 @@ func (s *Service) credentialBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+	if b.Profile.Provider != "resumable-k8s-pod" {
+		fail(w, apiError("UNSUPPORTED_CAPABILITY", "Docker supports only basic sandbox operations"))
+		return
+	}
+
 	if input.ExpectedGeneration == 0 || input.ExpectedGeneration != b.Box.Generation {
 		fail(w, apiError("STALE_GENERATION", "Credential batch targets another generation"))
 		return
@@ -782,6 +623,11 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+	if b.Profile.Provider != "resumable-k8s-pod" {
+		fail(w, apiError("UNSUPPORTED_CAPABILITY", "Docker supports only basic sandbox operations"))
+		return
+	}
+
 	var input struct {
 		Args      []string `json:"args"`
 		TimeoutMS int64    `json:"timeoutMs"`

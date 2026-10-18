@@ -4,6 +4,7 @@ package catalog
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"time"
@@ -91,6 +92,7 @@ func (f BuilderFunc) Build(ctx context.Context, in BuildInput, w io.Writer, stag
 
 type Config struct {
 	Dir              string
+	DB               *sql.DB // Optional borrowed connection; the caller owns its lifetime and SQLite configuration.
 	ResolveProfile   func(client, id string) (Profile, error)
 	FinalizeProfile  func(Profile, BuildResult) (json.RawMessage, error)
 	ImageBuild       image.BuildKitOptions

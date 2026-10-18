@@ -8,17 +8,16 @@ import (
 )
 
 // Template is a runtime projection of an immutable catalog revision. It is not
-// persisted as a second template authority in the legacy State ledger.
+// persisted as a second template authority in the service metadata.
 type Template struct {
-	ID              string  `json:"id"` // template family ID
-	Name            string  `json:"name"`
-	Version         string  `json:"version"`
-	ProfileID       string  `json:"profileId"`
-	ImportedImageID string  `json:"importedImageId,omitempty"`
-	Image           string  `json:"image"`
-	CPU             float64 `json:"cpu"`
-	MemoryMiB       int64   `json:"memoryMiB"`
-	WarmSlots       int     `json:"warmSlots"`
+	ID        string  `json:"id"` // template family ID
+	Name      string  `json:"name"`
+	Version   string  `json:"version"`
+	ProfileID string  `json:"profileId"`
+	Image     string  `json:"image"`
+	CPU       float64 `json:"cpu"`
+	MemoryMiB int64   `json:"memoryMiB"`
+	WarmSlots int     `json:"warmSlots"`
 }
 
 type templateRecord struct {
@@ -46,7 +45,7 @@ func catalogAPIError(err error) error {
 // resolveTemplate resolves either a family stable pointer or a specific
 // revision, then materializes its immutable runtime snapshot for existing
 // provider code. Restore may explicitly target a retired revision recorded by
-// an archive; ordinary creation and upgrades require an active revision.
+// an archive; ordinary creation require an active revision.
 func (s *Service) resolveTemplate(client, templateID, revisionID string, allowRetired bool) (templateRecord, error) {
 	var out templateRecord
 	var revision catalog.Revision

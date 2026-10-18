@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	"cellbox.local/cellbox/internal/archivelimits"
 	"cellbox.local/cellbox/internal/boxprovider"
 	"cellbox.local/cellbox/internal/guestapi"
+	"cellbox.local/cellbox/internal/objectstorage"
 )
 
 type archiveTestEntry struct {
@@ -158,18 +160,8 @@ func TestVerifyArchiveChecksumAndSize(t *testing.T) {
 	}
 }
 
-func TestArchivePathCannotEscape(t *testing.T) {
-	dir := t.TempDir()
-	for _, id := range []string{"../secret", "arc-x", "arc-0123456789abcdef0123456789abcdef/../x"} {
-		if _, err := archivePath(dir, id); err == nil {
-			t.Errorf("accepted ID %q", id)
-		}
-	}
-	good := "arc-0123456789abcdef0123456789abcdef"
-	p, err := archivePath(dir, good)
-	if err != nil || p != filepath.Join(dir, good+".tar.gz") {
-		t.Fatalf("valid path: %q %v", p, err)
-	}
+func TestOpenArchiveRejectsSymlink(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "archive.tar.gz")
 	if err := os.Symlink("/etc/passwd", p); err != nil {
 		t.Fatal(err)
 	}
@@ -185,24 +177,21 @@ func TestArchiveDeleteOwnershipAndActiveRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	s := &Service{config: Config{DataDir: dir}, store: store}
-	archiveDir, err := s.archivesDir()
-	if err != nil {
-		t.Fatal(err)
-	}
+	objects := &ledgerObjects{data: map[string][]byte{}}
+	s := &Service{config: Config{DataDir: dir}, store: store, objects: objects}
 	id := "arc-0123456789abcdef0123456789abcdef"
-	name, err := archivePath(archiveDir, id)
-	if err != nil {
+	payload := makeArchiveTestData(t, archiveTestEntry{"file", tar.TypeReg, "x"})
+	if _, err := objects.Put(context.Background(), "archives/"+id+".tar.gz", bytes.NewReader(payload), int64(len(payload)), "*"); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(name, makeArchiveTestData(t, archiveTestEntry{"file", tar.TypeReg, "x"}), 0600); err != nil {
-		t.Fatal(err)
-	}
-	err = store.Update(func(st *State) error {
-		st.Archives[id] = archiveRecord{Archive: Archive{ID: id}, ClientID: "owner"}
-		st.Boxes["box"] = boxRecord{Box: Box{ID: "box", OperationID: "op"}, RestoreArchiveID: id}
-		st.Operations["op"] = operationRecord{Operation: Operation{ID: "op", Kind: "restore", Status: "running"}, ClientID: "owner"}
-		return nil
+	err = store.Write(context.Background(), func(tx *storeTx) error {
+		if err := tx.PutArchive(archiveRecord{Archive: Archive{ID: id}, ClientID: "owner"}); err != nil {
+			return err
+		}
+		if err := tx.PutBox(boxRecord{Box: Box{ID: "box", OperationID: "op"}, RestoreArchiveID: id, ClientID: "owner"}); err != nil {
+			return err
+		}
+		return tx.PutOperation(operationRecord{Operation: Operation{ID: "op", Kind: "restore", Status: "running"}, ClientID: "owner"})
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -221,120 +210,70 @@ func TestArchiveDeleteOwnershipAndActiveRestore(t *testing.T) {
 	if got := deleteAs("owner"); got != 409 {
 		t.Fatalf("active restore delete: %d", got)
 	}
-	if err := store.Update(func(st *State) error {
-		b := st.Boxes["box"]
+	if err := store.Write(context.Background(), func(tx *storeTx) error {
+		b, err := tx.Box("owner", "box")
+		if err != nil {
+			return err
+		}
 		b.RestoreComplete = true
-		st.Boxes["box"] = b
-		op := st.Operations["op"]
+		if err := tx.PutBox(b); err != nil {
+			return err
+		}
+		op, err := tx.Operation("op")
+		if err != nil {
+			return err
+		}
 		op.Operation.Status = "succeeded"
-		st.Operations["op"] = op
-		return nil
+		return tx.PutOperation(op)
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if got := deleteAs("owner"); got != 204 {
 		t.Fatalf("delete: %d", got)
 	}
-	if _, err := os.Stat(name); !os.IsNotExist(err) {
-		t.Fatalf("archive file remains: %v", err)
+	if _, _, _, err := objects.Get(context.Background(), "archives/"+id+".tar.gz"); !errors.Is(err, objectstorage.ErrNotFound) {
+		t.Fatalf("archive object remains: %v", err)
 	}
 }
 
-func TestCaptureSurvivesBoxDeletionAndRestores(t *testing.T) {
+func TestRunningArchiveCaptureIsRejected(t *testing.T) {
 	f := newCoreFixture(t)
-	_, source := f.createBox(t, "source-create")
-	payload := makeArchiveTestData(t, archiveTestEntry{"work.txt", tar.TypeReg, "durable"})
-	var restored atomic.Bool
-	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "" {
-			http.Error(w, "unauthorized", 401)
-			return
-		}
-		switch r.URL.Path {
-		case "/healthz":
-			w.WriteHeader(200)
-		case "/v1/archive":
-			w.Header().Set("Content-Type", "application/gzip")
-			_, _ = w.Write(payload)
-		case "/v1/restore":
-			body, err := io.ReadAll(r.Body)
-			if err != nil || !bytes.Equal(body, payload) {
-				http.Error(w, "wrong restore body", 400)
-				return
-			}
-			restored.Store(true)
-			w.WriteHeader(204)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer guest.Close()
-	f.provider.mu.Lock()
-	f.provider.guestURL = guest.URL
-	f.provider.mu.Unlock()
-	status, body := f.call(t, "POST", "/v1/boxes/"+source.ID+"/archives", testClientToken, "capture-once", nil)
-	wantStatus(t, status, 202, body)
-	op := decodeResponse[Operation](t, body)
-	done := f.waitOperation(t, op.ID, "succeeded")
-	archiveID := done.Result["archiveId"]
-	if archiveID == "" {
-		t.Fatal("capture omitted archive ID")
+	useK3sProfile(t, f)
+	_, source := f.createBox(t, "running-capture-source")
+	objects := &ledgerObjects{data: map[string][]byte{}}
+	f.service.objects = objects
+	f.service.providers["resumable-k8s-pod"] = &suspendedArchiveTestProvider{fakeCoreProvider: f.provider, objects: objects}
+	guestCalls := f.provider.guestCount()
+	status, body := f.call(t, "POST", "/v1/boxes/"+source.ID+"/archives", testClientToken, "", nil)
+	wantStatus(t, status, 409, body)
+	if f.provider.guestCount() != guestCalls {
+		t.Fatal("archive attempt contacted a running guest")
 	}
-	archive, err := f.service.archiveForClient("client-a", archiveID)
-	if err != nil || !archive.Portable {
-		t.Fatalf("validated native workspace archive is not portable: %+v %v", archive, err)
-	}
-	status, body = f.call(t, "GET", "/v1/archives/"+archiveID, otherClientToken, "", nil)
-	wantStatus(t, status, 404, body)
-	status, body = f.call(t, "GET", "/v1/archives/"+archiveID+"/content", testClientToken, "", nil)
-	wantStatus(t, status, 200, body)
-	if !bytes.Equal(body, payload) {
-		t.Fatal("download differs from captured workspace")
-	}
-	status, body = f.call(t, "POST", "/v1/boxes/"+source.ID+":destroy", testClientToken, "destroy-source", nil)
-	wantStatus(t, status, 202, body)
-	destroy := decodeResponse[Operation](t, body)
-	f.waitOperation(t, destroy.ID, "succeeded")
-	status, body = f.call(t, "GET", "/v1/archives/"+archiveID, testClientToken, "", nil)
-	wantStatus(t, status, 200, body)
-	templateID := f.template(t)
-	status, body = f.call(t, "POST", "/v1/boxes:restore", testClientToken, "restore-once", map[string]string{"templateId": templateID, "ownerKey": "restored", "archiveId": archiveID})
-	wantStatus(t, status, 202, body)
-	restore := decodeResponse[Operation](t, body)
-	f.waitOperation(t, restore.ID, "succeeded")
-	if !restored.Load() {
-		t.Fatal("archive was not sent to staged guest")
-	}
-	status, body = f.call(t, "GET", "/v1/boxes/"+restore.TargetID, testClientToken, "", nil)
-	wantStatus(t, status, 200, body)
-	box := decodeResponse[Box](t, body)
-	if box.Phase != "staged" {
-		t.Fatalf("restored box state: %s", box.Phase)
-	}
+	status, body = f.call(t, "POST", "/v1/boxes/"+source.ID+"/archives", testClientToken, "", map[string]bool{"diskOnly": true})
+	wantStatus(t, status, 400, body)
+}
+
+func TestDockerArchiveCaptureIsUnsupported(t *testing.T) {
+	f := newCoreFixture(t)
+	_, box := f.createBox(t, "docker-archive-source")
+	status, body := f.call(t, "POST", "/v1/boxes/"+box.ID+"/archives", testClientToken, "", nil)
+	wantStatus(t, status, 422, body)
 }
 
 func TestPortableArchiveRestoreAcrossImagesRequiresOptIn(t *testing.T) {
 	f := newCoreFixture(t)
-	f.service.config.Profiles[0].Provider = "resumable-k8s-pod"
-	f.service.providers["resumable-k8s-pod"] = f.provider
+	useK3sProfile(t, f)
 	const archiveID = "arc-11111111111111111111111111111111"
 	payload := makeArchiveTestData(t, archiveTestEntry{"work.txt", tar.TypeReg, "portable"})
-	dir, err := f.service.archivesDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	name, err := archivePath(dir, archiveID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(name, payload, 0600); err != nil {
+	objects := &ledgerObjects{data: map[string][]byte{}}
+	f.service.objects = objects
+	if _, err := objects.Put(context.Background(), "archives/"+archiveID+".tar.gz", bytes.NewReader(payload), int64(len(payload)), "*"); err != nil {
 		t.Fatal(err)
 	}
 	h := sha256.Sum256(payload)
 	archive := Archive{ID: archiveID, SourceBoxID: "deleted-source", ImageID: "registry.example/source@sha256:" + strings.Repeat("a", 64), Agent: f.config.Profiles[0].Guest.Agent, SHA256: hex.EncodeToString(h[:]), Size: int64(len(payload)), Portable: true}
-	if err := f.service.store.Update(func(st *State) error {
-		st.Archives[archiveID] = archiveRecord{Archive: archive, ClientID: "client-a"}
-		return nil
+	if err := f.service.store.Write(context.Background(), func(tx *storeTx) error {
+		return tx.PutArchive(archiveRecord{Archive: archive, ClientID: "client-a"})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -366,22 +305,26 @@ func TestPortableArchiveRestoreAcrossImagesRequiresOptIn(t *testing.T) {
 	wantStatus(t, status, 409, body)
 	request["acceptImageChange"] = true
 	archive.Agent.UID++
-	if err := f.service.store.Update(func(st *State) error {
-		record := st.Archives[archiveID]
+	if err := f.service.store.Write(context.Background(), func(tx *storeTx) error {
+		record, err := tx.Archive("client-a", archiveID)
+		if err != nil {
+			return err
+		}
 		record.Archive = archive
-		st.Archives[archiveID] = record
-		return nil
+		return tx.PutArchive(record)
 	}); err != nil {
 		t.Fatal(err)
 	}
 	status, body = f.call(t, "POST", "/v1/boxes:restore", testClientToken, "restore-agent-mismatch", request)
 	wantStatus(t, status, 409, body)
 	archive.Agent = f.config.Profiles[0].Guest.Agent
-	if err := f.service.store.Update(func(st *State) error {
-		record := st.Archives[archiveID]
+	if err := f.service.store.Write(context.Background(), func(tx *storeTx) error {
+		record, err := tx.Archive("client-a", archiveID)
+		if err != nil {
+			return err
+		}
 		record.Archive = archive
-		st.Archives[archiveID] = record
-		return nil
+		return tx.PutArchive(record)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -395,53 +338,12 @@ func TestPortableArchiveRestoreAcrossImagesRequiresOptIn(t *testing.T) {
 	if !restored.Load() {
 		t.Fatal("portable archive was not restored into selected target image")
 	}
-	if err := f.service.store.View(func(st State) error {
-		b := st.Boxes[op.TargetID]
-		if b.Box.ImportedImageID != "" || b.Box.RevisionID == "" || b.Box.Image != b.Profile.Image {
-			t.Fatalf("restore did not retain the selected catalog revision: %+v", b)
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestCaptureRejectsInvalidGuestArchiveAndCleansTemp(t *testing.T) {
-	f := newCoreFixture(t)
-	_, source := f.createBox(t, "invalid-capture-source")
-	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/archive" {
-			_, _ = w.Write([]byte("invalid gzip"))
-			return
-		}
-		w.WriteHeader(200)
-	}))
-	defer guest.Close()
-	f.provider.mu.Lock()
-	f.provider.guestURL = guest.URL
-	f.provider.mu.Unlock()
-	status, body := f.call(t, "POST", "/v1/boxes/"+source.ID+"/archives", testClientToken, "invalid-capture", nil)
-	wantStatus(t, status, 202, body)
-	op := decodeResponse[Operation](t, body)
-	f.waitOperation(t, op.ID, "failed")
-	archivesDir, err := f.service.archivesDir()
+	b, err := f.service.store.BoxRecord(op.TargetID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	entries, err := os.ReadDir(archivesDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("invalid capture left files: %v", entries)
-	}
-	if err := f.service.store.View(func(st State) error {
-		if len(st.Archives) != 0 {
-			t.Fatal("invalid capture persisted metadata")
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
+	if b.Box.RevisionID == "" || b.Box.Image != b.Profile.Image {
+		t.Fatalf("restore did not retain the selected catalog revision: %+v", b)
 	}
 }
 
@@ -453,85 +355,31 @@ type suspendedArchiveTestProvider struct {
 	calls     int
 }
 
-type diskArchiveServiceTestProvider struct {
-	*fakeCoreProvider
-	objects *ledgerObjects
-	payload []byte
-	calls   int
-}
-
-func (p *diskArchiveServiceTestProvider) CaptureDiskWorkspaceArchive(ctx context.Context, _ boxprovider.Handle, id string) (int64, string, error) {
-	p.calls++
-	if _, err := p.objects.Put(ctx, "archives/"+id+".tar.gz", bytes.NewReader(p.payload), int64(len(p.payload)), "*"); err != nil {
-		return 0, "", err
-	}
-	sum := sha256.Sum256(p.payload)
-	return int64(len(p.payload)), hex.EncodeToString(sum[:]), nil
-}
-
-func TestDiskOnlyArchiveAcceptsFailedPersistentHomeWithoutGuestRequest(t *testing.T) {
+func TestFailedArchiveCaptureUsesStoppedWorkspaceProvider(t *testing.T) {
 	f := newCoreFixture(t)
-	_, source := f.createBox(t, "disk-archive-source")
+	_, source := f.createBox(t, "failed-archive-source")
 	objects := &ledgerObjects{data: map[string][]byte{}}
-	provider := &diskArchiveServiceTestProvider{fakeCoreProvider: f.provider, objects: objects,
+	provider := &suspendedArchiveTestProvider{fakeCoreProvider: f.provider, objects: objects,
 		payload: makeArchiveTestData(t, archiveTestEntry{"src/", tar.TypeDir, ""}, archiveTestEntry{"src/file.txt", tar.TypeReg, "persisted"})}
 	f.service.objects = objects
 	f.service.providers["resumable-k8s-pod"] = provider
-	if err := f.service.store.Update(func(st *State) error {
-		box := st.Boxes[source.ID]
+	if err := f.service.store.ChangeBox(context.Background(), source.ID, func(box *boxRecord) error {
 		box.Box.Phase = "failed"
 		box.Profile.Provider = "resumable-k8s-pod"
 		box.Profile.PersistentHome = true
 		box.Profile.Guest.Workspace = "/home/agent/workspace"
-		st.Boxes[source.ID] = box
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	guestCalls := f.provider.guestCount()
-	status, body := f.call(t, "POST", "/v1/boxes/"+source.ID+"/archives", testClientToken, "disk-mode", map[string]bool{"diskOnly": true})
+	status, body := f.call(t, "POST", "/v1/boxes/"+source.ID+"/archives", testClientToken, "", nil)
 	wantStatus(t, status, 202, body)
 	op := decodeResponse[Operation](t, body)
 	done := f.waitOperation(t, op.ID, "succeeded")
-	archiveID := done.Result["archiveId"]
-	archive, err := f.service.archiveForClient("client-a", archiveID)
-	if err != nil || archive.ID != archiveID || !archive.Portable || archive.Consistency != "workspace-best-effort" {
-		t.Fatalf("failed-source disk archive was not stored: %+v err=%v", archive, err)
-	}
-	if provider.calls != 1 || f.provider.guestCount() != guestCalls {
-		t.Fatalf("disk capture calls=%d guest calls before/after=%d/%d", provider.calls, guestCalls, f.provider.guestCount())
-	}
-	status, body = f.call(t, "POST", "/v1/boxes/"+source.ID+"/archives", testClientToken, "disk-mode", nil)
-	wantStatus(t, status, 409, body)
-	status, body = f.call(t, "GET", "/v1/boxes/"+source.ID, testClientToken, "", nil)
-	wantStatus(t, status, 200, body)
-	if !decodeResponse[Box](t, body).Capabilities.DiskArchives {
-		t.Fatal("disk archive capability not advertised")
-	}
-	status, body = f.call(t, "GET", "/v1/boxes/"+source.ID, otherClientToken, "", nil)
-	wantStatus(t, status, 404, body)
-}
-
-func TestDiskOnlyArchiveRejectsProviderWithoutCapability(t *testing.T) {
-	f := newCoreFixture(t)
-	_, source := f.createBox(t, "legacy-no-disk-archive")
-	f.service.objects = &ledgerObjects{data: map[string][]byte{}}
-	if err := f.service.store.Update(func(st *State) error {
-		box := st.Boxes[source.ID]
-		box.Box.Phase = "failed"
-		box.Profile.Provider = "resumable-k8s-pod"
-		box.Profile.PersistentHome = true
-		box.Profile.Guest.Workspace = "/home/agent/workspace"
-		st.Boxes[source.ID] = box
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	guestCalls := f.provider.guestCount()
-	status, body := f.call(t, "POST", "/v1/boxes/"+source.ID+"/archives", testClientToken, "unsupported-disk", map[string]bool{"diskOnly": true})
-	wantStatus(t, status, 422, body)
-	if f.provider.guestCount() != guestCalls {
-		t.Fatal("unsupported disk archive made a guest request")
+	archive, err := f.service.archiveForClient("client-a", done.Result["archiveId"])
+	if err != nil || !archive.Portable || provider.calls != 1 || f.provider.guestCount() != guestCalls {
+		t.Fatalf("failed stopped workspace capture: archive=%+v calls=%d guestCalls=%d/%d err=%v", archive, provider.calls, guestCalls, f.provider.guestCount(), err)
 	}
 }
 
@@ -566,17 +414,18 @@ func TestSuspendedArchiveValidatesStoredNodeCaptureBeforePublishingMetadata(t *t
 			provider := &suspendedArchiveTestProvider{fakeCoreProvider: &fakeCoreProvider{}, objects: objects, payload: payload, badDigest: badDigest}
 			s := &Service{config: Config{DataDir: dir}, store: store, objects: objects,
 				providers: map[string]boxprovider.Provider{"resumable-k8s-pod": provider}}
-			box := boxRecord{Box: Box{ID: "box-1", ProfileID: "profile-1", ImageID: "image-1"}, ClientID: "client-1",
-				Profile: Profile{ID: "profile-1", Provider: "resumable-k8s-pod", Guest: guestapi.Config{Workspace: "/home/agent/workspace"}},
+			box := boxRecord{Box: Box{ID: "box-1", ProfileID: "profile-1", ImageID: "image-1", Phase: "suspended"}, ClientID: "client-1",
+				Profile: Profile{ID: "profile-1", Provider: "resumable-k8s-pod", PersistentHome: true, Guest: guestapi.Config{Workspace: "/home/agent/workspace"}},
 				Handle:  boxprovider.Handle{Provider: "resumable-k8s-pod", ID: "box-1"}}
-			archive, captureErr := s.captureSuspendedArchive(context.Background(), box)
+			archive, captureErr := s.captureStoppedWorkspaceArchive(context.Background(), box)
 			if provider.calls != 1 || provider.guestCount() != 0 {
 				t.Fatalf("capture calls=%d guest calls=%d", provider.calls, provider.guestCount())
 			}
-			var archiveCount int
-			if err = store.Update(func(st *State) error { archiveCount = len(st.Archives); return nil }); err != nil {
+			records, err := store.ArchiveRecords("client-1")
+			if err != nil {
 				t.Fatal(err)
 			}
+			archiveCount := len(records)
 			if badDigest {
 				if captureErr == nil || archiveCount != 0 {
 					t.Fatalf("corrupt node bytes were published: err=%v archives=%d", captureErr, archiveCount)
@@ -600,7 +449,7 @@ func (*suspendedArchiveTestProvider) Inspect(context.Context, boxprovider.Handle
 	return boxprovider.Observation{Phase: "suspended"}, nil
 }
 
-func TestSuspendedArchiveHTTPDispatchKeepsSourcePausedAndReusesOperation(t *testing.T) {
+func TestSuspendedArchiveHTTPDispatchKeepsSourcePausedAndDoesNotReplayByKey(t *testing.T) {
 	f := newCoreFixture(t)
 	_, source := f.createBox(t, "suspended-capture-source")
 	objects := &ledgerObjects{data: map[string][]byte{}}
@@ -608,35 +457,38 @@ func TestSuspendedArchiveHTTPDispatchKeepsSourcePausedAndReusesOperation(t *test
 		payload: makeArchiveTestData(t, archiveTestEntry{"state.txt", tar.TypeReg, "latest workspace"})}
 	f.service.objects = objects
 	f.service.providers["resumable-k8s-pod"] = provider
-	if err := f.service.store.Update(func(st *State) error {
-		box := st.Boxes[source.ID]
+	if err := f.service.store.ChangeBox(context.Background(), source.ID, func(box *boxRecord) error {
 		box.Box.Phase = "suspended"
 		box.Profile.Provider = "resumable-k8s-pod"
+		box.Profile.PersistentHome = true
 		box.Profile.Guest.Workspace = "/home/agent/workspace"
-		st.Boxes[source.ID] = box
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	guestCalls := f.provider.guestCount()
-	status, body := f.call(t, "POST", "/v1/boxes/"+source.ID+"/archives", testClientToken, "disk-capture", nil)
+	status, body := f.call(t, "POST", "/v1/boxes/"+source.ID+"/archives", testClientToken, "ignored-key", nil)
 	wantStatus(t, status, 202, body)
 	op := decodeResponse[Operation](t, body)
 	completed := f.waitOperation(t, op.ID, "succeeded")
 	if completed.Result["archiveId"] == "" {
 		t.Fatal("capture operation returned no archive reference")
 	}
-	status, body = f.call(t, "POST", "/v1/boxes/"+source.ID+"/archives", testClientToken, "disk-capture", nil)
+	status, body = f.call(t, "POST", "/v1/boxes/"+source.ID+"/archives", testClientToken, "ignored-key", nil)
 	wantStatus(t, status, 202, body)
-	if decodeResponse[Operation](t, body).ID != op.ID || provider.calls != 1 || f.provider.guestCount() != guestCalls {
-		t.Fatal("replay recaptured the disk or called the guest")
+	second := decodeResponse[Operation](t, body)
+	if second.ID == op.ID {
+		t.Fatal("Idempotency-Key unexpectedly replayed the previous operation")
 	}
-	if err := f.service.store.View(func(st State) error {
-		if st.Boxes[source.ID].Box.Phase != "suspended" || st.Boxes[source.ID].Box.OperationID != "" {
-			t.Fatal("archive altered source lifecycle state or left it busy")
-		}
-		return nil
-	}); err != nil {
+	f.waitOperation(t, second.ID, "succeeded")
+	if provider.calls != 2 || f.provider.guestCount() != guestCalls {
+		t.Fatal("a distinct request did not capture from stopped storage")
+	}
+	updated, err := f.service.rawBox(source.ID)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if updated.Box.Phase != "suspended" || updated.Box.OperationID != "" {
+		t.Fatal("archive altered source lifecycle state or left it busy")
 	}
 }

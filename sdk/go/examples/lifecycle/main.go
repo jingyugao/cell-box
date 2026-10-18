@@ -1,5 +1,6 @@
-// Example: create a sandbox, use its workspace file API, suspend/freeze it,
-// resume/unfreeze it, and continue using the handle returned by that operation.
+// Example: create a sandbox, use its workspace file API, suspend and resume it,
+// and continue using the handle returned by resume. Requires a k3s profile with
+// same-node checkpoint support.
 //
 // Required: CELLBOX_API_URL and exactly one of CELLBOX_REVISION_ID or
 // CELLBOX_TEMPLATE_ID. Optionally set CELLBOX_CLIENT_ID and CELLBOX_CLIENT_TOKEN.
@@ -75,38 +76,15 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("read sandbox capabilities: %w", err)
 	}
-	var resumed *cellbox.Sandbox
-	switch {
-	case info.Capabilities.Suspend == "same-node-checkpoint":
-		fmt.Println("suspending sandbox")
-		suspendKey := "lifecycle-example-suspend-" + box.ID
-		fmt.Printf("suspend idempotency key: %s\n", suspendKey)
-		if err := box.Suspend(ctx, &cellbox.LifecycleOptions{IdempotencyKey: suspendKey}); err != nil {
-			printOperationID(err)
-			return fmt.Errorf("suspend sandbox: %w", err)
-		}
-		resumeKey := "lifecycle-example-resume-" + box.ID
-		fmt.Printf("resume idempotency key: %s\n", resumeKey)
-		resumed, err = box.Resume(ctx, &cellbox.LifecycleOptions{IdempotencyKey: resumeKey})
-	case info.Capabilities.Freeze:
-		fmt.Println("freezing sandbox")
-		freezeKey := "lifecycle-example-freeze-" + box.ID
-		fmt.Printf("freeze idempotency key: %s\n", freezeKey)
-		if err := box.Freeze(ctx, &cellbox.LifecycleOptions{IdempotencyKey: freezeKey}); err != nil {
-			printOperationID(err)
-			return fmt.Errorf("freeze sandbox: %w", err)
-		}
-		unfreezeKey := "lifecycle-example-unfreeze-" + box.ID
-		fmt.Printf("unfreeze idempotency key: %s\n", unfreezeKey)
-		err = box.Unfreeze(ctx, &cellbox.LifecycleOptions{IdempotencyKey: unfreezeKey})
-		if err == nil {
-			// Unfreeze leaves the runtime generation unchanged, but reconnecting
-			// also demonstrates how to obtain a current handle after a transition.
-			resumed, err = client.Connect(ctx, box.ID)
-		}
-	default:
-		return fmt.Errorf("sandbox %s supports neither suspend nor freeze", box.ID)
+	if info.Capabilities.Suspend != "same-node-checkpoint" {
+		return fmt.Errorf("sandbox profile does not support suspend and resume")
 	}
+	fmt.Println("suspending sandbox")
+	if err := box.Suspend(ctx); err != nil {
+		printOperationID(err)
+		return fmt.Errorf("suspend sandbox: %w", err)
+	}
+	resumed, err := box.Resume(ctx)
 	if err != nil {
 		printOperationID(err)
 		// A lost response can leave the lifecycle operation's outcome unknown.
@@ -176,7 +154,7 @@ func cleanup(client *cellbox.Client, id string, box **cellbox.Sandbox) {
 	} else {
 		log.Printf("refresh sandbox %s before cleanup: %v", id, err)
 	}
-	if err := (*box).Destroy(ctx, nil); err != nil {
+	if err := (*box).Destroy(ctx); err != nil {
 		var apiErr *cellbox.APIError
 		if errors.As(err, &apiErr) {
 			log.Printf("destroy sandbox %s: %s (%s)", id, apiErr.Code, apiErr.Message)

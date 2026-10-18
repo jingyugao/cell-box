@@ -54,10 +54,10 @@ func (o nodeOptions) validate(config service.Config) error {
 	return nil
 }
 
-// newRuntime wires the same client, event source and warm store into both sides.
+// newRuntime wires the same client, event source and desired-config reader into both sides.
 // The manager has no separate leader election: the process lease already fences
 // HTTP handlers, recovery workers, lifecycle work and warm pool maintenance.
-func newRuntime(kube *rest.Config, options nodeOptions) (*resumable.Provider, manager.Manager, *node.Backend, error) {
+func newRuntime(kube *rest.Config, options nodeOptions, readDesired func(context.Context) ([]warmtemplates.Template, string, error)) (*resumable.Provider, manager.Manager, *node.Backend, error) {
 	p, err := resumable.NewForConfig(kube)
 	if err != nil {
 		return nil, nil, nil, errors.New("cannot initialize Kubernetes provider")
@@ -91,7 +91,6 @@ func newRuntime(kube *rest.Config, options nodeOptions) (*resumable.Provider, ma
 	backend.HostMountNamespace = options.HostMountNamespace
 	local := runtimecontrol.New(p.Client)
 	p.Client, p.Local = local, local
-	p.WarmTemplates = warmtemplates.NewLocalStore()
 	p.CacheImageLocal = func(ctx context.Context, image, nodeName, namespace string) error {
 		if nodeName != options.Node || namespace != options.Namespace {
 			return errors.New("image cache target differs from this server's node or namespace")
@@ -101,7 +100,7 @@ func newRuntime(kube *rest.Config, options nodeOptions) (*resumable.Provider, ma
 		return backend.CacheImage(pull, image)
 	}
 	r := &controller.Reconciler{Client: local, Runtime: backend, NodeName: options.Node}
-	r.WarmPool = &controller.WarmPool{Reconciler: r, Namespace: options.Namespace, Size: options.WarmPoolSize, LocalStore: p.WarmTemplates}
+	r.WarmPool = &controller.WarmPool{Reconciler: r, Namespace: options.Namespace, Size: options.WarmPoolSize, ReadDesired: readDesired, PublishObservation: p.SetWarmSnapshot}
 	if err = mgr.Add(r.WarmPool); err != nil {
 		return nil, nil, nil, err
 	}
@@ -125,24 +124,25 @@ func serveUnified(parent context.Context, config service.Config, dockerBinary st
 	providers := map[string]boxprovider.Provider{}
 	var mgr manager.Manager
 	var backend *node.Backend
+	var app *service.Service
 	if options.Node != "" {
-		p, m, b, err := newRuntime(kube, options)
+		p, m, b, err := newRuntime(kube, options, func(ctx context.Context) ([]warmtemplates.Template, string, error) {
+			if app == nil {
+				return nil, "", errors.New("template store is not initialized")
+			}
+			desired, err := app.DesiredWarmTemplates(ctx)
+			if err != nil {
+				return nil, "", err
+			}
+			records, _, err := resumable.BuildWarmTemplates(options.Namespace, desired)
+			return records, service.WarmDesiredHash(desired), err
+		})
 		if err != nil {
 			return err
 		}
 		providers[p.Name()], mgr, backend = p, m, b
 		defer backend.Close()
-		// An explicitly empty profile set has no warm demand. For configured
-		// profiles the catalog's first full sync initializes the local store.
-		hasResumable := false
-		for _, profile := range config.Profiles {
-			hasResumable = hasResumable || profile.Provider == p.Name()
-		}
-		if !hasResumable {
-			if err := p.WarmTemplates.Set(options.Namespace, nil); err != nil {
-				return err
-			}
-		}
+
 	}
 	for _, profile := range config.Profiles {
 		if providers[profile.Provider] != nil {
@@ -153,7 +153,8 @@ func serveUnified(parent context.Context, config service.Config, dockerBinary st
 			providers[profile.Provider] = docker.New(dockerBinary)
 		}
 	}
-	app, err := service.NewContext(ctx, config, providers)
+	var err error
+	app, err = service.NewContext(ctx, config, providers)
 	if err != nil {
 		return fmt.Errorf("cannot start Cellbox service: %w", err)
 	}
@@ -161,6 +162,7 @@ func serveUnified(parent context.Context, config service.Config, dockerBinary st
 	// lifetime. No runtime worker starts until this pointer is installed.
 	if backend != nil {
 		backend.Objects = app.RuntimeObjects()
+		backend.Checkpoints = app.CheckpointStore()
 	}
 	runtimeResult := make(chan error, 1)
 	if mgr != nil {

@@ -4,8 +4,7 @@
 // Required: CELLBOX_API_URL, CELLBOX_PROFILE_ID, CELLBOX_BASE_IMAGE.
 // Optional: CELLBOX_CLIENT_ID, CELLBOX_CLIENT_TOKEN, CELLBOX_TEMPLATE_ID,
 // CELLBOX_TEMPLATE_NAME, CELLBOX_USER_VERSION, CELLBOX_BUILD_COMMAND,
-// CELLBOX_RUN_COMMAND, CELLBOX_BUILD_KEY, CELLBOX_PLATFORM,
-// CELLBOX_VERIFY_COMMAND.
+// CELLBOX_RUN_COMMAND, CELLBOX_PLATFORM, CELLBOX_VERIFY_COMMAND.
 package main
 
 import (
@@ -54,11 +53,6 @@ func run() error {
 	if buildCommand == "" {
 		buildCommand = defaultBuildCommand
 	}
-	// A build key is printed before submission so an operator can safely
-	// resubmit the exact request after a client disconnect.
-	buildKey := envOr("CELLBOX_BUILD_KEY", "cellbox-sdk-template-"+newID())
-	fmt.Printf("build idempotency key: %s\n", buildKey)
-
 	template, err := selectTemplate(buildCtx, client)
 	if err != nil {
 		return err
@@ -72,13 +66,8 @@ func run() error {
 		BuildCommand: buildCommand,
 		RunCommand:   os.Getenv("CELLBOX_RUN_COMMAND"),
 		Platform:     envOr("CELLBOX_PLATFORM", "linux/amd64"),
-	}, buildKey)
+	})
 	if err != nil {
-		var requestErr *cellbox.RequestError
-		var apiErr *cellbox.APIError
-		if errors.As(err, &requestErr) && !errors.As(err, &apiErr) {
-			fmt.Printf("build request outcome is unknown; recover with key %s and identical input\n", requestErr.IdempotencyKey)
-		}
 		return fmt.Errorf("submit build: %w", err)
 	}
 	fmt.Printf("build operation ID: %s\n", buildOp.ID)
@@ -149,7 +138,7 @@ func cleanupFailedCreate(client *cellbox.Client, op *cellbox.Operation) {
 		log.Printf("inspect sandbox from create operation %s: %v", op.ID, err)
 		return
 	}
-	if err := box.Destroy(ctx, nil); err != nil {
+	if err := box.Destroy(ctx); err != nil {
 		log.Printf("destroy sandbox %s after create error: %v", box.ID, err)
 	}
 }
@@ -183,7 +172,7 @@ func selectTemplate(ctx context.Context, client *cellbox.Client) (*cellbox.Templ
 func destroy(id string, box *cellbox.Sandbox) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	if err := box.Destroy(ctx, nil); err != nil {
+	if err := box.Destroy(ctx); err != nil {
 		log.Printf("destroy sandbox %s: %v", id, err)
 	}
 }

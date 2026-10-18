@@ -10,11 +10,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/homevolume"
+	"cellbox.local/cellbox/internal/inventory"
 	"cellbox.local/cellbox/internal/objectstorage"
 	"cellbox.local/cellbox/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
@@ -33,20 +33,10 @@ type Backend struct {
 	Runtime            cri.RuntimeServiceClient
 	Images             cri.ImageServiceClient
 	connection         *grpc.ClientConn
-	// Objects stores workspace archives and inventory metadata. Memory checkpoints
-	// remain on their assigned node under Base.
-	Objects           objectstorage.Objects
-	forgetMu          sync.Mutex
-	forgetSuccess     map[forgetKey]struct{}
-	inventoryMu       sync.Mutex
-	inventoryLocks    sync.Map
-	inventoryState    map[string]string
-	inventoryVersions map[string]string
-}
-
-type forgetKey struct {
-	owner string
-	cycle int64
+	// Objects stores archive payloads. Checkpoint payloads remain on their
+	// assigned node under Base; Checkpoints stores only their inventory records.
+	Objects     objectstorage.Objects
+	Checkpoints inventory.CheckpointStore
 }
 
 func New(socket string) (*Backend, error) {
@@ -171,7 +161,6 @@ func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.P
 		if err = b.verifySnapshotHome(r, m); err != nil {
 			return err
 		}
-		b.clearForgetSuccess(r)
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -238,7 +227,6 @@ func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.P
 	if _, err = VerifyCached(path, string(r.UID), r.Status.SpecHash, b.Runsc); err != nil {
 		return err
 	}
-	b.clearForgetSuccess(r)
 	return nil
 }
 
@@ -396,20 +384,11 @@ func (b *Backend) Forget(ctx context.Context, r *api.ResumablePod) error {
 	if !ValidID(string(r.UID)) {
 		return fmt.Errorf("invalid owner UID")
 	}
-	key := forgetKey{owner: string(r.UID), cycle: r.Status.Cycle}
 	deleting := r.DeletionTimestamp != nil
-	b.forgetMu.Lock()
-	_, alreadyCleaned := b.forgetSuccess[key]
-	if deleting {
-		b.clearForgetOwnerLocked(key.owner)
-		alreadyCleaned = false
-	}
-	b.forgetMu.Unlock()
-	if b.Objects != nil && !alreadyCleaned {
-		if err := b.Objects.Delete(ctx, "checkpoints/"+string(r.UID)+"/metadata.json"); err != nil && !errors.Is(err, objectstorage.ErrNotFound) {
+	if b.Checkpoints != nil {
+		if err := b.Checkpoints.DeleteCheckpoint(ctx, string(r.UID), r.Status.Snapshot); err != nil && !errors.Is(err, inventory.ErrNotFound) {
 			return err
 		}
-		b.clearInventoryState(key.owner)
 	}
 	if err := os.RemoveAll(filepath.Join(b.Base, "workloads", string(r.UID))); err != nil {
 		return err
@@ -424,59 +403,5 @@ func (b *Backend) Forget(ctx context.Context, r *api.ResumablePod) error {
 			return err
 		}
 	}
-	if b.Objects != nil && !deleting {
-		b.forgetMu.Lock()
-		if b.forgetSuccess == nil {
-			b.forgetSuccess = map[forgetKey]struct{}{}
-		}
-		b.clearForgetOwnerLocked(key.owner)
-		b.forgetSuccess[key] = struct{}{}
-		b.forgetMu.Unlock()
-	}
 	return nil
-}
-
-func (b *Backend) clearForgetSuccess(r *api.ResumablePod) {
-	key := forgetKey{owner: string(r.UID), cycle: r.Status.Cycle}
-	b.forgetMu.Lock()
-	delete(b.forgetSuccess, key)
-	b.forgetMu.Unlock()
-	b.clearInventoryState(key.owner)
-}
-
-func (b *Backend) clearForgetOwnerLocked(owner string) {
-	for key := range b.forgetSuccess {
-		if key.owner == owner {
-			delete(b.forgetSuccess, key)
-		}
-	}
-}
-
-// Rebuild discards failed runtime/checkpoint artifacts while preserving the owned HOME.
-func (b *Backend) Rebuild(ctx context.Context, r *api.ResumablePod) error {
-	if !r.Spec.PersistentHome || r.DeletionTimestamp != nil {
-		return fmt.Errorf("rebuild requires an existing persistent HOME")
-	}
-	if _, err := b.persistentHome(r, false); err != nil {
-		return err
-	}
-	if err := b.Forget(ctx, r); err != nil {
-		return err
-	}
-	return homevolume.Rearm(b.Base, string(r.UID), r.Spec.NodeName, r.Status.SpecHash, r.Status.PodUID, r.Spec.RebuildNonce)
-}
-
-func (b *Backend) Upgrade(ctx context.Context, r *api.ResumablePod, newSpec string) error {
-	if !r.Spec.PersistentHome || r.DeletionTimestamp != nil || r.Spec.Upgrade == nil {
-		return fmt.Errorf("upgrade requires an existing persistent HOME")
-	}
-	if _, err := homevolume.Verify(b.Base, string(r.UID), r.Spec.NodeName, r.Status.SpecHash, ""); err != nil {
-		if _, err := homevolume.Verify(b.Base, string(r.UID), r.Spec.NodeName, newSpec, ""); err != nil {
-			return err
-		}
-	}
-	if err := b.Forget(ctx, r); err != nil {
-		return err
-	}
-	return homevolume.Upgrade(b.Base, string(r.UID), r.Spec.NodeName, r.Status.SpecHash, newSpec, r.Status.PodUID, r.Status.Snapshot, r.Spec.Upgrade.Nonce)
 }

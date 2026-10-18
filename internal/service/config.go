@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
 	"path"
 	"regexp"
 	"strings"
@@ -29,15 +28,6 @@ func LoadConfig(r io.Reader) (Config, error) {
 	return c, c.Validate()
 }
 func (c *Config) Validate() error {
-	if c.CatalogDir != "" && (!path.IsAbs(c.CatalogDir) || path.Clean(c.CatalogDir) != c.CatalogDir || c.CatalogDir == "/" || strings.ContainsAny(c.CatalogDir, "\x00\r\n")) {
-		return fmt.Errorf("catalogDir must be a dedicated clean absolute directory on persistent local storage")
-	}
-	if c.LocalMetadataDir != "" && (!path.IsAbs(c.LocalMetadataDir) || path.Clean(c.LocalMetadataDir) != c.LocalMetadataDir || c.LocalMetadataDir == "/" || strings.ContainsAny(c.LocalMetadataDir, "\x00\r\n")) {
-		return fmt.Errorf("localMetadataDir must be a dedicated clean absolute directory")
-	}
-	if c.InitializeLocalMetadata && c.LocalMetadataDir == "" {
-		return fmt.Errorf("initializeLocalMetadata requires localMetadataDir")
-	}
 	if c.OperationRetentionSeconds == 0 {
 		c.OperationRetentionSeconds = 86400
 	}
@@ -58,6 +48,9 @@ func (c *Config) Validate() error {
 	if c.DataDir == "" {
 		c.DataDir = "data"
 	}
+	if strings.ContainsAny(c.DataDir, "\x00\r\n") || path.Clean(c.DataDir) != c.DataDir || c.DataDir == "." || c.DataDir == "/" {
+		return fmt.Errorf("dataDir must be a clean directory path other than . or /")
+	}
 	if c.StartupTimeoutSeconds == 0 {
 		c.StartupTimeoutSeconds = 120
 	}
@@ -67,17 +60,6 @@ func (c *Config) Validate() error {
 	if c.ImageBuild != (ImageBuildConfig{}) {
 		if !strings.HasPrefix(c.ImageBuild.Address, "unix:///") || !image.ValidRepository(c.ImageBuild.Repository) || c.ImageBuild.GuestBinary == "" {
 			return fmt.Errorf("imageBuild requires a Unix BuildKit address, registry repository, and guest binary")
-		}
-	}
-	if c.PublicURL != "" {
-		u, e := url.Parse(c.PublicURL)
-		if e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || strings.Trim(u.Path, "/") != "" {
-			return fmt.Errorf("publicUrl must be an HTTP(S) origin")
-		}
-	}
-	if c.ServiceDomain != "" {
-		if strings.ContainsAny(c.ServiceDomain, "/: @\\") || !strings.Contains(c.ServiceDomain, ".") || strings.ToLower(c.ServiceDomain) != c.ServiceDomain {
-			return fmt.Errorf("serviceDomain must be a lowercase DNS name")
 		}
 	}
 	if c.ClientID == "" {

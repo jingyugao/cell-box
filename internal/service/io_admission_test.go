@@ -34,7 +34,7 @@ func TestInternalIOWaitsForLifecycleAdmission(t *testing.T) {
 				b := st.Boxes[box.ID]
 				b.Box.OperationID = "pending-pause"
 				st.Boxes[box.ID] = b
-				st.Operations["pending-pause"] = operationRecord{Operation: Operation{ID: "pending-pause", Kind: "pause", TargetID: box.ID, Status: "running"}}
+				st.Operations["pending-pause"] = operationRecord{ClientID: "client-a", Operation: Operation{ID: "pending-pause", Kind: "pause", TargetID: box.ID, Status: "running"}}
 				return nil
 			})
 			if err != nil {

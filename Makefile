@@ -32,6 +32,8 @@ build:
 	mkdir -p "$$out/test" "$$out/config" "$$out/api"
 	cp -r test/scripts "$$out/test/"
 	cp -r test/fixtures "$$out/test/"
+	mkdir -p "$$out/test/e2e"
+	cp test/e2e/full.py test/e2e/Dockerfile "$$out/test/e2e/"
 	cp config/sample.json "$$out/config/"
 	cp api/openapi.yaml "$$out/api/"
 	cp LICENSE VERSION README.md "$$out/"

@@ -35,13 +35,14 @@ type warmRuntime interface {
 // substitutes one image/configuration for another. A miss uses ordinary restore.
 // One extra slot is allowed while replacing a lease approaching its deadline.
 type WarmPool struct {
-	Reconciler *Reconciler
-	Namespace  string
-	Size       int
-	LocalStore *warmtemplates.LocalStore
-	mu         sync.Mutex
-	failureMu  sync.Mutex
-	failures   map[string]warmFailure
+	Reconciler         *Reconciler
+	Namespace          string
+	Size               int
+	ReadDesired        func(context.Context) ([]warmtemplates.Template, string, error)
+	PublishObservation func(warmtemplates.Snapshot)
+	mu                 sync.Mutex
+	failureMu          sync.Mutex
+	failures           map[string]warmFailure
 }
 
 type warmFailure struct {
@@ -62,10 +63,6 @@ func (*WarmPool) NeedLeaderElection() bool { return true }
 func (p *WarmPool) Start(ctx context.Context) error {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
-	var changes <-chan struct{}
-	if p.LocalStore != nil {
-		changes = p.LocalStore.Changes(p.Namespace)
-	}
 	for {
 		if err := p.reconcile(ctx); err != nil {
 			ctrl.LoggerFrom(ctx).Error(err, "warm pool reconcile failed")
@@ -73,7 +70,6 @@ func (p *WarmPool) Start(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-changes:
 		case <-ticker.C:
 		}
 	}
@@ -181,31 +177,27 @@ func allocateWarmSlots(demands map[string]int, budget int) map[string]int {
 }
 
 func (p *WarmPool) reconcile(ctx context.Context) error {
-	if err := p.reconcilePools(ctx); err != nil {
+	if p.ReadDesired == nil {
+		return fmt.Errorf("warm pool desired-template reader is required")
+	}
+	configured, desiredHash, err := p.ReadDesired(ctx)
+	if err != nil {
+		return fmt.Errorf("read warm template configuration: %w", err)
+	}
+	if desiredHash == "" {
+		return fmt.Errorf("warm template configuration hash is empty")
+	}
+	if err := p.reconcilePools(ctx, configured); err != nil {
 		return err
 	}
-	return p.publishSnapshot(ctx)
+	return p.publishSnapshot(ctx, configured, desiredHash)
 }
 
-func (p *WarmPool) reconcilePools(ctx context.Context) error {
+func (p *WarmPool) reconcilePools(ctx context.Context, configured []warmtemplates.Template) error {
 	r := p.Reconciler
 	backend, ok := r.Runtime.(warmRuntime)
 	if !ok {
 		return fmt.Errorf("runtime does not support warm Pods")
-	}
-	var configured []warmtemplates.Template
-	if p.LocalStore != nil {
-		var initialized bool
-		configured, _, _, initialized = p.LocalStore.Read(p.Namespace)
-		if !initialized {
-			return nil
-		}
-	} else {
-		var err error
-		configured, err = warmtemplates.Read(ctx, r, p.Namespace)
-		if err != nil {
-			return err
-		}
 	}
 	pods, err := p.pods(ctx)
 	if err != nil {
@@ -350,47 +342,8 @@ func (p *WarmPool) reconcilePools(ctx context.Context) error {
 	return nil
 }
 
-func (p *WarmPool) publishSnapshot(ctx context.Context) error {
+func (p *WarmPool) publishSnapshot(ctx context.Context, configured []warmtemplates.Template, desiredHash string) error {
 	r := p.Reconciler
-	var configured []warmtemplates.Template
-	var desiredHash string
-	var generation int64
-	var desired *core.ConfigMap
-	if p.LocalStore != nil {
-		var initialized bool
-		configured, desiredHash, generation, initialized = p.LocalStore.Read(p.Namespace)
-		if !initialized {
-			return nil
-		}
-	} else {
-		key := types.NamespacedName{Namespace: p.Namespace, Name: warmtemplates.ConfigMapName}
-		desired = &core.ConfigMap{}
-		err := r.Get(ctx, key, desired)
-		if apierrors.IsNotFound(err) {
-			desired.Data = map[string]string{}
-			err = nil
-		}
-		if err != nil {
-			return err
-		}
-		configured, err = warmtemplates.Read(ctx, r, p.Namespace)
-		if err != nil {
-			return err
-		}
-		latest := &core.ConfigMap{}
-		latestErr := r.Get(ctx, key, latest)
-		if apierrors.IsNotFound(latestErr) {
-			if desired.ResourceVersion != "" {
-				return fmt.Errorf("warm template ConfigMap changed while publishing status")
-			}
-		} else if latestErr != nil {
-			return latestErr
-		} else if latest.ResourceVersion != desired.ResourceVersion {
-			return fmt.Errorf("warm template ConfigMap changed while publishing status")
-		}
-		desiredHash = warmtemplates.DesiredHash(desired.Data)
-		generation = desired.Generation
-	}
 	backend, ok := r.Runtime.(warmRuntime)
 	if !ok {
 		return fmt.Errorf("runtime does not support warm Pods")
@@ -487,30 +440,11 @@ func (p *WarmPool) publishSnapshot(ctx context.Context) error {
 		pools = append(pools, entry.observation)
 	}
 	sort.Slice(pools, func(i, j int) bool { return pools[i].PoolID < pools[j].PoolID })
-	snapshot := warmtemplates.Snapshot{NodeName: r.NodeName, DesiredHash: desiredHash, ObservedGeneration: generation, ObservedAt: observedAt, Pools: pools}
-	if p.LocalStore != nil {
-		p.LocalStore.Publish(p.Namespace, snapshot)
-		return nil
+	if p.PublishObservation == nil {
+		return fmt.Errorf("warm pool observation publisher is required")
 	}
-	data, err := warmtemplates.EncodeSnapshot(snapshot)
-	if err != nil {
-		return err
-	}
-	statusKey := types.NamespacedName{Namespace: p.Namespace, Name: warmtemplates.StatusConfigMapName(r.NodeName)}
-	status := &core.ConfigMap{}
-	err = r.Get(ctx, statusKey, status)
-	if apierrors.IsNotFound(err) {
-		status = &core.ConfigMap{ObjectMeta: meta.ObjectMeta{Namespace: p.Namespace, Name: statusKey.Name, Labels: map[string]string{"cellbox.local/warm-status": "true"}}, Data: data}
-		return r.Create(ctx, status)
-	}
-	if err != nil {
-		return err
-	}
-	if status.Data["snapshot.json"] == data["snapshot.json"] {
-		return nil
-	}
-	status.Data = data
-	return r.Update(ctx, status)
+	p.PublishObservation(warmtemplates.Snapshot{NodeName: r.NodeName, DesiredHash: desiredHash, ObservedAt: observedAt, Pools: pools})
+	return nil
 }
 
 func poolID(namespace, node, fingerprint string) string {
@@ -537,19 +471,13 @@ func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (result *co
 	}()
 	r := p.Reconciler
 	backend := r.Runtime.(warmRuntime)
-	var configured []warmtemplates.Template
-	if p.LocalStore != nil {
-		var initialized bool
-		configured, _, _, initialized = p.LocalStore.Read(p.Namespace)
-		if !initialized {
-			return nil, nil
-		}
-	} else {
-		var err error
-		configured, err = warmtemplates.Read(ctx, r, p.Namespace)
-		if err != nil {
-			return nil, err
-		}
+	if p.ReadDesired == nil {
+		return nil, fmt.Errorf("warm pool desired-template reader is required")
+	}
+	configured, _, err := p.ReadDesired(ctx)
+	if err != nil {
+		ctrl.LoggerFrom(ctx).Error(err, "cannot read warm templates; using cold restore")
+		return nil, nil
 	}
 	allowed := false
 	for _, template := range configured {

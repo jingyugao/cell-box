@@ -2,7 +2,6 @@ package node
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,12 +11,11 @@ import (
 
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/inventory"
-	"cellbox.local/cellbox/internal/objectstorage"
 	"cellbox.local/cellbox/internal/telemetry"
 	"golang.org/x/sync/errgroup"
 )
 
-type snapshotGarbage struct{ Owner, Snapshot, IndexETag string }
+type snapshotGarbage struct{ Owner, Snapshot string }
 
 func (b *Backend) snapshotConsumed(owner, snapshot string) bool {
 	base := filepath.Join(b.Base, "garbage", owner, snapshot)
@@ -33,7 +31,7 @@ func (b *Backend) snapshotConsumed(owner, snapshot string) bool {
 // local marker also prevents an interrupted CR transition republishing it.
 // Only exact-version physical deletion is left to the background collector.
 func (b *Backend) InvalidateSnapshot(ctx context.Context, w *api.ResumablePod) (resultErr error) {
-	ctx, span := telemetry.Start(ctx, "node.snapshot.invalidate", telemetry.String("storage.backend", objectstorage.MetadataBackend(b.Objects)))
+	ctx, span := telemetry.Start(ctx, "node.snapshot.invalidate")
 	defer func() { telemetry.End(span, resultErr) }()
 	owner, snapshot := string(w.UID), w.Status.Snapshot
 	if !ValidID(owner) || !ValidID(snapshot) {
@@ -51,25 +49,6 @@ func (b *Backend) InvalidateSnapshot(ctx context.Context, w *api.ResumablePod) (
 	var job snapshotGarbage
 	if err := ReadJSON(path, &job); os.IsNotExist(err) {
 		job = snapshotGarbage{Owner: owner, Snapshot: snapshot}
-		if b.Objects != nil {
-			b.inventoryMu.Lock()
-			data, version := []byte(b.inventoryState[owner]), b.inventoryVersions[owner]
-			b.inventoryMu.Unlock()
-			if version == "" {
-				var err error
-				data, version, err = readInventoryObject(ctx, b.Objects, "checkpoints/"+owner+"/metadata.json")
-				if err != nil && !errors.Is(err, objectstorage.ErrNotFound) {
-					return retryableStorage(err)
-				}
-			}
-			if version != "" {
-				var record inventory.Record
-				if json.Unmarshal(data, &record) != nil || record.RuntimeID != owner || record.Snapshot != snapshot {
-					return fmt.Errorf("refusing to invalidate another checkpoint's inventory")
-				}
-				job.IndexETag = version
-			}
-		}
 		if err := AtomicJSON(path, job); err != nil {
 			return err
 		}
@@ -79,12 +58,11 @@ func (b *Backend) InvalidateSnapshot(ctx context.Context, w *api.ResumablePod) (
 	if job.Owner != owner || job.Snapshot != snapshot {
 		return fmt.Errorf("invalid snapshot invalidation record")
 	}
-	if b.Objects != nil && job.IndexETag != "" {
-		if err := b.Objects.DeleteIfMatch(ctx, "checkpoints/"+owner+"/metadata.json", job.IndexETag); err != nil && !errors.Is(err, objectstorage.ErrNotFound) {
-			return retryableStorage(err)
+	if b.Checkpoints != nil {
+		if err := b.Checkpoints.DeleteCheckpoint(ctx, owner, snapshot); err != nil && !errors.Is(err, inventory.ErrNotFound) {
+			return err
 		}
 	}
-	b.clearInventoryState(owner)
 	if err := os.Rename(path, strings.TrimSuffix(path, ".intent")+".json"); err != nil {
 		if !os.IsNotExist(err) {
 			return err
@@ -95,8 +73,8 @@ func (b *Backend) InvalidateSnapshot(ctx context.Context, w *api.ResumablePod) (
 	return nil
 }
 
-// CollectGarbage never removes an owner prefix or inventory index: a newer
-// checkpoint may already exist when an old cleanup job is retried.
+// CollectGarbage removes only local checkpoint files after replay eligibility
+// has been invalidated in the persistent inventory store.
 func (b *Backend) CollectGarbage(ctx context.Context) error {
 	root := filepath.Join(b.Base, "garbage")
 	owners, err := os.ReadDir(root)

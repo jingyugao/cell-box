@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,7 +18,6 @@ import (
 	"io"
 	"net/http"
 	"path"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -26,28 +26,24 @@ import (
 	"cellbox.local/cellbox/internal/image"
 
 	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
 )
 
 type Service struct {
-	objects         objectstorage.Objects
-	config          Config
-	store           *Store
-	catalog         *catalog.Manager
-	providers       map[string]boxprovider.Provider
-	http            *http.Client
-	toolHTTP        *http.Client
-	ctx             context.Context
-	cancel          context.CancelFunc
-	wg              sync.WaitGroup
-	mu              sync.Mutex
-	admissions      keyedLocks
-	observerMu      sync.Mutex
-	observers       map[string]bool
-	runtimeFeeds    map[string]*runtimeFeed
-	templateRuntime templateRuntimeCache
-	gcMu            sync.Mutex
-	streams         map[string]activeStream
+	objects      objectstorage.Objects
+	config       Config
+	store        *Store
+	catalog      *catalog.Manager
+	providers    map[string]boxprovider.Provider
+	http         *http.Client
+	toolHTTP     *http.Client
+	ctx          context.Context
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	mu           sync.Mutex
+	admissions   keyedLocks
+	observerMu   sync.Mutex
+	runtimeFeeds map[string]*runtimeFeed
+	streams      map[string]activeStream
 }
 type activeStream struct {
 	boxID  string
@@ -58,9 +54,11 @@ func New(config Config, providers map[string]boxprovider.Provider) (*Service, er
 	return NewContext(context.Background(), config, providers)
 }
 
-// RuntimeObjects borrows the service's initialized asset/metadata store for the
+// RuntimeObjects borrows the service's optional archive payload store for the
 // embedded node runtime. Stop all runtime workers before closing the service.
 func (s *Service) RuntimeObjects() objectstorage.Objects { return s.objects }
+
+func (s *Service) CheckpointStore() inventory.CheckpointStore { return s.store }
 
 func NewContext(parent context.Context, config Config, providers map[string]boxprovider.Provider) (*Service, error) {
 	if err := config.Validate(); err != nil {
@@ -72,53 +70,20 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 		}
 	}
 	ctx, cancel := context.WithCancel(parent)
-	if config.ObjectStorage != (objectstorage.Config{}) && config.CatalogDir == "" && config.LocalMetadataDir == "" {
-		cancel()
-		return nil, errors.New("object storage deployments require catalogDir or localMetadataDir for persistent template metadata")
-	}
-	if config.LocalMetadataDir != "" && config.ObjectStorage == (objectstorage.Config{}) {
-		cancel()
-		return nil, errors.New("local metadata requires object storage for checkpoint and archive content")
-	}
-	var store *Store
-	var objects objectstorage.Objects
-	var err error
-	if config.ObjectStorage != (objectstorage.Config{}) {
-		localLock, lockErr := lockDataDirectory(config.DataDir)
-		if lockErr != nil {
-			cancel()
-			return nil, lockErr
-		}
-		objects, err = objectstorage.New(ctx, config.ObjectStorage)
-		if err == nil && config.LocalMetadataDir != "" {
-			var metadata *objectstorage.Metadata
-			metadata, err = objectstorage.OpenMetadata(ctx, config.LocalMetadataDir, objects, config.InitializeLocalMetadata)
-			if err == nil {
-				objects = metadata
-			}
-		}
-		if err == nil {
-			store, err = OpenObjectStore(ctx, objects)
-		}
-		if err != nil {
-			localLock.Close()
-			if closer, ok := objects.(io.Closer); ok && objects != nil {
-				closer.Close()
-			}
-		} else {
-			store.dir, store.lock = config.DataDir, localLock
-			if closer, ok := objects.(io.Closer); ok {
-				store.objectsCloser = closer
-			}
-		}
-	} else {
-		store, err = OpenStore(config.DataDir)
-	}
+	store, err := OpenStore(config.DataDir)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	store.onFailure = cancel
+	var objects objectstorage.Objects
+	if config.ObjectStorage != (objectstorage.Config{}) {
+		objects, err = objectstorage.New(ctx, config.ObjectStorage)
+		if err != nil {
+			store.Close()
+			cancel()
+			return nil, err
+		}
+	}
 	noRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	s := &Service{objects: objects, config: config, store: store, providers: providers,
 		http:     &http.Client{Transport: &http.Transport{Proxy: nil, ResponseHeaderTimeout: 35 * time.Second}, CheckRedirect: noRedirect},
@@ -131,16 +96,8 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 			Repository: config.ImageBuild.Repository, GuestBinary: config.ImageBuild.GuestBinary,
 		}
 	}
-	catalogDir := config.CatalogDir
-	if catalogDir == "" {
-		baseDir := config.LocalMetadataDir
-		if baseDir == "" {
-			baseDir = config.DataDir
-		}
-		catalogDir = filepath.Join(baseDir, "catalog")
-	}
 	s.catalog, err = catalog.Open(catalog.Config{
-		Dir:        catalogDir,
+		Dir: store.dir, DB: store.db,
 		ImageBuild: imageBuild, InsecureRegistry: config.ImageBuild.InsecureRegistry,
 		Builder: config.CatalogBuilder,
 		ResolveProfile: func(client, id string) (catalog.Profile, error) {
@@ -175,110 +132,12 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 		store.Close()
 		return nil, err
 	}
-	err = store.Update(func(st *State) error {
-		st.Routes = map[string]Route{}
-		now := time.Now().UTC()
-		for id, record := range st.Operations {
-			if record.Operation.Status == "queued" || record.Operation.Status == "running" {
-				if record.Operation.Kind == "image-delete" {
-					if _, exists := st.ImportedImages[record.Operation.TargetID]; !exists {
-						record.Operation.Status = "succeeded"
-						record.Operation.Version++
-						record.Operation.FinishedAt = &now
-						if record.Operation.Result == nil {
-							record.Operation.Result = map[string]string{"deleted": "true"}
-						}
-						st.Operations[id] = record
-						continue
-					}
-				}
-				if resumeOperationKind(record.Operation.Kind) {
-					if b, ok := st.Boxes[record.Operation.TargetID]; ok && b.Box.OperationID == id && !b.ResumePending {
-						// Older state files persisted Box ownership but not the guest
-						// unquiesce recovery marker. Migrate only the exact active op.
-						b.ResumePending = true
-						b.ResumeIntentID = id
-						b.Box.Version++
-						st.Boxes[record.Operation.TargetID] = b
-					}
-					st.Operations[id] = record
-					continue
-				}
-				if record.Operation.Kind == "upgrade" {
-					if b, ok := st.Boxes[record.Operation.TargetID]; ok && b.Box.OperationID == id && b.Upgrade != nil && b.Upgrade.Nonce == id {
-						st.Operations[id] = record
-						continue
-					}
-				}
-				record.Operation.Status = "failed"
-				record.Operation.Version++
-				record.Operation.Error = &APIError{Code: "OPERATION_INTERRUPTED", Message: "Service restarted during this operation; inspect the resource before retrying"}
-				record.Operation.FinishedAt = &now
-				st.Operations[id] = record
-				for bid, b := range st.Boxes {
-					if b.Box.OperationID == id {
-						b.Box.OperationID = ""
-						b.UpgradeImageID = ""
-						b.UpgradeTemplateID = ""
-						b.Box.Version++
-						st.Boxes[bid] = b
-					}
-				}
-				for eid, e := range st.Executions {
-					if e.OperationID == id {
-						e.State = "unknown"
-						st.Executions[eid] = e
-					}
-				}
-			}
-		}
-		return nil
-	})
+	err = store.InterruptOperations(ctx)
 	if err != nil {
 		cancel()
 		s.catalog.Close()
 		store.Close()
 		return nil, err
-	}
-	if store.records != nil {
-		var records []boxRecord
-		err := store.View(func(st State) error {
-			for _, b := range st.Boxes {
-				records = append(records, b)
-			}
-			return nil
-		})
-		if err != nil {
-			cancel()
-			s.catalog.Close()
-			store.Close()
-			return nil, err
-		}
-		// Seed the local projection once before opening the listener. Ongoing
-		// observation is driven by provider watches and bounded resyncs.
-		probe, stop := context.WithTimeout(ctx, 10*time.Second)
-		jobs := make(chan boxRecord, len(records))
-		for _, b := range records {
-			if b.Profile.Provider == "resumable-k8s-pod" && b.Handle.ID != "" {
-				jobs <- b
-			}
-		}
-		close(jobs)
-		var probes sync.WaitGroup
-		for n := 0; n < min(8, len(records)); n++ {
-			probes.Add(1)
-			go func() {
-				defer probes.Done()
-				for b := range jobs {
-					if probe.Err() != nil {
-						return
-					}
-					_, _ = s.observe(probe, b)
-				}
-			}()
-		}
-		probes.Wait()
-		stop()
 	}
 	if err := s.pruneMetadata(time.Now().UTC()); err != nil {
 		cancel()
@@ -287,17 +146,7 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 		return nil, err
 	}
 	s.startRetention()
-	s.recoverResumeOperations()
-	s.recoverUpgradeOperations()
 	s.startRuntimeObservers()
-	for _, profile := range config.Profiles {
-		if profile.Provider == "resumable-k8s-pod" {
-			if _, ok := providers[profile.Provider].(boxprovider.WarmTemplateProvider); ok {
-				s.startTemplateRuntime()
-				break
-			}
-		}
-	}
 	return s, nil
 }
 func (s *Service) Done() <-chan struct{} { return s.ctx.Done() }
@@ -313,13 +162,7 @@ func (s *Service) Close() error {
 	s.http.CloseIdleConnections()
 	return errors.Join(s.catalog.Close(), s.store.Close())
 }
-func (s *Service) hasOwnedUpgradeIntent(op Operation) bool {
-	if op.Kind != "upgrade" {
-		return false
-	}
-	b, err := s.rawBox(op.TargetID)
-	return err == nil && b.Box.OperationID == op.ID && b.Upgrade != nil && b.Upgrade.Nonce == op.ID
-}
+
 func randomID(prefix string) string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
@@ -331,7 +174,6 @@ func hash(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
 }
-func inputHash(input any) string { b, _ := json.Marshal(input); return hash(string(b)) }
 func cloneError(err error) *APIError {
 	var e *APIError
 	if errors.As(err, &e) {
@@ -352,28 +194,31 @@ func cloneError(err error) *APIError {
 	return &APIError{Code: "RUNTIME_ERROR", Message: "Runtime operation failed; inspect Cellbox and provider health"}
 }
 func profileCapabilities(p Profile) Capabilities {
-	capabilities := Capabilities{Exec: true, Files: true, HTTP: true, WebSocket: true, Freeze: p.Provider == "docker", Suspend: map[bool]string{true: "same-node-checkpoint", false: "none"}[p.Provider == "resumable-k8s-pod"], Archives: "workspace-best-effort", ProtectedTools: len(p.Guest.Tools) > 0, CredentialBatch: true, InternalServices: true, RootDebug: p.Guest.Debug.UID == 0 && p.Guest.Debug.GID == 0, SharedDirectory: p.SharedReadOnlyHostPath != "", PersistentHome: p.PersistentHome}
-	capabilities.DiskArchives = p.Provider == "resumable-k8s-pod" && p.PersistentHome
-	capabilities.MountedToolRuntime = capabilities.SharedDirectory && capabilities.ProtectedTools && capabilities.RootDebug && slices.Contains(p.MountedToolRuntimeImages, p.Image)
-	capabilities.MountedDebugHome = capabilities.MountedToolRuntime && p.DebugReadWriteHostPath == path.Join(p.SharedReadOnlyHostPath, "runtime/debug-homes") && slices.Contains(p.DebugHomeImages, p.Image)
-	return capabilities
-}
-func owned(st *State, client, id string) (boxRecord, error) {
-	b, ok := st.Boxes[id]
-	if !ok || b.ClientID != client {
-		return b, apiError("NOT_FOUND", "Box not found")
+	k8s := p.Provider == "resumable-k8s-pod"
+	c := Capabilities{Exec: true, Files: true, HTTP: true, WebSocket: true, InternalServices: true, Suspend: "none", Archives: "none"}
+	if k8s {
+		c.Suspend = "same-node-checkpoint"
+		if p.PersistentHome {
+			c.Archives = "stopped-workspace"
+		}
+		c.ProtectedTools = len(p.Guest.Tools) > 0
+		c.CredentialBatch = true
+		c.RootDebug = p.Guest.Debug.UID == 0 && p.Guest.Debug.GID == 0
+		c.SharedDirectory = p.SharedReadOnlyHostPath != ""
+		c.PersistentHome = p.PersistentHome
+		c.MountedToolRuntime = c.SharedDirectory && c.ProtectedTools && c.RootDebug && slices.Contains(p.MountedToolRuntimeImages, p.Image)
+		c.MountedDebugHome = c.MountedToolRuntime && p.DebugReadWriteHostPath == path.Join(p.SharedReadOnlyHostPath, "runtime/debug-homes") && slices.Contains(p.DebugHomeImages, p.Image)
 	}
-	return b, nil
+	return c
 }
+
 func (s *Service) box(client, id string) (boxRecord, error) {
-	records, err := s.store.BoxRecords(client, []string{id})
-	if err != nil {
-		return boxRecord{}, err
+	b, err := s.store.BoxRecord(id)
+	if err == nil && b.ClientID != client {
+		return boxRecord{}, apiError("NOT_FOUND", "Box not found")
 	}
-	// Read the current API capability from the Box's captured storage layout,
-	// including metadata written before disk-only archives were supported.
-	records[0].Box.Capabilities.DiskArchives = profileCapabilities(records[0].Profile).DiskArchives
-	return records[0], nil
+	b.Box.Capabilities = profileCapabilities(b.Profile)
+	return b, err
 }
 func (s *Service) profile(client, id string) (Profile, error) {
 	for _, p := range s.config.Profiles {
@@ -383,33 +228,23 @@ func (s *Service) profile(client, id string) (Profile, error) {
 	}
 	return Profile{}, apiError("NOT_FOUND", "Profile not found")
 }
-func busy(st *State, b boxRecord, leases bool) error {
-	if b.Upgrade != nil {
-		return apiError("BUSY", "Disk upgrade intent is awaiting runtime confirmation")
+func busy(tx *storeTx, b boxRecord) error {
+	if b.Box.OperationID == "" {
+		return nil
 	}
-	if b.Box.OperationID != "" {
-		if op, ok := st.Operations[b.Box.OperationID]; ok && (op.Operation.Status == "queued" || op.Operation.Status == "running") {
-			return apiError("BUSY", "Box has an active operation")
-		}
+	record, err := tx.Operation(b.Box.OperationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
 	}
-	if leases {
-		for _, lease := range st.Leases {
-			if lease.BoxID == b.Box.ID && lease.ExpiresAt.After(time.Now()) {
-				return apiError("BUSY", "Box has active usage leases")
-			}
-		}
+	if err != nil {
+		return err
+	}
+	if record.Operation.Status == "queued" || record.Operation.Status == "running" {
+		return apiError("BUSY", "Box has an active operation")
 	}
 	return nil
 }
-func activeExec(st *State, boxID string) bool {
-	for _, record := range st.Operations {
-		op := record.Operation
-		if op.Kind == "exec" && op.TargetID == boxID && (op.Status == "queued" || op.Status == "running") {
-			return true
-		}
-	}
-	return false
-}
+
 func (s *Service) streamBusy(id string) error {
 	for _, stream := range s.streams {
 		if stream.boxID == id {
@@ -418,165 +253,129 @@ func (s *Service) streamBusy(id string) error {
 	}
 	return nil
 }
-func (s *Service) prepareOperation(client, key, kind, target string, input any, prepare func(*State, *Operation) error) (Operation, bool, error) {
-	return s.prepareOperationContext(context.Background(), client, key, kind, target, input, prepare)
+func (s *Service) prepareOperation(client, kind, target string, prepare func(*storeTx, *Operation) error) (Operation, error) {
+	return s.prepareOperationContext(context.Background(), client, kind, target, prepare)
 }
-func (s *Service) prepareOperationContext(ctx context.Context, client, key, kind, target string, input any, prepare func(*State, *Operation) error) (result Operation, created bool, retErr error) {
-	ctx, span := telemetry.Start(ctx, "cellbox.operation.admission", telemetry.String("action", kind))
-	defer func() { telemetry.End(span, retErr) }()
-	if key == "" || len(key) > 200 {
-		return Operation{}, false, apiError("INVALID_REQUEST", "Idempotency-Key header (1..200 bytes) is required")
-	}
-	started := time.Now()
-	var operation Operation
-	var err error
-	defer func() {
-		if operation.TargetID != "" {
-			runtimeTiming(operation.TargetID, "cellbox.accept_"+kind, started, err)
-		}
-	}()
+func (s *Service) prepareOperationContext(ctx context.Context, client, kind, target string, prepare func(*storeTx, *Operation) error) (Operation, error) {
+	ctx, span := telemetry.Start(ctx, "cellbox.operation.admission", telemetry.String("operation.kind", kind), telemetry.String("sandbox.id", target))
+	defer span.End()
 	unlock := s.admissions.lock(target)
 	defer unlock()
-	key = client + ":" + kind + ":" + target + ":" + key
-	digest := inputHash(input)
-	fresh := false
-	update := s.store.Update
-	if kind == "resume" {
-		update = func(fn func(*State) error) error { return s.store.UpdateBoxContext(ctx, target, fn) }
+	if target != "" && kind != "exec" {
+		s.mu.Lock()
+		err := s.streamBusy(target)
+		s.mu.Unlock()
+		if err != nil {
+			return Operation{}, err
+		}
 	}
-	err = update(func(st *State) error {
-		if previous, ok := st.Keys[key]; ok {
-			if previous.Expired {
-				return apiError("OPERATION_EXPIRED", "Operation history has expired; this idempotency key cannot be reused")
-			}
-			if previous.Hash != digest {
-				return apiError("CONFLICT", "Idempotency key was already used with different input")
-			}
-			operation = st.Operations[previous.OperationID].Operation
-			return nil
-		}
-		if target != "" && kind != "exec" && kind != "archive" {
-			s.mu.Lock()
-			err := s.streamBusy(target)
-			s.mu.Unlock()
-			if err != nil {
-				return err
-			}
-		}
-		operation = Operation{ID: randomID("op-"), Kind: kind, TargetID: target, Status: "running", Version: 1, CreatedAt: time.Now().UTC()}
-		if err := prepare(st, &operation); err != nil {
+	op := Operation{ID: randomID("op-"), Kind: kind, TargetID: target, Status: "running", Version: 1, CreatedAt: time.Now().UTC()}
+	err := s.store.Write(ctx, func(tx *storeTx) error {
+		if err := prepare(tx, &op); err != nil {
 			return err
 		}
-		st.Operations[operation.ID] = operationRecord{Operation: operation, ClientID: client}
-		st.Keys[key] = keyRecord{Hash: digest, OperationID: operation.ID}
-		fresh = true
-		return nil
+		return tx.PutOperation(operationRecord{Operation: op, ClientID: client})
 	})
-	return operation, fresh, err
+	return op, err
 }
+
 func (s *Service) launch(op Operation, work func(context.Context) (map[string]string, error)) {
-	s.launchWithCommit(op, work, nil)
+	s.launchWithCommitContext(s.ctx, op, work, nil)
 }
-
-func (s *Service) launchWithCommit(op Operation, work func(context.Context) (map[string]string, error), commit func(*State) error) {
-	s.launchWithCommitContext(s.ctx, op, work, commit)
-}
-func (s *Service) launchWithCommitContext(request context.Context, op Operation, work func(context.Context) (map[string]string, error), commit func(*State) error) {
-	s.launchWithCompletion(request, op, work, commit, nil)
-}
-
-func (s *Service) launchWithCompletion(request context.Context, op Operation, work func(context.Context) (map[string]string, error), commit func(*State) error, completed func(error)) {
+func (s *Service) launchWithCommitContext(request context.Context, op Operation, work func(context.Context) (map[string]string, error), commit func(*storeTx) error) {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		ctx, cancel := context.WithTimeout(telemetry.Detached(request, s.ctx), 15*time.Minute)
 		defer cancel()
-		// Resume already owns a span from admission through durable completion.
-		// Its worker and controller must share that lifetime, not a dispatch span.
-		operationSpan := trace.SpanFromContext(request)
-		if !resumeOperationKind(op.Kind) {
-			ctx, operationSpan = telemetry.Start(ctx, "cellbox.operation."+op.Kind, telemetry.String("sandbox.id", op.TargetID), telemetry.String("operation.id", op.ID))
+		ctx, span := telemetry.Start(ctx, "cellbox.operation."+op.Kind, telemetry.String("sandbox.id", op.TargetID), telemetry.String("operation.id", op.ID))
+		defer span.End()
+		result, workErr := work(ctx)
+		if s.ctx.Err() != nil {
+			workErr = apiError("UNKNOWN_OUTCOME", "Service stopped before completion; inspect the resource before retrying")
 		}
-		var completionErr error
-		defer func() {
-			if !resumeOperationKind(op.Kind) {
-				operationSpan.End()
-			}
-			if completed != nil {
-				completed(completionErr)
-			}
-		}()
-		result, err := work(ctx)
-		// A process shutdown is not a failed lifecycle transition. Keep both the
-		// operation and Box ownership durable so the next API process can reconcile
-		// actual runtime state and continue the same intent.
-		if s.ctx.Err() != nil && (resumeOperationKind(op.Kind) || s.hasOwnedUpgradeIntent(op)) {
-			completionErr = context.Canceled
-			return
-		}
-		saveStarted := time.Now()
-		persistCtx, persistSpan := telemetry.Start(ctx, "cellbox.persist_completion")
-		update := s.store.Update
-		if resumeOperationKind(op.Kind) {
-			update = func(fn func(*State) error) error { return s.store.UpdateBoxContext(persistCtx, op.TargetID, fn) }
-		}
-		saveErr := update(func(st *State) error {
-			record, exists := st.Operations[op.ID]
-			if !exists || (record.Operation.Status != "queued" && record.Operation.Status != "running") {
-				err = boxprovider.ErrStaleTransition
+		persist, cancelPersist := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancelPersist()
+		saveErr := s.store.Write(persist, func(tx *storeTx) error {
+			record, err := tx.Operation(op.ID)
+			if err != nil {
 				return err
 			}
-			if err == nil && commit != nil {
-				err = commit(st)
+			if record.Operation.Status != "running" && record.Operation.Status != "queued" {
+				return boxprovider.ErrStaleTransition
+			}
+			if workErr == nil && commit != nil {
+				workErr = commit(tx)
 			}
 			now := time.Now().UTC()
 			record.Operation.FinishedAt = &now
 			record.Operation.Version++
 			record.Operation.Result = result
-			if err != nil {
+			record.Operation.Status = "succeeded"
+			if workErr != nil {
 				record.Operation.Status = "failed"
-				record.Operation.Error = cloneError(err)
-			} else {
-				record.Operation.Status = "succeeded"
+				record.Operation.Error = cloneError(workErr)
 			}
-			if b, ok := st.Boxes[op.TargetID]; ok && b.Box.OperationID == op.ID {
-				preserveUpgradeIntent := op.Kind == "upgrade" && err != nil && b.Upgrade != nil && b.Upgrade.Nonce == op.ID
-				if !preserveUpgradeIntent {
-					b.Box.OperationID = ""
-					b.UpgradeImageID = ""
-					b.UpgradeTemplateID = ""
-					if op.Kind == "upgrade" && err == nil {
-						b.Upgrade = nil
+			b, boxErr := tx.Box("", op.TargetID)
+			if boxErr == nil && b.Box.OperationID == op.ID {
+				if workErr != nil && op.Kind == "resume" {
+					s.observerMu.Lock()
+					feed := s.runtimeFeeds[b.Box.ID]
+					var latest boxprovider.Observation
+					observed := feed != nil && feed.handle == b.Handle && feed.observed
+					if observed {
+						latest = feed.observation
 					}
-					b.Box.Version++
+					s.observerMu.Unlock()
+					if observed {
+						if _, err = projectRuntimeObservation(persist, &b, latest); err != nil {
+							return err
+						}
+					}
+					b.Box.Error = cloneError(workErr)
 				}
-				st.Boxes[op.TargetID] = b
-				if record.Operation.Status == "succeeded" && lifecycleOperationKind(record.Operation.Kind) {
+				b.Box.OperationID = ""
+				b.Box.Version++
+				if workErr != nil && (op.Kind == "create" || op.Kind == "restore") {
+					b.Box.Phase = "failed"
+					b.Box.Error = cloneError(workErr)
+				}
+				if err = tx.PutBox(b); err != nil {
+					return err
+				}
+				if workErr == nil && lifecycleOperationKind(op.Kind) {
 					box := b.Box
 					record.Operation.Box = &box
 				}
-			} else if lifecycleOperationKind(record.Operation.Kind) && err == nil {
+			} else if lifecycleOperationKind(op.Kind) && workErr == nil {
+				workErr = boxprovider.ErrStaleTransition
 				record.Operation.Status = "failed"
-				record.Operation.Error = &APIError{Code: "STALE_TRANSITION", Message: "Lifecycle operation lost ownership before completion"}
-				record.Operation.Box = nil
-				err = boxprovider.ErrStaleTransition
+				record.Operation.Error = cloneError(workErr)
+			} else if boxErr != nil {
+				var apiErr *APIError
+				if !errors.As(boxErr, &apiErr) || apiErr.Code != "NOT_FOUND" {
+					return boxErr
+				}
 			}
-			st.Operations[op.ID] = record
-			return nil
+			return tx.PutOperation(record)
 		})
-		telemetry.End(persistSpan, saveErr)
-		completionErr = errors.Join(err, saveErr)
-		if err != nil || saveErr != nil {
-			operationSpan.SetStatus(codes.Error, "")
+		if workErr != nil || saveErr != nil {
+			span.SetStatus(codes.Error, "")
 		}
-		if saveErr == nil {
-			operationSpan.AddEvent("cellbox.operation.published")
-		}
-		runtimeTiming(op.TargetID, "cellbox.persist_completion", saveStarted, saveErr)
-		if saveErr != nil && !errors.Is(saveErr, boxprovider.ErrStaleTransition) {
-			fmt.Printf("Cellbox could not persist operation completion %s\n", op.ID)
+		if saveErr != nil {
+			fmt.Printf("Cellbox could not persist operation completion %s: %v\n", op.ID, saveErr)
+			if !errors.Is(saveErr, boxprovider.ErrStaleTransition) && s.cancel != nil {
+				s.cancel()
+			}
 		}
 	}()
+}
+func lifecycleOperationKind(kind string) bool {
+	switch kind {
+	case "create", "restore", "suspend", "resume", "destroy", "activate":
+		return true
+	}
+	return false
 }
 
 // The same event shape as CoCell runtime logs lets the read-only timing tool
@@ -606,12 +405,10 @@ func (s *Service) rawBox(id string) (boxRecord, error) {
 	return s.store.BoxRecord(id)
 }
 func (s *Service) saveHandle(id string, handle boxprovider.Handle) error {
-	return s.store.Update(func(st *State) error {
-		b := st.Boxes[id]
+	return s.store.ChangeBox(context.Background(), id, func(b *boxRecord) error {
 		b.Handle = handle
 		b.Box.ImageID = handle.ImageID
 		b.Box.Version++
-		st.Boxes[id] = b
 		return nil
 	})
 }
@@ -632,7 +429,7 @@ func (s *Service) observe(ctx context.Context, b boxRecord) (result Box, retErr 
 		if missing {
 			ob.Phase = "deleted"
 		}
-		updated, err := s.applyRuntimeObservation(ctx, b, ob, missing)
+		updated, err := s.applyRuntimeObservation(ctx, b, ob)
 		if errors.Is(err, errBoxObservationConflict) {
 			if ctx.Err() != nil {
 				return Box{}, ctx.Err()
@@ -651,102 +448,90 @@ func (s *Service) observe(ctx context.Context, b boxRecord) (result Box, retErr 
 	return Box{}, apiError("CONFLICT", "Box changed repeatedly while observing runtime")
 }
 
-func (s *Service) applyRuntimeObservation(ctx context.Context, b boxRecord, ob boxprovider.Observation, missing bool) (Box, error) {
+func (s *Service) applyRuntimeObservation(ctx context.Context, b boxRecord, ob boxprovider.Observation) (Box, error) {
 	updated, err := s.store.UpdateObservedBox(b, func(current *boxRecord) (bool, error) {
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
-		previousError := current.Box.Error
-		phase := ob.Phase
-		if phase == "deleted" {
-			if current.Box.Phase == "deleting" || current.Box.Phase == "deleted" {
-				phase = "deleted"
-			} else {
-				phase = "failed"
-				current.Box.Error = &APIError{Code: "RUNTIME_LOST", Message: "Runtime disappeared; automatic cold restart is disabled"}
-			}
-		}
-		if current.Staged && phase == "running" {
-			if current.Box.Phase == "failed" {
-				phase = "failed"
-			} else if current.RestoreComplete {
-				phase = "staged"
-			} else {
-				phase = "restoring"
-			}
-		}
-		if current.Box.Phase == "deleting" && phase != "deleted" {
-			phase = "deleting"
-		}
-		target := map[string]string{"freezing": "frozen", "unfreezing": "running", "suspending": "suspended", "resuming": "running", "rebuilding": "running", "upgrading": "staged"}[current.Box.Phase]
-		if current.Box.OperationID != "" && target != "" && phase != target && phase != "failed" && phase != "deleted" {
-			phase = current.Box.Phase
-		}
-		versionChanged := false
-		if previousError != nil && current.Box.Error != nil {
-			versionChanged = versionChanged || *previousError != *current.Box.Error
-		} else {
-			versionChanged = versionChanged || previousError != current.Box.Error
-		}
-		// The provider generation is authoritative even when there is no
-		// current execution identity (for example, a suspended ResumablePod).
-		// Keep it monotonic so a stale observation cannot weaken generation
-		// fencing after a newer execution has already been observed.
-		if ob.Generation > current.Box.Generation {
-			current.Box.Generation = ob.Generation
-			versionChanged = true
-		}
-		if current.ExecutionID != ob.ExecutionID {
-			current.ExecutionID = ob.ExecutionID
-			if ob.ExecutionID != "" && ob.Generation == 0 {
-				current.Box.Generation++
-			}
-			versionChanged = true
-		}
-		current.Box.ExecutionID = current.ExecutionID
-		if current.TransitionID != ob.TransitionID {
-			current.TransitionID = ob.TransitionID
-			versionChanged = true
-		}
-		if current.ObservedTransitionID != ob.ObservedTransitionID {
-			current.ObservedTransitionID = ob.ObservedTransitionID
-			versionChanged = true
-		}
-		if current.ResumePending {
-			if ob.Phase == "running" {
-				if current.Box.OperationID == "" && !current.ResumeNeedsGuest &&
-					((current.ResumeIntentID != "" && ob.TransitionID == current.ResumeIntentID && ob.ObservedTransitionID == current.ResumeIntentID) || (ob.TransitionID == "" && ob.ObservedTransitionID == "")) {
-					// Once the Guest stage is confirmed, keep its execution fence.
-					// Observation must never retarget a failed repair to another Pod.
-					current.ResumeNeedsGuest = true
-					current.ResumeExecutionID = ob.ExecutionID
-					current.ResumeTransitionID = ob.TransitionID
-					current.ResumeObservedTransitionID = ob.ObservedTransitionID
-					versionChanged = true
-				}
-				if current.Box.OperationID == "" || current.ResumeNeedsGuest {
-					phase = "resuming"
-				}
-			} else if ob.Phase == "suspended" && current.ResumeNeedsGuest {
-				current.ResumeNeedsGuest = false
-				versionChanged = true
-			}
-		}
-		versionChanged = versionChanged || current.Box.Phase != phase
-		current.Box.Phase = phase
-		if versionChanged {
-			current.Box.Version++
-		}
-		persistChanged := versionChanged
-		if current.Box.ObservedAt == nil || time.Since(*current.Box.ObservedAt) >= 5*time.Second || versionChanged {
-			now := time.Now().UTC()
-			current.Box.ObservedAt = &now
-			persistChanged = true
-		}
-		return persistChanged, nil
+		return projectRuntimeObservation(ctx, current, ob)
 	})
 	return updated.Box, err
 }
+
+func projectRuntimeObservation(ctx context.Context, current *boxRecord, ob boxprovider.Observation) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	previousError := current.Box.Error
+	phase := ob.Phase
+	if current.Box.Phase == "resuming" && phase == "running" && !ob.GuestReady {
+		phase = "resuming"
+	}
+	if phase == "deleted" {
+		if current.Box.Phase == "deleting" || current.Box.Phase == "deleted" {
+			phase = "deleted"
+		} else {
+			phase = "failed"
+			current.Box.Error = &APIError{Code: "RUNTIME_LOST", Message: "Runtime disappeared; automatic cold restart is disabled"}
+		}
+	}
+	if current.Staged && phase == "running" {
+		if current.Box.Phase == "failed" {
+			phase = "failed"
+		} else if current.RestoreComplete {
+			phase = "staged"
+		} else {
+			phase = "restoring"
+		}
+	}
+	if current.Box.Phase == "deleting" && phase != "deleted" {
+		phase = "deleting"
+	}
+	target := map[string]string{"suspending": "suspended", "resuming": "running"}[current.Box.Phase]
+	if current.Box.OperationID != "" && target != "" && phase != target && phase != "failed" && phase != "deleted" {
+		phase = current.Box.Phase
+	}
+	versionChanged := false
+	if previousError != nil && current.Box.Error != nil {
+		versionChanged = versionChanged || *previousError != *current.Box.Error
+	} else {
+		versionChanged = versionChanged || previousError != current.Box.Error
+	}
+	// The provider generation is authoritative even when there is no
+	// current execution identity (for example, a suspended ResumablePod).
+	// Keep it monotonic so a stale observation cannot weaken generation
+	// fencing after a newer execution has already been observed.
+	if ob.Generation > current.Box.Generation {
+		current.Box.Generation = ob.Generation
+		versionChanged = true
+	}
+	if current.ExecutionID != ob.ExecutionID {
+		current.ExecutionID = ob.ExecutionID
+		if ob.ExecutionID != "" && ob.Generation == 0 {
+			current.Box.Generation++
+		}
+		versionChanged = true
+	}
+	current.Box.ExecutionID = current.ExecutionID
+	if current.TransitionID != ob.TransitionID {
+		current.TransitionID = ob.TransitionID
+		versionChanged = true
+	}
+	if current.ObservedTransitionID != ob.ObservedTransitionID {
+		current.ObservedTransitionID = ob.ObservedTransitionID
+		versionChanged = true
+	}
+	versionChanged = versionChanged || current.Box.Phase != phase
+	current.Box.Phase = phase
+	if versionChanged {
+		current.Box.Version++
+	}
+	persistChanged := versionChanged
+	if current.Box.ObservedAt == nil || time.Since(*current.Box.ObservedAt) >= 5*time.Second || versionChanged {
+		now := time.Now().UTC()
+		current.Box.ObservedAt = &now
+		persistChanged = true
+	}
+	return persistChanged, nil
+}
+
 func (s *Service) connection(ctx context.Context, b boxRecord) (boxprovider.Connection, error) {
 	p := s.providers[b.Profile.Provider]
 	if fenced, ok := p.(boxprovider.FencedGuestProvider); ok {
@@ -897,60 +682,6 @@ func (s *Service) waitStateTransition(ctx context.Context, id, want string, chec
 	}
 }
 
-// Restored Guests are already listening when the runtime becomes ready. Their
-// diagnostic health check does not gate operation completion or change state.
-func (s *Service) checkHealthAsync(b boxRecord) {
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		ctx, cancel := context.WithTimeout(s.ctx, min(10*time.Second, time.Duration(s.config.StartupTimeoutSeconds)*time.Second))
-		defer cancel()
-		for ctx.Err() == nil {
-			current, err := s.rawBox(b.Box.ID)
-			if err != nil || current.ExecutionID != b.ExecutionID || current.Box.Generation != b.Box.Generation || current.Box.Phase != b.Box.Phase || (current.Box.OperationID != "" && current.Box.OperationID != b.Box.OperationID) {
-				return
-			}
-			probe, stop := context.WithTimeout(ctx, time.Second)
-			started := time.Now()
-			res, err := s.guestRequest(probe, b, "GET", "/healthz", nil)
-			if err == nil {
-				res.Body.Close()
-				if res.StatusCode != http.StatusOK {
-					err = fmt.Errorf("Guest health check returned HTTP %d", res.StatusCode)
-				}
-			}
-			stop()
-			runtimeTiming(b.Box.ID, "cellbox.health_probe_async", started, err)
-			if err == nil {
-				return
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(250 * time.Millisecond):
-			}
-		}
-	}()
-}
-
-func (s *Service) resumeGuest(ctx context.Context, b boxRecord) error {
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(s.config.StartupTimeoutSeconds)*time.Second)
-	defer cancel()
-	for {
-		err := s.guestAction(ctx, b, "/v1/unquiesce")
-		if !errors.Is(err, boxprovider.ErrNotReady) {
-			return err
-		}
-		// Running can precede the controller allowing traffic. Wait for that
-		// boundary without issuing a request to an unpublished Service endpoint.
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
-}
-
 // Startup and read RPCs can spawn short protected-tool calls after the RPC
 // itself finishes. Wait briefly for those admitted calls to drain before
 // checkpointing; Guest quiesce remains the atomic admission boundary.
@@ -1008,42 +739,43 @@ type createRequest struct {
 	Staged     bool   `json:"staged,omitempty"`
 }
 
-func (s *Service) create(client, key string, input createRequest, archiveID string, acceptImageChange bool) (Operation, error) {
+func (s *Service) create(client string, input createRequest, archiveID string, acceptImageChange bool) (Operation, error) {
 	if input.OwnerKey == "" || len(input.OwnerKey) > 256 {
 		return Operation{}, apiError("INVALID_REQUEST", "ownerKey must contain 1..256 bytes")
 	}
 	if (input.TemplateID == "") == (input.RevisionID == "") {
 		return Operation{}, apiError("INVALID_REQUEST", "Specify exactly one of templateId or revisionId")
 	}
-	var profile Profile
-	var template Template
-	var revisionID string
+	tmpl, err := s.resolveTemplate(client, input.TemplateID, input.RevisionID, archiveID != "")
+	if err != nil {
+		return Operation{}, err
+	}
+	profile := tmpl.Profile
+	if profile.Provider != "resumable-k8s-pod" && (archiveID != "" || input.Staged) {
+		return Operation{}, boxprovider.ErrUnsupported
+	}
+	if archiveID != "" && (s.objects == nil || !profile.PersistentHome || !workspaceUnderPersistentHome(profile.Guest.Workspace)) {
+		return Operation{}, apiError("UNSUPPORTED_CAPABILITY", "Restore requires object storage and a persistent HOME workspace")
+	}
 	kind := "create"
 	if archiveID != "" {
 		kind = "restore"
 	}
 	var source Archive
-	op, fresh, err := s.prepareOperation(client, key, kind, "", struct {
-		createRequest
-		ArchiveID         string
-		AcceptImageChange bool
-	}{input, archiveID, acceptImageChange}, func(st *State, op *Operation) error {
-		tmpl, err := s.resolveTemplate(client, input.TemplateID, input.RevisionID, archiveID != "")
-		if err != nil {
-			return err
-		}
-		profile, template = tmpl.Profile, tmpl.Template
-		revisionID = tmpl.RevisionID
+	op, err := s.prepareOperation(client, kind, "", func(tx *storeTx, op *Operation) error {
 		if archiveID != "" {
-			a, ok := st.Archives[archiveID]
-			if !ok || a.ClientID != client || a.Deleting {
-				return apiError("NOT_FOUND", "Archive not found")
+			a, err := tx.Archive(client, archiveID)
+			if err != nil {
+				return err
+			}
+			if a.Deleting {
+				return apiError("CONFLICT", "Archive is being deleted")
 			}
 			source = a.Archive
 			if source.Agent != profile.Guest.Agent {
 				return apiError("ARCHIVE_INCOMPATIBLE", "Archive agent UID/GID differs from target profile")
 			}
-			if source.ImageID != profile.Image && profile.Provider == "resumable-k8s-pod" && !(source.Portable && acceptImageChange) {
+			if source.ImageID != profile.Image && !(source.Portable && acceptImageChange) {
 				return apiError("ARCHIVE_INCOMPATIBLE", "Archive image differs from target image")
 			}
 		}
@@ -1052,17 +784,17 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 		if archiveID != "" {
 			op.Result = map[string]string{"archiveId": archiveID}
 		}
-		state := "creating"
+		phase := "creating"
 		if archiveID != "" {
-			state = "restoring"
+			phase = "restoring"
 		}
-		st.Boxes[id] = boxRecord{Box: Box{ID: id, TemplateID: template.ID, RevisionID: revisionID, TemplateName: template.Name, TemplateVersion: template.Version, OwnerKey: input.OwnerKey, ProfileID: profile.ID, Phase: state, Version: 1, Image: profile.Image, Workspace: profile.Guest.Workspace, Capabilities: profileCapabilities(profile), OperationID: op.ID, CreatedAt: time.Now().UTC()}, ClientID: client, Profile: profile, Staged: archiveID != "" || input.Staged, RestoreComplete: input.Staged && archiveID == "", RestoreArchiveID: archiveID, AcceptImageChange: acceptImageChange}
-		record := st.Boxes[id]
-		record.Box.ImportedImageID = template.ImportedImageID
-		st.Boxes[id] = record
-		return nil
+		b := boxRecord{Box: Box{ID: id, TemplateID: tmpl.Template.ID, RevisionID: tmpl.RevisionID, TemplateName: tmpl.Template.Name, TemplateVersion: tmpl.Template.Version,
+			OwnerKey: input.OwnerKey, ProfileID: profile.ID, Phase: phase, Version: 1, Image: profile.Image, Workspace: profile.Guest.Workspace,
+			Capabilities: profileCapabilities(profile), OperationID: op.ID, CreatedAt: time.Now().UTC()},
+			ClientID: client, Profile: profile, Staged: archiveID != "" || input.Staged, RestoreComplete: input.Staged && archiveID == "", RestoreArchiveID: archiveID, AcceptImageChange: acceptImageChange}
+		return tx.PutBox(b)
 	})
-	if err != nil || !fresh {
+	if err != nil {
 		return op, err
 	}
 	s.launch(op, func(ctx context.Context) (map[string]string, error) {
@@ -1074,131 +806,97 @@ func (s *Service) create(client, key string, input createRequest, archiveID stri
 			if err = s.restoreArchive(ctx, box.ID, source); err != nil {
 				return nil, err
 			}
-			if err = s.store.Update(func(st *State) error {
-				v := st.Boxes[box.ID]
-				v.RestoreComplete = true
-				v.Box.Phase = "staged"
-				v.Box.Version++
-				st.Boxes[box.ID] = v
+			if err = s.store.ChangeBox(ctx, box.ID, func(b *boxRecord) error {
+				b.RestoreComplete = true
+				b.Box.Phase = "staged"
+				b.Box.Version++
 				return nil
 			}); err != nil {
 				return nil, err
 			}
 		}
-		return map[string]string{"boxId": box.ID, "templateId": template.ID, "revisionId": revisionID}, nil
+		return map[string]string{"boxId": box.ID, "templateId": tmpl.Template.ID, "revisionId": tmpl.RevisionID}, nil
 	})
 	return op, nil
 }
-func (s *Service) action(client, key, id, action string) (Operation, error) {
-	return s.actionContext(context.Background(), client, key, id, action)
+func (s *Service) action(client, id, action string) (Operation, error) {
+	return s.actionContextWithGeneration(context.Background(), client, id, action, nil)
 }
-func (s *Service) actionContext(request context.Context, client, key, id, action string) (result Operation, retErr error) {
-	return s.actionContextWithGeneration(request, client, key, id, action, nil)
-}
-func (s *Service) actionContextWithGeneration(request context.Context, client, key, id, action string, expectedGeneration *uint64) (result Operation, retErr error) {
-	var total trace.Span
-	handedOff := false
-	if action == "resume" {
-		request, total = telemetry.Start(request, "cellbox.resume.total", telemetry.String("sandbox.id", id))
-		defer func() {
-			if !handedOff {
-				telemetry.End(total, retErr)
-			}
-		}()
-	}
-	allowed := map[string]bool{"freeze": true, "unfreeze": true, "suspend": true, "resume": true, "destroy": true, "activate": true, "reconcile": true, "rebuild": true}
-	if !allowed[action] {
-		return Operation{}, apiError("INVALID_REQUEST", "Unknown lifecycle action")
+func (s *Service) actionContextWithGeneration(ctx context.Context, client, id, action string, expectedGeneration *uint64) (Operation, error) {
+	switch action {
+	case "suspend", "resume", "destroy", "activate":
+	default:
+		return Operation{}, apiError("NOT_FOUND", "Endpoint not found")
 	}
 	var b boxRecord
-	op, fresh, err := s.prepareOperationContext(request, client, key, action, id, nil, func(st *State, op *Operation) error {
+	op, err := s.prepareOperationContext(ctx, client, action, id, func(tx *storeTx, op *Operation) error {
 		var err error
-		b, err = owned(st, client, id)
+		b, err = tx.Box(client, id)
 		if err != nil {
 			return err
 		}
-		// This check runs only for a fresh idempotency key and in the same Box
-		// transaction as phase admission. Existing keys replay their original
-		// operation before this callback, including legacy no-body resume keys.
+		if b.Profile.Provider != "resumable-k8s-pod" && action != "destroy" {
+			return boxprovider.ErrUnsupported
+		}
 		if expectedGeneration != nil && *expectedGeneration != b.Box.Generation {
 			return apiError("STALE_GENERATION", "Lifecycle request targets another Box generation")
 		}
-		if err = busy(st, b, true); err != nil {
+		if err = busy(tx, b); err != nil {
 			return err
 		}
-		if activeExec(st, id) {
+		active, err := tx.HasActiveExecution(id)
+		if err != nil {
+			return err
+		}
+		if active {
 			return apiError("BUSY", "Box has an active execution")
 		}
-		if b.Box.Phase == "deleted" && action != "destroy" {
-			return apiError("CONFLICT", "Box was deleted")
-		}
-		if b.Staged && (b.Box.Phase == "failed" || !b.RestoreComplete) && action != "destroy" {
+		if action != "destroy" && b.Staged && (b.Box.Phase == "failed" || !b.RestoreComplete) {
 			return apiError("CONFLICT", "Failed or incomplete restore candidate must be discarded")
 		}
-		if (action == "suspend" || action == "resume") && b.Profile.Provider != "resumable-k8s-pod" {
-			return boxprovider.ErrUnsupported
-		}
-		if (action == "freeze" || action == "unfreeze") && b.Profile.Provider != "docker" {
-			return boxprovider.ErrUnsupported
-		}
-		if action == "activate" && (!b.Staged || !b.RestoreComplete || b.Box.Phase != "staged") {
-			return apiError("CONFLICT", "Box is not a staged candidate")
-		}
-		if action == "rebuild" && (b.Profile.Provider != "resumable-k8s-pod" || !b.Profile.PersistentHome) {
-			return boxprovider.ErrUnsupported
-		}
-		if action == "rebuild" && b.Box.Phase != "failed" {
-			return apiError("CONFLICT", "Only a failed box can rebuild its persistent HOME")
-		}
-		if action == "suspend" && b.Box.Phase != "running" {
-			return apiError("CONFLICT", "Only a running box can suspend")
-		}
-		if action == "resume" && b.Box.Phase != "suspended" {
-			return apiError("CONFLICT", "Only a suspended box can resume")
-		}
-		if action == "freeze" && b.Box.Phase != "running" {
-			return apiError("CONFLICT", "Only a running box can freeze")
-		}
-		if action == "unfreeze" && b.Box.Phase != "frozen" {
-			return apiError("CONFLICT", "Only a frozen box can unfreeze")
+		switch action {
+		case "suspend":
+			if _, ok := s.providers[b.Profile.Provider].(boxprovider.TransitionProvider); !ok {
+				return boxprovider.ErrUnsupported
+			}
+			if b.Box.Phase != "running" {
+				return apiError("CONFLICT", "Only a running box can suspend")
+			}
+		case "resume":
+			if b.Box.Phase != "suspended" {
+				return apiError("CONFLICT", "Only a suspended box can resume")
+			}
+			if _, ok := s.providers[b.Profile.Provider].(boxprovider.ResumeRequestProvider); !ok {
+				return boxprovider.ErrUnsupported
+			}
+			if _, ok := s.providers[b.Profile.Provider].(boxprovider.CompletionObservationProvider); !ok {
+				return boxprovider.ErrUnsupported
+			}
+		case "activate":
+			if !b.Staged || !b.RestoreComplete || b.Box.Phase != "staged" {
+				return apiError("CONFLICT", "Box is not a staged candidate")
+			}
+		case "destroy":
+			if b.Box.Phase == "deleted" {
+				return apiError("CONFLICT", "Box was already deleted")
+			}
 		}
 		b.Box.OperationID = op.ID
 		b.Box.Error = nil
-		if action == "resume" {
-			b.ResumePending = true
-			b.ResumeNeedsGuest = false
-			b.ResumeIntentID = op.ID
-			b.ResumeExecutionID = ""
-			b.ResumeTransitionID = ""
-			b.ResumeObservedTransitionID = ""
-		}
-		if phase := map[string]string{"destroy": "deleting", "freeze": "freezing", "unfreeze": "unfreezing", "suspend": "suspending", "resume": "resuming", "rebuild": "rebuilding"}[action]; phase != "" {
+		b.Box.Version++
+		if phase := map[string]string{"destroy": "deleting", "suspend": "suspending", "resume": "resuming"}[action]; phase != "" {
 			b.Box.Phase = phase
 		}
-		b.Box.Version++
-		st.Boxes[id] = b
-		return nil
+		return tx.PutBox(b)
 	})
-	if total != nil {
-		total.SetAttributes(telemetry.String("operation.id", op.ID))
-		// An idempotent replay observes an existing operation, not a new restore.
-		if err == nil && !fresh {
-			total.SetName("cellbox.resume.replay")
-		}
-	}
-	var completed func(error)
-	if total != nil && err == nil && fresh {
-		completed = func(err error) { telemetry.End(total, err) }
-		handedOff = true
-	}
-	if err != nil || !fresh {
+	if err != nil {
 		return op, err
 	}
 	if action == "resume" {
-		s.launchResumeOperation(request, op, b, false, completed)
+		s.launchNodeResume(ctx, op, b, s.providers[b.Profile.Provider].(boxprovider.ResumeRequestProvider))
 		return op, nil
 	}
-	s.launchWithCompletion(request, op, func(ctx context.Context) (map[string]string, error) {
+	s.launchWithCommitContext(ctx, op, func(ctx context.Context) (map[string]string, error) {
 		p := s.providers[b.Profile.Provider]
 		switch action {
 		case "destroy":
@@ -1209,16 +907,8 @@ func (s *Service) actionContextWithGeneration(request context.Context, client, k
 				if _, err := s.waitState(ctx, id, "deleted", false); err != nil {
 					return nil, err
 				}
-			} else {
-				if err := s.store.Update(func(st *State) error {
-					v := st.Boxes[id]
-					v.Box.Phase = "deleted"
-					v.Box.Version++
-					st.Boxes[id] = v
-					return nil
-				}); err != nil {
-					return nil, err
-				}
+			} else if err := s.store.ChangeBox(ctx, id, func(b *boxRecord) error { b.Box.Phase = "deleted"; b.Box.Version++; return nil }); err != nil {
+				return nil, err
 			}
 		case "activate":
 			if err := s.guestAction(ctx, b, "/v1/activate"); err != nil {
@@ -1227,106 +917,35 @@ func (s *Service) actionContextWithGeneration(request context.Context, client, k
 			if err := s.setInventoryStage(ctx, b, "running"); err != nil {
 				return nil, err
 			}
-		case "reconcile":
-			if b.Staged && !b.RestoreComplete {
-				return nil, apiError("CONFLICT", "Failed or interrupted restore candidate must be discarded")
-			}
-			if b.Handle.ID == "" {
-				if _, err := s.provision(ctx, id); err != nil {
-					return nil, err
-				}
-			} else {
-				observed, err := s.observe(ctx, b)
-				if err != nil {
-					return nil, err
-				}
-				if !b.Staged && observed.Phase == "running" {
-					if err := s.guestAction(ctx, b, "/v1/activate"); err != nil {
-						return nil, err
-					}
-				}
-			}
-		default:
-			if action == "suspend" {
-				started := time.Now()
-				err := s.quiesceGuest(ctx, b)
-				runtimeTiming(id, "cellbox.quiesce", started, err)
-				if err != nil {
-					return nil, err
-				}
-			}
-			// This phase owns both command dispatch and observation. The controller
-			// receives its context through the CR annotation and is a child of the
-			// whole runtime transition, not the short K8s patch that triggers it.
-			runtimeCtx, runtimeSpan := telemetry.Start(ctx, "cellbox.runtime.transition", telemetry.String("action", action))
-			var actionErr error
-			if transitionProvider, ok := p.(boxprovider.TransitionProvider); ok && op.ID != "" {
-				actionErr = transitionProvider.ActionTransition(runtimeCtx, b.Handle, action, b.TransitionID, op.ID)
-			} else {
-				actionErr = p.Action(runtimeCtx, b.Handle, action)
-			}
-			if actionErr != nil {
-				telemetry.End(runtimeSpan, actionErr)
-				if action == "suspend" {
-					_ = s.guestAction(ctx, b, "/v1/unquiesce")
-				}
-				return nil, actionErr
-			}
-			runtimeSpan.AddEvent("cellbox.runtime.requested")
-			want := map[string]string{"freeze": "frozen", "unfreeze": "running", "suspend": "suspended", "resume": "running", "rebuild": "running"}[action]
-			transitionID := ""
-			if _, ok := p.(boxprovider.TransitionProvider); ok {
-				transitionID = op.ID
-			}
-			_, waitErr := s.waitStateTransition(runtimeCtx, id, want, action != "resume", transitionID)
-			telemetry.End(runtimeSpan, waitErr)
-			if err := waitErr; err != nil {
+		case "suspend":
+			if err := s.quiesceGuest(ctx, b); err != nil {
 				return nil, err
 			}
-			if action == "rebuild" {
-				updated, err := s.rawBox(id)
-				if err != nil {
-					return nil, err
-				}
-				// A previously activated archive candidate still boots with --staged.
-				// Cold start must activate its workload again; guest health alone only
-				// proves the control process is listening.
-				if err := s.guestAction(ctx, updated, "/v1/activate"); err != nil {
-					return nil, err
-				}
+			transition := p.(boxprovider.TransitionProvider)
+			if err := transition.ActionTransition(ctx, b.Handle, "suspend", b.TransitionID, op.ID); err != nil {
+				return nil, err
 			}
-			if action == "resume" {
-				updated, err := s.rawBox(id)
-				if err != nil {
-					return nil, err
-				}
-				started := time.Now()
-				guestCtx, guestSpan := telemetry.Start(ctx, "cellbox.unquiesce")
-				err = s.resumeGuest(guestCtx, updated)
-				telemetry.End(guestSpan, err)
-				runtimeTiming(id, "cellbox.unquiesce", started, err)
-				if err != nil {
-					return nil, err
-				}
-				s.checkHealthAsync(updated)
+			if _, err := s.waitStateTransition(ctx, id, "suspended", false, op.ID); err != nil {
+				return nil, err
 			}
 		}
 		return map[string]string{"boxId": id}, nil
-	}, func(st *State) error {
+	}, func(tx *storeTx) error {
 		if action != "activate" {
 			return nil
 		}
-		v, ok := st.Boxes[id]
-		if !ok || v.Box.OperationID != op.ID {
-			return apiError("CONFLICT", "Box changed during activation")
+		current, err := tx.Box(client, id)
+		if err != nil {
+			return err
 		}
-		// Activation and operation completion become visible in one commit.
-		v.Staged = false
-		v.Box.Phase = "running"
-		v.Box.Version++
-		st.Boxes[id] = v
-		return nil
-	}, completed)
+		if current.Box.OperationID != op.ID {
+			return boxprovider.ErrStaleTransition
+		}
+		current.Staged = false
+		current.Box.Phase = "running"
+		current.Box.Version++
+		return tx.PutBox(current)
+	})
 	return op, nil
 }
 
@@ -1335,7 +954,7 @@ type execInput struct {
 	ExpectedGeneration uint64 `json:"expectedGeneration"`
 }
 
-func (s *Service) execute(client, key, id string, input execInput) (Operation, error) {
+func (s *Service) execute(client, id string, input execInput) (Operation, error) {
 	if len(input.Argv) == 0 || len(input.Argv) > 128 {
 		return Operation{}, apiError("INVALID_REQUEST", "argv must contain 1..128 arguments")
 	}
@@ -1347,13 +966,13 @@ func (s *Service) execute(client, key, id string, input execInput) (Operation, e
 	}
 	var b boxRecord
 	eid := ""
-	op, fresh, err := s.prepareOperation(client, key, "exec", id, input, func(st *State, op *Operation) error {
+	op, err := s.prepareOperation(client, "exec", id, func(tx *storeTx, op *Operation) error {
 		var err error
-		b, err = owned(st, client, id)
+		b, err = tx.Box(client, id)
 		if err != nil {
 			return err
 		}
-		if err = busy(st, b, false); err != nil {
+		if err = busy(tx, b); err != nil {
 			return err
 		}
 		if b.Box.Phase != "running" && b.Box.Phase != "staged" {
@@ -1363,11 +982,13 @@ func (s *Service) execute(client, key, id string, input execInput) (Operation, e
 			return apiError("STALE_GENERATION", "expectedGeneration must match the current box generation")
 		}
 		eid = randomID("exec-")
-		st.Executions[eid] = executionRecord{Execution: Execution{ID: eid, BoxID: id, OperationID: op.ID, State: "running"}}
+		if err := tx.PutExecution(executionRecord{Execution: Execution{ID: eid, BoxID: id, OperationID: op.ID, State: "running"}}); err != nil {
+			return err
+		}
 		op.Result = map[string]string{"execId": eid}
 		return nil
 	})
-	if err != nil || !fresh {
+	if err != nil {
 		return op, err
 	}
 	s.launch(op, func(ctx context.Context) (map[string]string, error) {
@@ -1383,16 +1004,20 @@ func (s *Service) execute(client, key, id string, input execInput) (Operation, e
 				err = json.NewDecoder(io.LimitReader(res.Body, 4<<20)).Decode(&result)
 			}
 		}
-		saveErr := s.store.Update(func(st *State) error {
-			e := st.Executions[eid]
+		saveCtx, stopSave := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer stopSave()
+		saveErr := s.store.Write(saveCtx, func(tx *storeTx) error {
+			e, readErr := tx.Execution(eid)
+			if readErr != nil {
+				return readErr
+			}
 			if err != nil {
 				e.State = "unknown"
 			} else {
 				e.State = "exited"
 				e.Result = &result
 			}
-			st.Executions[eid] = e
-			return nil
+			return tx.PutExecution(e)
 		})
 		if err == nil {
 			err = saveErr

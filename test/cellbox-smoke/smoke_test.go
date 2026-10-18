@@ -73,7 +73,7 @@ func TestDockerREST(t *testing.T) {
 	}
 	run("go", "build", "-o", filepath.Join(dir, "guest"), "./cmd/cellbox-container-agent")
 	run("go", "build", "-o", filepath.Join(dir, "workload"), "./test/smoke-workload")
-	dockerfile := "FROM scratch\nCOPY workload /workload\nCOPY --chmod=0755 workload /opt/cellbox/tools/demo\n"
+	dockerfile := "FROM scratch\nCOPY workload /workload\n"
 	if err = os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfile), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -87,9 +87,8 @@ func TestDockerREST(t *testing.T) {
 	t.Cleanup(func() { _ = exec.Command("docker", "image", "rm", prepared.Tag).Run() })
 	cfg := guestapi.DefaultConfig()
 	cfg.Command = []string{"/workload", "serve"}
-	cfg.Tools = []guestapi.Tool{{ID: "demo", Executable: "/opt/cellbox/tools/demo", Args: []string{"tool"}, CredentialEnv: map[string]string{"DEMO_FILE": "demo"}}}
 	s, err := service.New(service.Config{
-		DataDir: filepath.Join(dir, "state"), PublicURL: "http://127.0.0.1", StartupTimeoutSeconds: 20,
+		DataDir: filepath.Join(dir, "state"), StartupTimeoutSeconds: 20,
 		ClientID: "smoke", CatalogBuilder: localImageBuilder{image: prepared.ImageID, command: cfg.Command, env: cfg.Env, workingDir: cfg.Workspace},
 		Profiles: []service.Profile{{ID: "smoke", Provider: "docker", Image: prepared.ImageID, AutoTrustImportedImages: true, Guest: cfg}},
 	}, map[string]boxprovider.Provider{"docker": docker.New("docker")})
@@ -113,7 +112,6 @@ func TestDockerREST(t *testing.T) {
 			}
 		}
 		req, _ := http.NewRequest(method, server.URL+path, bytes.NewReader(data))
-		req.Header.Set("Idempotency-Key", fmt.Sprint(time.Now().UnixNano()))
 		res, err := server.Client().Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -193,6 +191,40 @@ func TestDockerREST(t *testing.T) {
 	if b.Phase != "running" || b.Generation != 1 || b.TemplateID != template.ID || b.RevisionID != revisionID {
 		t.Fatalf("unexpected box %+v", b)
 	}
+	expectUnsupported := func(method, path string, body any) {
+		t.Helper()
+		var envelope struct {
+			Error service.APIError `json:"error"`
+		}
+		if err := json.Unmarshal(call(method, path, body, http.StatusUnprocessableEntity), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Error.Code != "UNSUPPORTED_CAPABILITY" {
+			t.Fatalf("Docker operation %s %s returned %q", method, path, envelope.Error.Code)
+		}
+	}
+	expectUnsupported("POST", "/v1/boxes", map[string]any{
+		"revisionId": revisionID, "ownerKey": "unsupported-docker-staged", "staged": true,
+	})
+	for _, path := range []string{
+		"/v1/boxes/" + source + ":suspend",
+		"/v1/boxes/" + source + ":resume",
+		"/v1/boxes/" + source + ":activate",
+	} {
+		expectUnsupported("POST", path, map[string]any{"expectedGeneration": b.Generation})
+	}
+	expectUnsupported("POST", "/v1/boxes:restore", map[string]any{
+		"revisionId": revisionID, "ownerKey": "unsupported-docker-restore", "archiveId": "unused",
+	})
+	expectUnsupported("POST", "/v1/boxes/"+source+"/archives", nil)
+	expectUnsupported("POST", "/v1/boxes/"+source+"/tools/protected", map[string]any{
+		"args": []string{}, "timeoutMs": 1000,
+	})
+	expectUnsupported("PUT", "/v1/boxes/"+source+"/credentials/api-token", "valid-credential")
+	expectUnsupported("PUT", "/v1/boxes/"+source+"/credentials", map[string]any{
+		"expectedGeneration": b.Generation,
+		"slots":              map[string]string{"API_TOKEN": "dmFsaWQtY3JlZGVudGlhbA=="},
+	})
 	execCheck := func(argv []string, want string) {
 		t.Helper()
 		op := wait(call("POST", "/v1/boxes/"+source+"/execs", map[string]any{"argv": argv, "expectedGeneration": b.Generation}, 202))
@@ -203,13 +235,8 @@ func TestDockerREST(t *testing.T) {
 		}
 	}
 	execCheck([]string{"/workload", "identity"}, "uid=11000 gid=11000")
-	call("PUT", "/v1/boxes/"+source+"/credentials/demo", "smoke-secret", 204)
-	execCheck([]string{"/workload", "secret-check"}, "secret-denied")
-	execCheck([]string{guestapi.Binary, "tool", "demo"}, "uid=11001 credential-ok")
 	call("PUT", "/v1/boxes/"+source+"/files?path=hello.txt", "archive-roundtrip", 204)
-	var route service.Route
-	json.Unmarshal(call("POST", "/v1/routes", map[string]any{"boxId": source, "port": 8080}, 201), &route)
-	req, _ := http.NewRequest("GET", server.URL+"/s/"+route.ID+"/", nil)
+	req, _ := http.NewRequest("GET", server.URL+"/v1/boxes/"+source+"/services/8080/", nil)
 	res, err := server.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -219,27 +246,6 @@ func TestDockerREST(t *testing.T) {
 	if res.StatusCode != 200 || string(data) != "loopback-ok" {
 		t.Fatalf("proxy failed %d: %s", res.StatusCode, data)
 	}
-	wait(call("POST", "/v1/boxes/"+source+":freeze", nil, 202))
-	if getBox(source).Phase != "frozen" {
-		t.Fatal("not frozen")
-	}
-	wait(call("POST", "/v1/boxes/"+source+":unfreeze", nil, 202))
-	archive := wait(call("POST", "/v1/boxes/"+source+"/archives", nil, 202)).Result["archiveId"]
-	restoreRaw := call("POST", "/v1/boxes:restore", map[string]string{"revisionId": revisionID, "ownerKey": "candidate", "archiveId": archive}, 202)
-	var restoring service.Operation
-	json.Unmarshal(restoreRaw, &restoring)
-	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", "cellbox-"+restoring.TargetID).Run() })
-	candidate := wait(restoreRaw).TargetID
-	if getBox(candidate).Phase != "staged" {
-		t.Fatal("restore activated too early")
-	}
-	if string(call("GET", "/v1/boxes/"+candidate+"/files?path=hello.txt", nil, 200)) != "archive-roundtrip" {
-		t.Fatal("archive content differs")
-	}
-	wait(call("POST", "/v1/boxes/"+candidate+":activate", nil, 202))
 	wait(call("POST", "/v1/boxes/"+source+":destroy", nil, 202))
-	call("GET", "/v1/archives/"+archive, nil, 200)
-	wait(call("POST", "/v1/boxes/"+candidate+":destroy", nil, 202))
-	call("DELETE", "/v1/archives/"+archive, nil, 204)
-	t.Log("agent/debug isolation, local tool, files, anonymous loopback forwarding, freeze, archive restore and cleanup passed; template revision retained for catalog lifetime")
+	t.Log("Docker basic create, exec, files, direct service proxy and destroy passed; template revision retained for catalog lifetime")
 }

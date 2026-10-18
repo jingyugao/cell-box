@@ -2,6 +2,7 @@ package inventory
 
 import (
 	api "cellbox.local/cellbox/api/v1alpha1"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,8 @@ import (
 const Annotation = "cellbox.local/inventory"
 const ClientLabel = "cellbox.local/client"
 
+var ErrNotFound = errors.New("checkpoint inventory not found")
+
 type Record struct {
 	ClientID  string          `json:"clientId"`
 	Box       json.RawMessage `json:"box"`
@@ -18,6 +21,15 @@ type Record struct {
 	Snapshot  string          `json:"snapshot,omitempty"`
 	NodeName  string          `json:"nodeName,omitempty"`
 	Staged    bool            `json:"staged,omitempty"`
+}
+
+// CheckpointStore persists the lightweight inventory for a runtime's current
+// checkpoint. The checkpoint payload itself remains in node-local storage.
+type CheckpointStore interface {
+	PutCheckpoint(context.Context, Record) error
+	GetCheckpoint(context.Context, string) (Record, error)
+	DeleteCheckpoint(context.Context, string, string) error
+	ListCheckpoints(context.Context, string) ([]Record, error)
 }
 
 func ClientValue(id string) string {

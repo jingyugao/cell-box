@@ -29,14 +29,12 @@ const (
 	ArchiveResultAnnotation  = "cellbox.local/archive-result"
 )
 
-// ArchiveCaptureRequest asks the node controller to export a workspace from a
-// persistent HOME. DiskOnly stops writers without requiring a process checkpoint.
-// ID is also the object-store archive identifier.
+// ArchiveCaptureRequest asks the node controller to export a stopped workspace
+// from persistent HOME. ID is also the object-store archive identifier.
 type ArchiveCaptureRequest struct {
 	ID        string    `json:"id"`
 	Snapshot  string    `json:"snapshot"`
 	ExpiresAt time.Time `json:"expiresAt"`
-	DiskOnly  bool      `json:"diskOnly,omitempty"`
 }
 
 // ArchiveCaptureResult is written only after archive content is durable.
@@ -45,15 +43,9 @@ type ArchiveCaptureResult struct {
 	SourceGeneration int64  `json:"sourceGeneration,omitempty"`
 	ID               string `json:"id"`
 	Snapshot         string `json:"snapshot"`
-	DiskOnly         bool   `json:"diskOnly,omitempty"`
 	Size             int64  `json:"size,omitempty"`
 	SHA256           string `json:"sha256,omitempty"`
 	Error            string `json:"error,omitempty"`
-}
-
-type UpgradeRequest struct {
-	Nonce             string         `json:"nonce"`
-	PreviousContainer core.Container `json:"previousContainer"`
 }
 
 type Spec struct {
@@ -70,8 +62,6 @@ type Spec struct {
 	DebugReadWriteHostPath string             `json:"debugReadWriteHostPath,omitempty"`
 	PersistentHome         bool               `json:"persistentHome,omitempty"`
 	ServicePorts           []core.ServicePort `json:"servicePorts,omitempty"`
-	RebuildNonce           string             `json:"rebuildNonce,omitempty"`
-	Upgrade                *UpgradeRequest    `json:"upgrade,omitempty"`
 	RetryNonce             string             `json:"retryNonce,omitempty"`
 	StartupTimeoutSeconds  int64              `json:"startupTimeoutSeconds,omitempty"`
 }
@@ -91,8 +81,6 @@ type Status struct {
 	PodUID                  string           `json:"podUID,omitempty"`
 	Execution               *Execution       `json:"execution,omitempty"`
 	Snapshot                string           `json:"snapshot,omitempty"`
-	RebuildNonce            string           `json:"rebuildNonce,omitempty"`
-	UpgradeNonce            string           `json:"upgradeNonce,omitempty"`
 	RetryNonce              string           `json:"retryNonce,omitempty"`
 	Since                   meta.Time        `json:"since,omitempty"`
 	Conditions              []meta.Condition `json:"conditions,omitempty"`
@@ -117,9 +105,6 @@ func (r *ResumablePod) DeepCopy() *ResumablePod {
 	out := *r
 	out.ObjectMeta = *r.ObjectMeta.DeepCopy()
 	out.Spec.Container = *r.Spec.Container.DeepCopy()
-	if r.Spec.Upgrade != nil {
-		out.Spec.Upgrade = &UpgradeRequest{Nonce: r.Spec.Upgrade.Nonce, PreviousContainer: *r.Spec.Upgrade.PreviousContainer.DeepCopy()}
-	}
 	if r.Spec.ServicePorts != nil {
 		out.Spec.ServicePorts = make([]core.ServicePort, len(r.Spec.ServicePorts))
 		for i := range r.Spec.ServicePorts {

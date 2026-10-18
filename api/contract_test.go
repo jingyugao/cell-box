@@ -25,12 +25,36 @@ func TestOpenAPIResponseShapesAndReferences(t *testing.T) {
 	if doc["openapi"] != "3.1.0" {
 		t.Fatal("unexpected OpenAPI version")
 	}
+	if strings.Contains(string(data), "Idempotency-Key") {
+		t.Fatal("public contract must not promise or expose Idempotency-Key")
+	}
 	paths := doc["paths"].(map[string]any)
-	for endpoint, methods := range map[string][]string{"/v1/boxes": {"get", "post"}, "/v1/boxes/{id}:ensure-running": {"post"}, "/v1/checkpoints": {"get"}, "/v1/images": {"post", "get"}, "/v1/images:import": {"post"}, "/v1/images/{id}": {"get", "delete"}, "/v1/images/{id}/usage": {"get"}} {
+	for endpoint, methods := range map[string][]string{"/v1/boxes": {"get", "post"}, "/v1/boxes/{id}:resume": {"post"}, "/v1/boxes/{id}:suspend": {"post"}, "/v1/boxes/{id}/archives": {"post"}, "/v1/boxes:restore": {"post"}, "/v1/archives": {"get"}, "/v1/archives/{id}": {"get", "delete"}, "/v1/archives/{id}/content": {"get"}, "/v1/templates/{id}/revisions": {"get", "post"}} {
 		for _, method := range methods {
 			if path, ok := paths[endpoint].(map[string]any); !ok || path[method] == nil {
 				t.Errorf("missing API contract: %s %s", method, endpoint)
 			}
+		}
+	}
+	for _, endpoint := range []string{"/v1/boxes/{id}:ensure-running", "/v1/boxes/{id}:reconcile", "/v1/boxes/{id}:upgrade", "/v1/boxes/{id}:rebuild", "/v1/boxes/{id}:freeze", "/v1/boxes/{id}:unfreeze", "/v1/boxes/{id}/leases", "/v1/leases/{id}", "/v1/routes", "/v1/images", "/v1/images:import", "/v1/images/{id}", "/v1/images/{id}/usage"} {
+		if paths[endpoint] != nil {
+			t.Errorf("removed API must not appear in the public contract: %s", endpoint)
+		}
+	}
+	for endpoint, method := range map[string]string{"/v1/boxes": "post", "/v1/boxes/{id}:destroy": "post", "/v1/boxes/{id}:suspend": "post", "/v1/boxes/{id}:resume": "post", "/v1/boxes/{id}/archives": "post", "/v1/boxes:restore": "post", "/v1/templates/{id}/revisions": "post"} {
+		operation := paths[endpoint].(map[string]any)[method].(map[string]any)
+		parameters, _ := operation["parameters"].([]any)
+		for _, parameter := range parameters {
+			if p, ok := parameter.(map[string]any); ok && p["name"] == "Idempotency-Key" {
+				t.Errorf("%s %s must not promise idempotency", method, endpoint)
+			}
+		}
+	}
+	for _, endpoint := range []string{"/v1/boxes", "/v1/boxes/{id}:destroy", "/v1/boxes/{id}:suspend", "/v1/boxes/{id}:resume", "/v1/boxes/{id}:activate", "/v1/boxes/{id}/archives", "/v1/boxes:restore"} {
+		operation := paths[endpoint].(map[string]any)["post"].(map[string]any)
+		responses := operation["responses"].(map[string]any)
+		if responses["202"] == nil {
+			t.Errorf("POST %s must return 202 with an operation", endpoint)
 		}
 	}
 	var walk func(any)
@@ -67,11 +91,16 @@ func TestOpenAPIResponseShapesAndReferences(t *testing.T) {
 	}
 	walk(doc)
 	schemas := doc["components"].(map[string]any)["schemas"].(map[string]any)
+	capabilities := schemas["Capabilities"].(map[string]any)
+	archiveCapability := capabilities["properties"].(map[string]any)["archives"].(map[string]any)["enum"]
+	if !reflect.DeepEqual(archiveCapability, []any{"none", "stopped-workspace"}) {
+		t.Errorf("archive capability enum = %v, want none/stopped-workspace", archiveCapability)
+	}
 	types := map[string]any{
-		"ImportedImage": service.ImportedImage{}, "Box": service.Box{}, "RuntimeOperation": service.Operation{},
+		"Box": service.Box{}, "RuntimeOperation": service.Operation{},
 		"TemplateBuildOperation": catalog.Operation{}, "Template": catalog.Template{}, "TemplateRevision": catalog.Revision{},
-		"Execution": service.Execution{}, "Capabilities": service.Capabilities{}, "Lease": service.Lease{},
-		"Route": service.Route{}, "Archive": service.Archive{}, "Identity": guestapi.Identity{},
+		"Execution": service.Execution{}, "Capabilities": service.Capabilities{},
+		"Archive": service.Archive{}, "Identity": guestapi.Identity{},
 		"ExecResult": guestapi.ExecResult{}, "FileEntry": guestapi.FileEntry{},
 	}
 	for name, value := range types {

@@ -12,6 +12,7 @@ import (
 
 func TestCredentialBatchAdmissionAndGenerationFence(t *testing.T) {
 	f := newCoreFixture(t)
+	useK3sProfile(t, f)
 	f.service.config.Profiles[0].Guest.Tools = []guestapi.Tool{{ID: "tool", Executable: "/opt/cellbox/tools/tool", CredentialEnv: map[string]string{"FIRST": "first", "SECOND": "second"}}}
 	_, box := f.createBox(t, "credential-batch")
 	var calls atomic.Int32

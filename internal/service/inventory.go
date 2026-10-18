@@ -3,8 +3,8 @@ package service
 import (
 	"cellbox.local/cellbox/internal/boxprovider"
 	"cellbox.local/cellbox/internal/inventory"
-	"cellbox.local/cellbox/internal/objectstorage"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -14,55 +14,6 @@ import (
 	"time"
 )
 
-// ListImages reads objects for every request. The mutation cache remains private
-// to transaction handling and is never the source of a remote image listing.
-func (s *Store) ListImages(ctx context.Context) ([]importedImageRecord, error) {
-	if s.objects == nil {
-		out := []importedImageRecord{}
-		err := s.View(func(st State) error {
-			for _, r := range st.ImportedImages {
-				out = append(out, r)
-			}
-			return nil
-		})
-		return out, err
-	}
-	keys, err := objectstorage.ListMetadata(ctx, s.objects, "images")
-	if err != nil {
-		return nil, err
-	}
-	out := []importedImageRecord{}
-	for _, key := range keys {
-		parts := strings.Split(key, "/")
-		if len(parts) != 3 || parts[2] != "metadata.json" {
-			continue
-		}
-		expected, err := imageMetadataKey(parts[1])
-		if err != nil || key != expected {
-			return nil, errors.New("invalid image metadata key")
-		}
-		data, _, err := readObject(ctx, s.objects, key)
-		// A concurrent deletion between LIST and GET is expected.
-		if errors.Is(err, objectstorage.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		var stored storedImage
-		if json.Unmarshal(data, &stored) != nil || stored.Revision == "" {
-			return nil, errors.New("invalid image metadata")
-		}
-		if stored.Deleted {
-			continue
-		}
-		if stored.Record == nil || stored.Record.ImportedImage.ID != parts[1] {
-			return nil, errors.New("image metadata identity mismatch")
-		}
-		out = append(out, *stored.Record)
-	}
-	return out, nil
-}
 func sortInventory(boxes []Box) {
 	sort.Slice(boxes, func(i, j int) bool {
 		if boxes[i].CreatedAt.Equal(boxes[j].CreatedAt) {
@@ -167,10 +118,6 @@ func (s *Service) listBoxes(w http.ResponseWriter, r *http.Request) {
 				fail(w, apiError("UNSUPPORTED_CAPABILITY", "Provider does not support resource inventory"))
 				return
 			}
-			if s.objects != nil {
-				fail(w, apiError("UNSUPPORTED_CAPABILITY", "Remote inventory requires a Kubernetes provider"))
-				return
-			}
 			s.listLocalBoxes(w, r)
 			return
 		}
@@ -221,41 +168,15 @@ func (s *Service) listBoxes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, options.apply(boxes))
 }
 func (s *Service) listCheckpoints(w http.ResponseWriter, r *http.Request) {
-	if s.objects == nil {
-		s.listLocalBoxes(w, r)
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-	keys, err := objectstorage.ListMetadata(ctx, s.objects, "checkpoints")
+	records, err := s.store.ListCheckpoints(r.Context(), clientID(r))
 	if err != nil {
 		fail(w, err)
 		return
 	}
 	boxes := []Box{}
-	for _, key := range keys {
-		parts := strings.Split(key, "/")
-		if len(parts) != 3 || parts[2] != "metadata.json" {
-			continue
-		}
-		data, _, err := readObject(ctx, s.objects, key)
-		if errors.Is(err, objectstorage.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			fail(w, err)
-			return
-		}
-		var record inventory.Record
-		if json.Unmarshal(data, &record) != nil || record.RuntimeID != parts[1] || record.Snapshot == "" || record.ClientID == "" {
-			fail(w, errors.New("invalid checkpoint inventory"))
-			return
-		}
-		if record.ClientID != clientID(r) {
-			continue
-		}
+	for _, record := range records {
 		var box Box
-		if json.Unmarshal(record.Box, &box) != nil || box.ID == "" || box.Phase == "" {
+		if json.Unmarshal(record.Box, &box) != nil || box.ID == "" {
 			fail(w, errors.New("invalid checkpoint box metadata"))
 			return
 		}
@@ -265,39 +186,50 @@ func (s *Service) listCheckpoints(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, boxes)
 }
 
-func (s *Store) ReadImage(ctx context.Context, id string) (importedImageRecord, error) {
-	var record importedImageRecord
-	if s.objects == nil {
-		err := s.View(func(st State) error {
-			var ok bool
-			record, ok = st.ImportedImages[id]
-			if !ok {
-				return apiError("NOT_FOUND", "Imported image not found")
-			}
-			return nil
-		})
-		return record, err
+func (s *Store) PutCheckpoint(ctx context.Context, record inventory.Record) error {
+	if record.RuntimeID == "" || record.Snapshot == "" || record.ClientID == "" {
+		return errors.New("invalid checkpoint record")
 	}
-	key, err := imageMetadataKey(id)
+	var box Box
+	if err := json.Unmarshal(record.Box, &box); err != nil || box.ID == "" {
+		return errors.New("invalid checkpoint box")
+	}
+	data, err := json.Marshal(record)
 	if err != nil {
-		return record, apiError("NOT_FOUND", "Imported image not found")
+		return err
 	}
-	data, _, err := readObject(ctx, s.objects, key)
-	if errors.Is(err, objectstorage.ErrNotFound) {
-		return record, apiError("NOT_FOUND", "Imported image not found")
+	_, err = s.db.ExecContext(ctx, `INSERT INTO runtime_records(kind,id,client_id,box_id,record) VALUES('checkpoints',?,?,?,?)
+ ON CONFLICT(kind,id) DO UPDATE SET client_id=excluded.client_id,box_id=excluded.box_id,record=excluded.record WHERE record!=excluded.record`, record.RuntimeID, record.ClientID, box.ID, string(data))
+	return err
+}
+func (s *Store) GetCheckpoint(ctx context.Context, id string) (inventory.Record, error) {
+	record, err := readRecord[inventory.Record](ctx, s.db, "checkpoints", id)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = inventory.ErrNotFound
+	}
+	return record, err
+}
+func (s *Store) DeleteCheckpoint(ctx context.Context, id, snapshot string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	record, err := readRecord[inventory.Record](ctx, tx, "checkpoints", id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
 	}
 	if err != nil {
-		return record, err
+		return err
 	}
-	var stored storedImage
-	if json.Unmarshal(data, &stored) != nil || stored.Revision == "" {
-		return record, errors.New("invalid imported image metadata")
+	if snapshot != "" && record.Snapshot != snapshot {
+		return errors.New("checkpoint snapshot changed")
 	}
-	if stored.Deleted {
-		return record, apiError("NOT_FOUND", "Imported image not found")
+	if _, err = tx.ExecContext(ctx, "DELETE FROM runtime_records WHERE kind='checkpoints' AND id=?", id); err != nil {
+		return err
 	}
-	if stored.Record == nil || stored.Record.ImportedImage.ID != id {
-		return record, errors.New("image metadata identity mismatch")
-	}
-	return *stored.Record, nil
+	return tx.Commit()
+}
+func (s *Store) ListCheckpoints(ctx context.Context, client string) ([]inventory.Record, error) {
+	return listRecords[inventory.Record](ctx, s.db, "checkpoints", "AND client_id=?", client)
 }

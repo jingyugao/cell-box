@@ -10,9 +10,11 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-func TestInternalServiceScopesClientAndFencesLiveWebSocketWithoutMetadataWrites(t *testing.T) {
+func TestInternalServiceScopesClientAndFencesLiveWebSocket(t *testing.T) {
 	upgrader := websocket.Upgrader{}
-	f := newGatewayFixture(t, func(w http.ResponseWriter, r *http.Request) {
+	f := newCoreFixture(t)
+	_, box := f.createBox(t, "internal-service-box")
+	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Cellbox-Upstream-Authorization") != "" || r.Header.Get("Proxy-Authorization") != "" {
 			t.Error("control-plane authorization reached the application")
 		}
@@ -33,11 +35,15 @@ func TestInternalServiceScopesClientAndFencesLiveWebSocketWithoutMetadataWrites(
 			}
 		}
 		_, _ = w.Write([]byte(r.URL.EscapedPath() + "?" + r.URL.RawQuery))
-	})
-	prefix := "/v1/boxes/" + f.box.ID + "/services/8080"
+	}))
+	t.Cleanup(guest.Close)
+	f.provider.mu.Lock()
+	f.provider.guestURL = guest.URL
+	f.provider.mu.Unlock()
+	prefix := "/v1/boxes/" + box.ID + "/services/8080"
 	status, body := f.call(t, "GET", prefix+"/", otherClientToken, "", nil)
 	wantStatus(t, status, 404, body)
-	status, body = f.call(t, "GET", "/v1/boxes/"+f.box.ID+"/services/40000/", testClientToken, "", nil)
+	status, body = f.call(t, "GET", "/v1/boxes/"+box.ID+"/services/40000/", testClientToken, "", nil)
 	wantStatus(t, status, 400, body)
 	req := httptest.NewRequest("GET", prefix+"/", nil)
 	req.Header.Set("Origin", "https://browser.example.test")
@@ -65,23 +71,15 @@ func TestInternalServiceScopesClientAndFencesLiveWebSocketWithoutMetadataWrites(
 	if err != nil || string(data) != "ready" {
 		t.Fatalf("websocket RPC failed: %s %v", data, err)
 	}
-	status, body = f.call(t, "POST", "/v1/boxes/"+f.box.ID+":destroy", testClientToken, "internal-busy", nil)
+	status, body = f.call(t, "POST", "/v1/boxes/"+box.ID+":destroy", testClientToken, "", nil)
 	wantStatus(t, status, 409, body)
-	if err := f.service.store.View(func(st State) error {
-		if len(st.Routes) != 1 || len(st.Leases) != 0 {
-			t.Fatal("internal access created durable access records")
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
 	if err := conn.Close(); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(time.Second)
 	for {
 		f.service.mu.Lock()
-		busy := f.service.streamBusy(f.box.ID) != nil
+		busy := f.service.streamBusy(box.ID) != nil
 		f.service.mu.Unlock()
 		if !busy {
 			break

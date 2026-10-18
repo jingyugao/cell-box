@@ -18,12 +18,12 @@ crd:
   create: true
 runtimeClass:
   create: true
-# Opt-in node-local durable metadata. The single server mounts this dedicated
-# hostPath on the node selected by server.nodeName.
-localMetadata:
-  enabled: false
-  initialize: false
-  hostPath: /var/lib/cellbox-metadata
+# One durable local directory for SQLite metadata, build logs, and archive download validation temps.
+# It is mounted on the single node selected by server.nodeName.
+storage:
+  hostPath: /var/lib/cellbox-data
+  # Optionally reuse an existing PVC instead of hostPath storage.
+  existingClaim: ""
 server:
   # The combined API and node runtime is pinned to this one machine.
   nodeName: ""
@@ -63,12 +63,6 @@ api:
   manageSecrets: true
   # Overrides for the API JSON configuration; defaults start with no profiles.
   config: {}
-  # SQLite catalog needs persistent local/block storage. With localMetadata
-  # enabled its hostPath is reused; otherwise supply an existing PVC here.
-  catalogExistingClaim: ""
-  # Temporary archive staging only; durable content is stored in S3.
-  temporaryStorageSize: 4Gi
-
 buildkit:
   enabled: false
   extraEnv: []

@@ -43,7 +43,7 @@ func run() error {
 		// Cleanup needs a fresh context even when the caller's deadline expires.
 		cleanup, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		if err := sandbox.Destroy(cleanup, nil); err != nil {
+		if err := sandbox.Destroy(cleanup); err != nil {
 			log.Printf("destroy sandbox %s: %v", sandbox.ID, err)
 		}
 	}()

@@ -11,7 +11,6 @@ import (
 
 type catalogRuntimeProbe struct {
 	boxprovider.Provider
-	warmCalls    int
 	runtimeCalls int
 	inspectCalls int
 }
@@ -47,14 +46,9 @@ func (p *catalogRuntimeProbe) CacheImage(context.Context, string, string, string
 	return nil
 }
 
-func (p *catalogRuntimeProbe) SetWarmTemplates(context.Context, string, []boxprovider.WarmTemplate) error {
-	p.warmCalls++
-	return nil
-}
-
-func buildCatalogRevision(t *testing.T, f *coreFixture, templateID, userVersion, baseImage, key string) catalog.Revision {
+func buildCatalogRevision(t *testing.T, f *coreFixture, templateID, userVersion, baseImage string) catalog.Revision {
 	t.Helper()
-	status, body := f.call(t, "POST", "/v1/templates/"+templateID+"/revisions", testClientToken, key, map[string]any{
+	status, body := f.call(t, "POST", "/v1/templates/"+templateID+"/revisions", testClientToken, "", map[string]any{
 		"userVersion": userVersion, "baseImage": baseImage, "profileId": "profile-a",
 	})
 	wantStatus(t, status, http.StatusAccepted, body)
@@ -69,7 +63,7 @@ func buildCatalogRevision(t *testing.T, f *coreFixture, templateID, userVersion,
 	return revisions[0]
 }
 
-func TestCatalogRevisionsPinSandboxAndStableRetry(t *testing.T) {
+func TestCatalogRevisionsPinSandboxAndResolveStableOnEachCreate(t *testing.T) {
 	f := newCoreFixture(t)
 	familyID := f.template(t)
 	status, body := f.call(t, "GET", "/v1/templates/"+familyID, testClientToken, "", nil)
@@ -83,24 +77,26 @@ func TestCatalogRevisionsPinSandboxAndStableRetry(t *testing.T) {
 	}
 	v1 := revisions[0]
 
-	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "stable-once", map[string]string{"templateId": familyID, "ownerKey": "owner"})
+	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "", map[string]string{"templateId": familyID, "ownerKey": "owner"})
 	wantStatus(t, status, http.StatusAccepted, body)
 	firstOp := decodeResponse[Operation](t, body)
 	f.waitOperation(t, firstOp.ID, "succeeded")
 
-	v2 := buildCatalogRevision(t, f, familyID, "1.01", "registry.example.test/base-v2:latest", "build-v2")
+	v2 := buildCatalogRevision(t, f, familyID, "1.01", "registry.example.test/base-v2:latest")
 	status, body = f.call(t, "PATCH", "/v1/templates/"+familyID, testClientToken, "", map[string]any{
 		"stableRevisionId": v2.ID, "expectedGeneration": family.Generation,
 	})
 	wantStatus(t, status, http.StatusOK, body)
 
-	// A retry resolves to the original operation and therefore retains the
-	// original stable revision even after the stable pointer moves.
-	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "stable-once", map[string]string{"templateId": familyID, "ownerKey": "owner"})
+	// Every create request is independent and resolves the stable revision at
+	// admission time, including an identical request after the pointer changes.
+	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "", map[string]string{"templateId": familyID, "ownerKey": "owner"})
 	wantStatus(t, status, http.StatusAccepted, body)
-	if got := decodeResponse[Operation](t, body); got.ID != firstOp.ID || got.TargetID != firstOp.TargetID {
-		t.Fatalf("stable retry created a new operation: %+v", got)
+	secondOp := decodeResponse[Operation](t, body)
+	if secondOp.ID == firstOp.ID || secondOp.TargetID == firstOp.TargetID {
+		t.Fatalf("repeated create reused the first request: first=%+v second=%+v", firstOp, secondOp)
 	}
+	f.waitOperation(t, secondOp.ID, "succeeded")
 	box, err := f.service.rawBox(firstOp.TargetID)
 	if err != nil {
 		t.Fatal(err)
@@ -109,10 +105,6 @@ func TestCatalogRevisionsPinSandboxAndStableRetry(t *testing.T) {
 		t.Fatalf("sandbox did not retain its concrete revision: %+v", box.Box)
 	}
 
-	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "stable-twice", map[string]string{"templateId": familyID, "ownerKey": "owner"})
-	wantStatus(t, status, http.StatusAccepted, body)
-	secondOp := decodeResponse[Operation](t, body)
-	f.waitOperation(t, secondOp.ID, "succeeded")
 	box, err = f.service.rawBox(secondOp.TargetID)
 	if err != nil || box.Box.RevisionID != v2.ID {
 		t.Fatalf("new sandbox did not resolve current stable: box=%+v err=%v", box.Box, err)
@@ -158,7 +150,7 @@ func TestTemplateManagementUsesCatalogWithoutRuntimeCalls(t *testing.T) {
 	if afterCreates != beforeCreates {
 		t.Fatalf("template management created runtime instances: before=%d after=%d", beforeCreates, afterCreates)
 	}
-	if probe.warmCalls != 0 || probe.runtimeCalls != 0 || probe.inspectCalls != 0 {
-		t.Fatalf("template management touched runtime APIs: calls=%d inspect=%d warm=%d", probe.runtimeCalls, probe.inspectCalls, probe.warmCalls)
+	if probe.runtimeCalls != 0 || probe.inspectCalls != 0 {
+		t.Fatalf("template management touched runtime APIs: calls=%d inspect=%d", probe.runtimeCalls, probe.inspectCalls)
 	}
 }
