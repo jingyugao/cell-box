@@ -41,7 +41,7 @@ func (c *Config) Validate() error {
 	if c.OperationRetentionSeconds < 3600 || c.OperationRetentionSeconds > 30*86400 || c.ExecutionRetentionSeconds < 300 || c.ExecutionRetentionSeconds > c.OperationRetentionSeconds {
 		return fmt.Errorf("operation retention must be 1 hour..30 days; execution retention must be 5 minutes..operation retention")
 	}
-	if c.VolumeBackups.Enabled || c.ObjectStorage != (objectstorage.Config{}) {
+	if c.ObjectStorage != (objectstorage.Config{}) {
 		if err := c.ObjectStorage.Validate(); err != nil {
 			return err
 		}
