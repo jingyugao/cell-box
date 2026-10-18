@@ -86,12 +86,58 @@ func TestPersistentHomeRestoreAndCleanupBoundaries(t *testing.T) {
 	if err := b.Forget(ctx, w); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(home); !os.IsNotExist(err) {
-		t.Fatal("Box deletion did not reclaim its HOME")
+	if data, err := os.ReadFile(filepath.Join(home, "workspace-data")); err != nil || string(data) != "keep" {
+		t.Fatalf("Box deletion did not preserve and promote its HOME: %q %v", data, err)
+	}
+	if _, err := homevolume.Verify(base, "box-owner", "node", homevolume.VolumeSpecHash, ""); err != nil {
+		t.Fatalf("legacy HOME was not promoted to an independent volume: %v", err)
 	}
 	other, _ := homevolume.Path(base, "other-owner")
 	if _, err := os.Stat(other); err != nil {
 		t.Fatal("Box deletion affected another HOME", err)
+	}
+}
+
+func TestIndependentHomeVolumeSurvivesBoxReplacementAndExplicitDelete(t *testing.T) {
+	base := t.TempDir()
+	b := &Backend{Base: base}
+	const volumeUID = "volume-001"
+	if err := b.CreateVolume(volumeUID, "node"); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	first := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{UID: "box-a"}, Spec: api.Spec{NodeName: "node", PersistentHome: true, HomeVolumeUID: volumeUID}, Status: api.Status{Cycle: 1, SpecHash: "image-a"}}
+	firstPod := &core.Pod{ObjectMeta: meta.ObjectMeta{UID: "pod-a", Namespace: "test"}}
+	if err := b.Prepare(ctx, first, firstPod); err != nil {
+		t.Fatal(err)
+	}
+	home, _ := homevolume.Path(base, volumeUID)
+	if err := os.WriteFile(filepath.Join(home, "workspace-data"), []byte("reused"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	now := meta.Now()
+	first.DeletionTimestamp = &now
+	if err := b.Forget(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+
+	second := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{UID: "box-b"}, Spec: api.Spec{NodeName: "node", PersistentHome: true, HomeVolumeUID: volumeUID}, Status: api.Status{Cycle: 1, SpecHash: "image-b"}}
+	secondPod := &core.Pod{ObjectMeta: meta.ObjectMeta{UID: "pod-b", Namespace: "test"}}
+	if err := b.Prepare(ctx, second, secondPod); err != nil {
+		t.Fatalf("new Box could not attach the retained volume: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(home, "workspace-data")); err != nil || string(got) != "reused" {
+		t.Fatalf("replacement Box did not see existing data: %q %v", got, err)
+	}
+	second.DeletionTimestamp = &now
+	if err := b.Forget(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.DeleteVolume(volumeUID, "node"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(home); !os.IsNotExist(err) {
+		t.Fatalf("explicit volume deletion retained data: %v", err)
 	}
 }
 

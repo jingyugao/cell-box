@@ -218,11 +218,16 @@ components:
           type: object
         generation:
           type: integer
+        homeVolumeId:
+          type: string
+          description: Persistent HOME volume attached to this box, when known.
         executionId:
           description: Current runtime execution identity when observed; omitted when unknown or unavailable.
           type: string
         id:
           type: string
+          maxLength: 55
+          pattern: '^[a-z0-9]([-a-z0-9]{0,53}[a-z0-9])?$'
         image:
           type: string
         imageId:
@@ -282,6 +287,24 @@ components:
       - capabilities
       - createdAt
       type: object
+    Volume:
+      additionalProperties: false
+      properties:
+        id: {type: string, maxLength: 55, pattern: '^[a-z0-9]([-a-z0-9]{0,53}[a-z0-9])?$'}
+        ownerKey: {type: string}
+        profileId: {type: string}
+        nodeName: {type: string}
+        phase:
+          type: string
+          enum: [creating, available, in-use, deleting, deleted, failed]
+        resourceVersion: {type: integer, format: int64, minimum: 0}
+        createdAt: {type: string, format: date-time}
+        boxId: {type: string}
+        operationId: {type: string}
+        error:
+          $ref: '#/components/schemas/ErrorDetail'
+      required: [id, ownerKey, profileId, nodeName, phase, resourceVersion, createdAt]
+      type: object
     Capabilities:
       additionalProperties: false
       properties:
@@ -317,7 +340,7 @@ components:
           description: An admitted HOME runner uses the profile's managed runtime/debug-homes directory mounted read-write at /home/debug.
         persistentHome:
           type: boolean
-          description: The provider preserves this Box's initially empty /home/agent directory across same-node suspend/resume. HOME data is separate from checkpoint objects and is removed when the Box is deleted.
+          description: The provider mounts an independent HOME volume at /home/agent. A Box deletion detaches and retains the volume, including legacy per-Box HOME promoted in place; delete the Volume explicitly to remove its data.
         pty:
           type: boolean
         reconnectExec:
@@ -350,6 +373,18 @@ components:
           type: boolean
           default: false
           description: Kubernetes only. Start guest control and hold the workload until explicit activation; Docker returns UNSUPPORTED_CAPABILITY.
+        id:
+          type: string
+          minLength: 1
+          maxLength: 55
+          pattern: '^[a-z0-9]([-a-z0-9]{0,53}[a-z0-9])?$'
+          description: Optional caller-selected box ID. IDs use lowercase DNS-label syntax and are unique across clients for their full lifetime, including after purge; duplicate IDs return 409 CONFLICT.
+        homeVolumeId:
+          type: string
+          minLength: 1
+          maxLength: 55
+          pattern: '^[a-z0-9]([-a-z0-9]{0,53}[a-z0-9])?$'
+          description: Existing available persistent HOME volume to attach. Must belong to the same client and owner and be on a compatible node. Docker profiles return UNSUPPORTED_CAPABILITY. Omit for a Kubernetes box to create its own retained HOME volume.
         ownerKey:
           maxLength: 256
           minLength: 1
@@ -360,7 +395,7 @@ components:
         revisionId:
           type: string
           minLength: 1
-      description: Choose exactly one of templateId (resolves current stable revision at admission) or revisionId (pins an explicit revision).
+      description: Choose exactly one of templateId (resolves current stable revision at admission) or revisionId (pins an explicit revision). Caller-selected box IDs use lowercase DNS-label syntax and are unique across clients for their full lifetime, including after purge; duplicate IDs return 409 CONFLICT.
       required: [ownerKey]
       type: object
     Error:
@@ -588,8 +623,14 @@ components:
       oneOf:
       - required: [templateId]
       - required: [revisionId]
-      description: Restore the archive into a new empty staged Kubernetes sandbox using its template or revision image and runtime configuration. The caller provisions credentials and explicitly activates it. A failed restore candidate is terminal and should be destroyed. Docker returns UNSUPPORTED_CAPABILITY.
+      description: Restore the archive into a new empty staged Kubernetes sandbox using its template or revision image and runtime configuration. The caller provisions credentials and explicitly activates it. A failed restore candidate is terminal and should be destroyed. Restore always creates a new HOME volume; homeVolumeId is not accepted. Docker returns UNSUPPORTED_CAPABILITY.
       properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 55
+          pattern: '^[a-z0-9]([-a-z0-9]{0,53}[a-z0-9])?$'
+          description: Optional caller-selected box ID. IDs are unique across clients for their full lifetime, including after purge; duplicate IDs return 409 CONFLICT.
         archiveId:
           type: string
         acceptImageChange:
@@ -781,6 +822,7 @@ paths:
       summary: List all owned boxes directly from Kubernetes
     post:
       operationId: createBox
+      description: A caller-selected ID uses lowercase DNS-label syntax and is permanently reserved across clients, including after purge. A duplicate ID returns 409 CONFLICT.
       parameters:
       requestBody:
         content:
@@ -795,9 +837,92 @@ paths:
               schema:
                 $ref: '#/components/schemas/Operation'
           description: Success
+        "409":
+          description: The box ID is already in use or the requested volume cannot be attached.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
         default:
           $ref: '#/components/responses/Error'
       summary: Create a box asynchronously
+  /v1/volumes:
+    get:
+      operationId: listVolumes
+      summary: List persistent HOME volumes in the client namespace
+      description: Returns volume records, including creating, in-use, deleting, deleted, and failed states.
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Volume'}
+        default:
+          $ref: '#/components/responses/Error'
+    post:
+      operationId: createVolume
+      summary: Create a persistent HOME volume asynchronously
+      description: A supplied ID uses lowercase DNS-label syntax and is reserved permanently across clients. Any ID already used for a Volume returns 409 CONFLICT, including deleted IDs. Omitted IDs are generated by Cellbox.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [ownerKey, profileId]
+              properties:
+                id: {type: string, minLength: 1, maxLength: 55, pattern: '^[a-z0-9]([-a-z0-9]{0,53}[a-z0-9])?$'}
+                ownerKey: {type: string, minLength: 1, maxLength: 256}
+                profileId: {type: string, minLength: 1}
+      responses:
+        "202":
+          description: Volume creation operation accepted
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Operation'}
+        "409":
+          description: The volume ID has already been used by any client on this server.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/volumes/{id}:
+    parameters:
+    - in: path
+      name: id
+      required: true
+      schema: {type: string, maxLength: 55, pattern: '^[a-z0-9]([-a-z0-9]{0,53}[a-z0-9])?$'}
+    get:
+      operationId: getVolume
+      summary: Get a persistent HOME volume
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Volume'}
+        default:
+          $ref: '#/components/responses/Error'
+    delete:
+      operationId: deleteVolume
+      summary: Delete a persistent HOME volume and its data asynchronously
+      description: Volumes attached to a box or reserved by a suspended box cannot be deleted and return 409 CONFLICT. Deletion is explicit; box destruction retains its volume.
+      responses:
+        "202":
+          description: Volume deletion operation accepted
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Operation'}
+        "409":
+          description: The volume is attached to or reserved by a box.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        default:
+          $ref: '#/components/responses/Error'
   /v1/checkpoints:
     get:
       operationId: listCheckpoints
@@ -1192,7 +1317,7 @@ paths:
           description: Success
         default:
           $ref: '#/components/responses/Error'
-      summary: Delete runtime while retaining archives
+      summary: Delete runtime while retaining its HOME volume and archives
   /v1/boxes/{id}:resume:
     post:
       requestBody:
@@ -1239,7 +1364,7 @@ paths:
       summary: Checkpoint a resumable Kubernetes box on its node
   /v1/boxes:restore:
     post:
-      description: Restore an archive into a new empty staged Kubernetes sandbox. The caller provisions credentials and explicitly activates it. Failed restore candidates are terminal and should be destroyed. Docker returns UNSUPPORTED_CAPABILITY.
+      description: Restore an archive into a new empty staged Kubernetes sandbox with a new HOME volume. homeVolumeId is not accepted. The caller provisions credentials and explicitly activates it. Failed restore candidates are terminal and should be destroyed. Docker returns UNSUPPORTED_CAPABILITY.
       operationId: restoreBox
       parameters:
       requestBody:
@@ -1255,6 +1380,11 @@ paths:
               schema:
                 $ref: '#/components/schemas/Operation'
           description: Success
+        "409":
+          description: The requested box ID has already been used.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
         default:
           $ref: '#/components/responses/Error'
       summary: Restore an archive into a new staged box

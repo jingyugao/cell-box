@@ -4,8 +4,6 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
@@ -98,48 +96,15 @@ func (r *Reconciler) phase(ctx context.Context, w *api.ResumablePod, phase, mess
 	return again, r.Status().Update(ctx, w)
 }
 func fingerprint(w *api.ResumablePod) string {
-	legacy := struct {
-		Node      string
-		Container core.Container
-		Ports     []core.ServicePort
-	}{w.Spec.NodeName, w.Spec.Container, w.Spec.ServicePorts}
-	var b []byte
-	if w.Spec.SharedReadOnlyHostPath != "" {
-		b, _ = json.Marshal(struct {
-			Node                   string
-			Container              core.Container
-			Ports                  []core.ServicePort
-			SharedReadOnlyHostPath string
-			DebugReadOnlyHostPath  string
-			DebugReadWriteHostPath string
-		}{legacy.Node, legacy.Container, legacy.Ports, w.Spec.SharedReadOnlyHostPath, w.Spec.DebugReadOnlyHostPath, w.Spec.DebugReadWriteHostPath})
-	} else if w.Spec.DebugReadOnlyHostPath == "" && w.Spec.DebugReadWriteHostPath == "" {
-		// Keep the fingerprint of existing workloads unchanged.
-		b, _ = json.Marshal(legacy)
-	} else if w.Spec.DebugReadWriteHostPath == "" {
-		b, _ = json.Marshal(struct {
-			Node                  string
-			Container             core.Container
-			Ports                 []core.ServicePort
-			DebugReadOnlyHostPath string
-		}{legacy.Node, legacy.Container, legacy.Ports, w.Spec.DebugReadOnlyHostPath})
-	} else {
-		b, _ = json.Marshal(struct {
-			Node                   string
-			Container              core.Container
-			Ports                  []core.ServicePort
-			DebugReadWriteHostPath string
-		}{legacy.Node, legacy.Container, legacy.Ports, w.Spec.DebugReadWriteHostPath})
-	}
-	if w.Spec.PersistentHome {
-		// Preserve all existing fingerprints when the optional mode is disabled.
-		b, _ = json.Marshal(struct {
-			Legacy         json.RawMessage
-			PersistentHome bool
-		}{b, true})
-	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
+	return api.SpecFingerprint(w)
+}
+
+// warmFingerprint ignores the selected HOME volume so one warm runtime profile
+// can serve Boxes that attach different volumes.
+func warmFingerprint(w *api.ResumablePod) string {
+	copy := w.DeepCopy()
+	copy.Spec.HomeVolumeUID = ""
+	return api.SpecFingerprint(copy)
 }
 func debugHostVolumes(w *api.ResumablePod) []core.Volume {
 	if w.Spec.DebugReadWriteHostPath != "" {
@@ -164,7 +129,11 @@ func debugHostMounts(w *api.ResumablePod) []core.VolumeMount {
 func hostVolumes(w *api.ResumablePod) []core.Volume {
 	volumes := debugHostVolumes(w)
 	if w.Spec.PersistentHome {
-		home, _ := homevolume.Path(homevolume.DefaultBase, string(w.UID)) // validate checks the owner first.
+		owner := string(w.UID)
+		if w.Spec.HomeVolumeUID != "" {
+			owner = w.Spec.HomeVolumeUID
+		}
+		home, _ := homevolume.Path(homevolume.DefaultBase, owner) // validate checks the owner first.
 		directory := core.HostPathDirectory
 		volumes = append(volumes, core.Volume{Name: "agent-home", VolumeSource: core.VolumeSource{HostPath: &core.HostPathVolumeSource{Path: home, Type: &directory}}})
 	}
@@ -194,6 +163,7 @@ func admittedDebugMount(w *api.ResumablePod, p *core.Pod) bool {
 		// child OCI create binds HOME after this Pod has been claimed.
 		template = w.DeepCopy()
 		template.Spec.PersistentHome = false
+		template.Spec.HomeVolumeUID = ""
 	}
 	wantVolumes, wantMounts := hostVolumes(template), hostMounts(template)
 	if len(p.Spec.Volumes) != len(wantVolumes) || len(p.Spec.Containers[0].VolumeMounts) != len(wantMounts) {
@@ -207,9 +177,15 @@ func admittedDebugMount(w *api.ResumablePod, p *core.Pod) bool {
 func validate(w *api.ResumablePod) error {
 	c := w.Spec.Container
 	if w.Spec.PersistentHome {
-		if _, err := homevolume.Path(homevolume.DefaultBase, string(w.UID)); err != nil {
+		owner := string(w.UID)
+		if w.Spec.HomeVolumeUID != "" {
+			owner = w.Spec.HomeVolumeUID
+		}
+		if _, err := homevolume.Path(homevolume.DefaultBase, owner); err != nil {
 			return err
 		}
+	} else if w.Spec.HomeVolumeUID != "" {
+		return fmt.Errorf("homeVolumeUID requires persistentHome")
 	}
 	if w.Spec.DesiredState != "Running" && w.Spec.DesiredState != "Suspended" {
 		return fmt.Errorf("desiredState must be Running or Suspended")

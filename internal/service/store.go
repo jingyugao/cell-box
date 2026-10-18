@@ -111,6 +111,8 @@ func OpenStore(dir string) (*Store, error) {
  PRIMARY KEY(kind,id));
  CREATE INDEX IF NOT EXISTS runtime_owner ON runtime_records(kind,client_id);
  CREATE INDEX IF NOT EXISTS runtime_box ON runtime_records(kind,box_id);
+ INSERT OR IGNORE INTO runtime_records(kind,id,client_id,record)
+ SELECT 'boxes_ids',id,client_id,'{}' FROM runtime_records WHERE kind='boxes';
  PRAGMA user_version=3;`)
 	if err != nil {
 		return nil, err
@@ -199,12 +201,24 @@ func (t *storeTx) Box(client, id string) (boxRecord, error) {
 	}
 	return b, err
 }
-func (t *storeTx) PutBox(b boxRecord) error { return t.put("boxes", b.Box.ID, b.ClientID, b.Box.ID, b) }
+func (t *storeTx) PutBox(b boxRecord) error {
+	if err := t.put("boxes", b.Box.ID, b.ClientID, b.Box.ID, b); err != nil {
+		return err
+	}
+	if b.Box.Phase == "deleted" {
+		return releaseBoxVolume(t, b)
+	}
+	return nil
+}
 func (t *storeTx) Operation(id string) (operationRecord, error) {
 	return readRecord[operationRecord](t.ctx, t.tx, "operations", id)
 }
 func (t *storeTx) PutOperation(r operationRecord) error {
-	return t.put("operations", r.Operation.ID, r.ClientID, r.Operation.TargetID, r)
+	boxID := r.Operation.TargetID
+	if r.Operation.Kind == "volume-create" || r.Operation.Kind == "volume-delete" {
+		boxID = "" // A volume can share a public name with a Box; purge must not touch its work.
+	}
+	return t.put("operations", r.Operation.ID, r.ClientID, boxID, r)
 }
 func (t *storeTx) Execution(id string) (executionRecord, error) {
 	return readRecord[executionRecord](t.ctx, t.tx, "executions", id)
@@ -295,6 +309,13 @@ func (s *Store) InterruptOperations(ctx context.Context) error {
             '$.operation.error',json('{"code":"UNKNOWN_OUTCOME","message":"Service restarted before completion; inspect the resource before retrying"}'),
             '$.operation.finishedAt',?,'$.operation.version',json_extract(record,'$.operation.version')+1)
             WHERE kind='operations' AND json_extract(record,'$.operation.status') IN ('queued','running')`, now); err != nil {
+			return err
+		}
+		if err := t.exec(`UPDATE runtime_records SET record=json_set(record,'$.volume.operationId','',
+            '$.volume.resourceVersion',json_extract(record,'$.volume.resourceVersion')+1,
+            '$.volume.phase','failed',
+            '$.volume.error',json('{"code":"UNKNOWN_OUTCOME","message":"Service restarted before completion; inspect the volume before deleting or retrying"}'))
+            WHERE kind='volumes' AND json_extract(record,'$.volume.phase') IN ('creating','deleting')`); err != nil {
 			return err
 		}
 		return t.exec(`UPDATE runtime_records SET record=json_set(record,'$.box.operationId','',

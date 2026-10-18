@@ -211,7 +211,7 @@ func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.P
 		return err
 	}
 	if homeID != "" {
-		if err = homevolume.Checkpoint(b.Base, string(r.UID), homeID, string(p.UID), r.Status.Snapshot); err != nil {
+		if err = homevolume.Checkpoint(b.Base, homeOwner(r), homeID, string(p.UID), r.Status.Snapshot); err != nil {
 			return err
 		}
 	}
@@ -257,7 +257,7 @@ func (b *Backend) verifySnapshotHome(r *api.ResumablePod, m *Manifest) error {
 		return fmt.Errorf("checkpoint persistent HOME identity mismatch")
 	}
 	if homeID != "" {
-		return homevolume.ValidateCheckpoint(b.Base, string(r.UID), homeID, r.Status.Snapshot)
+		return homevolume.ValidateCheckpoint(b.Base, homeOwner(r), homeID, r.Status.Snapshot)
 	}
 	return nil
 }
@@ -289,14 +289,31 @@ func (b *Backend) Prepare(ctx context.Context, r *api.ResumablePod, p *core.Pod)
 	if err := b.prepareSnapshot(ctx, r); err != nil {
 		return err
 	}
-	return AtomicJSON(filepath.Join(b.Base, "tickets", string(p.UID)+".json"), Ticket{OwnerUID: string(r.UID), PodUID: string(p.UID), Namespace: p.Namespace, PodName: p.Name, Snapshot: r.Status.Snapshot, SpecHash: r.Status.SpecHash, HomeID: homeID})
+	return AtomicJSON(filepath.Join(b.Base, "tickets", string(p.UID)+".json"), Ticket{OwnerUID: string(r.UID), NodeName: r.Spec.NodeName, HomeVolumeUID: r.Spec.HomeVolumeUID, PodUID: string(p.UID), Namespace: p.Namespace, PodName: p.Name, Snapshot: r.Status.Snapshot, SpecHash: r.Status.SpecHash, HomeID: homeID})
+}
+
+func homeOwner(r *api.ResumablePod) string {
+	if r.Spec.HomeVolumeUID != "" {
+		return r.Spec.HomeVolumeUID
+	}
+	return string(r.UID)
 }
 
 func (b *Backend) persistentHome(r *api.ResumablePod, initialize bool) (string, error) {
 	if !r.Spec.PersistentHome {
 		return "", nil
 	}
-	home, err := homevolume.Prepare(b.Base, string(r.UID), r.Spec.NodeName, r.Status.SpecHash, initialize)
+	var home homevolume.Identity
+	var err error
+	if r.Spec.HomeVolumeUID != "" {
+		if initialize {
+			home, err = homevolume.Attach(b.Base, r.Spec.HomeVolumeUID, r.Spec.NodeName, string(r.UID))
+		} else {
+			home, err = homevolume.VerifyAttachment(b.Base, r.Spec.HomeVolumeUID, r.Spec.NodeName, string(r.UID))
+		}
+	} else {
+		home, err = homevolume.Prepare(b.Base, string(r.UID), r.Spec.NodeName, r.Status.SpecHash, initialize)
+	}
 	if err != nil {
 		return "", fmt.Errorf("persistent HOME: %w", err)
 	}
@@ -397,9 +414,13 @@ func (b *Backend) Forget(ctx context.Context, r *api.ResumablePod) error {
 		return err
 	}
 	// Runtime/snapshot cleanup also calls Forget while the Box still exists.
-	// Its HOME belongs to the Box and is reclaimed only by the deletion finalizer.
+	// Independent HOME storage is detached on deletion and retained as a volume.
 	if deleting && r.Spec.PersistentHome {
-		if err := homevolume.Remove(b.Base, string(r.UID), r.Spec.NodeName, r.Status.SpecHash); err != nil {
+		if r.Spec.HomeVolumeUID != "" {
+			if err := homevolume.Detach(b.Base, r.Spec.HomeVolumeUID, r.Spec.NodeName, string(r.UID)); err != nil {
+				return err
+			}
+		} else if err := homevolume.PromoteLegacy(b.Base, string(r.UID), r.Spec.NodeName, r.Status.SpecHash); err != nil {
 			return err
 		}
 	}

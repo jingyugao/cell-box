@@ -1,6 +1,7 @@
 package node
 
 import (
+	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/homevolume"
 	backend "cellbox.local/cellbox/internal/runtime"
 	"context"
@@ -24,16 +25,22 @@ func TestWarmPersistentHomeAuthorization(t *testing.T) {
 	}
 	b := &Backend{Base: base, Runsc: bin, Images: imageClient{id: "image-id"}}
 	homes := map[string]string{}
+	volumes := map[string]string{}
 	for _, owner := range []string{"a", "b"} {
-		h, err := homevolume.Prepare(base, owner, "node", "spec", true)
+		volumeUID := "volume-" + owner
+		volumes[owner] = volumeUID
+		h, err := homevolume.Prepare(base, volumeUID, "node", homevolume.VolumeSpecHash, true)
 		if err != nil {
 			t.Fatal(err)
 		}
 		homes[owner] = h.ID
-		if err := homevolume.ClaimExecution(base, owner, h.ID, "old-"+owner, ""); err != nil {
+		if _, err := homevolume.Attach(base, volumeUID, "node", owner); err != nil {
 			t.Fatal(err)
 		}
-		if err := homevolume.Checkpoint(base, owner, h.ID, "old-"+owner, "snapshot"); err != nil {
+		if err := homevolume.ClaimExecution(base, volumeUID, h.ID, "old-"+owner, ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := homevolume.Checkpoint(base, volumeUID, h.ID, "old-"+owner, "snapshot"); err != nil {
 			t.Fatal(err)
 		}
 		path := testCheckpoint(t, base, owner, "snapshot", "spec", "image-id", bin)
@@ -49,7 +56,10 @@ func TestWarmPersistentHomeAuthorization(t *testing.T) {
 		}
 	}
 	p := &core.Pod{ObjectMeta: meta.ObjectMeta{UID: "pod", Name: "pod", Namespace: "test"}}
-	if err := b.RegisterWarm(ctx, p, "spec"); err != nil {
+	profile := testWorkload("profile", "snapshot", "spec", "image-id")
+	profile.Spec.PersistentHome = true
+	profile.Spec.NodeName = "node"
+	if err := b.RegisterWarm(ctx, p, api.SpecFingerprint(profile)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := BindWarm(base, "pod", "pod", "test", strings.Repeat("a", 64)); err != nil {
@@ -64,9 +74,10 @@ func TestWarmPersistentHomeAuthorization(t *testing.T) {
 		wg.Add(1)
 		go func(owner string) {
 			defer wg.Done()
-			w := testWorkload(owner, "snapshot", "spec", "image")
+			w := testWorkload(owner, "snapshot", "spec", "image-id")
 			w.Spec.PersistentHome = true
 			w.Spec.NodeName = "node"
+			w.Spec.HomeVolumeUID = volumes[owner]
 			_, err := b.ActivateWarm(ctx, w, p)
 			results <- err
 		}(owner)
@@ -88,15 +99,16 @@ func TestWarmPersistentHomeAuthorization(t *testing.T) {
 	if err := ReadJSON(filepath.Join(base, "tickets", "pod.json"), &ticket); err != nil {
 		t.Fatal(err)
 	}
-	if ticket.HomeID != homes[ticket.OwnerUID] {
+	if ticket.HomeID != homes[ticket.OwnerUID] || ticket.HomeVolumeUID != volumes[ticket.OwnerUID] {
 		t.Fatal("warm ticket does not pin winning HOME")
 	}
-	if err := homevolume.ClaimExecution(base, ticket.OwnerUID, ticket.HomeID, "pod", "snapshot"); err != nil {
+	if err := homevolume.ClaimExecution(base, ticket.HomeVolumeUID, ticket.HomeID, "pod", "snapshot"); err != nil {
 		t.Fatal(err)
 	}
 	w := testWorkload(ticket.OwnerUID, "snapshot", "spec", "image")
 	w.Spec.PersistentHome = true
 	w.Spec.NodeName = "node"
+	w.Spec.HomeVolumeUID = volumes[ticket.OwnerUID]
 	if ok, err := b.ActivateWarm(ctx, w, p); !ok || err != nil {
 		t.Fatalf("idempotent activation after parent claimed HOME: %v %v", ok, err)
 	}
@@ -104,8 +116,49 @@ func TestWarmPersistentHomeAuthorization(t *testing.T) {
 	if ticket.OwnerUID == peer {
 		peer = "b"
 	}
-	if err := homevolume.ValidateCheckpoint(base, peer, homes[peer], "snapshot"); err != nil {
+	if err := homevolume.ValidateCheckpoint(base, volumes[peer], homes[peer], "snapshot"); err != nil {
 		t.Fatalf("losing claim consumed peer HOME: %v", err)
+	}
+}
+
+func TestWarmRejectsDifferentProfileBeforeAttachingVolume(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	bin := filepath.Join(base, "runsc")
+	if err := os.WriteFile(bin, []byte("runsc"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	b := &Backend{Base: base, Runsc: bin}
+	profile := testWorkload("profile", "snapshot", "spec", "image-good")
+	profile.Spec.PersistentHome = true
+	profile.Spec.NodeName = "node"
+	p := &core.Pod{ObjectMeta: meta.ObjectMeta{UID: "warm-pod", Name: "warm-pod", Namespace: "test"}}
+	if err := b.RegisterWarm(ctx, p, api.SpecFingerprint(profile)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BindWarm(base, "warm-pod", p.Name, p.Namespace, strings.Repeat("a", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := warmUpdate(base, "warm-pod", false, func(l *WarmLease) error {
+		l.Phase = "waiting"
+		l.Deadline = time.Now().Add(time.Minute)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	w := testWorkload("new-box", "snapshot", "spec", "image-wrong")
+	w.Spec.PersistentHome = true
+	w.Spec.NodeName = "node"
+	w.Spec.HomeVolumeUID = "volume-not-attached"
+	if _, err := b.ActivateWarm(ctx, w, p); err == nil || !strings.Contains(err.Error(), "incompatible warm restore") {
+		t.Fatalf("wrong image profile was accepted: %v", err)
+	}
+	if _, err := homevolume.Path(base, w.Spec.HomeVolumeUID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "homes", w.Spec.HomeVolumeUID)); !os.IsNotExist(err) {
+		t.Fatalf("profile mismatch touched/created the requested volume: %v", err)
 	}
 }
 
@@ -124,7 +177,8 @@ func TestWarmClaimRaceAndExpiry(t *testing.T) {
 		}
 	}
 	p := &core.Pod{ObjectMeta: meta.ObjectMeta{UID: "pod", Name: "pod", Namespace: "test"}}
-	if err := b.RegisterWarm(ctx, p, "spec"); err != nil {
+	profile := testWorkload("profile", "snapshot", "spec", "image")
+	if err := b.RegisterWarm(ctx, p, api.SpecFingerprint(profile)); err != nil {
 		t.Fatal(err)
 	}
 	sid := strings.Repeat("a", 64)

@@ -29,7 +29,7 @@ func TestOpenAPIResponseShapesAndReferences(t *testing.T) {
 		t.Fatal("public contract must not promise or expose Idempotency-Key")
 	}
 	paths := doc["paths"].(map[string]any)
-	for endpoint, methods := range map[string][]string{"/v1/boxes": {"get", "post"}, "/v1/boxes/{id}:resume": {"post"}, "/v1/boxes/{id}:suspend": {"post"}, "/v1/boxes/{id}/archives": {"post"}, "/v1/boxes:restore": {"post"}, "/v1/archives": {"get"}, "/v1/archives/{id}": {"get", "delete"}, "/v1/archives/{id}/content": {"get"}, "/v1/templates/{id}/revisions": {"get", "post"}} {
+	for endpoint, methods := range map[string][]string{"/v1/boxes": {"get", "post"}, "/v1/boxes/{id}:resume": {"post"}, "/v1/boxes/{id}:suspend": {"post"}, "/v1/boxes/{id}/archives": {"post"}, "/v1/boxes:restore": {"post"}, "/v1/archives": {"get"}, "/v1/archives/{id}": {"get", "delete"}, "/v1/archives/{id}/content": {"get"}, "/v1/templates/{id}/revisions": {"get", "post"}, "/v1/volumes": {"get", "post"}, "/v1/volumes/{id}": {"get", "delete"}} {
 		for _, method := range methods {
 			if path, ok := paths[endpoint].(map[string]any); !ok || path[method] == nil {
 				t.Errorf("missing API contract: %s %s", method, endpoint)
@@ -41,7 +41,7 @@ func TestOpenAPIResponseShapesAndReferences(t *testing.T) {
 			t.Errorf("removed API must not appear in the public contract: %s", endpoint)
 		}
 	}
-	for endpoint, method := range map[string]string{"/v1/boxes": "post", "/v1/boxes/{id}:destroy": "post", "/v1/boxes/{id}:suspend": "post", "/v1/boxes/{id}:resume": "post", "/v1/boxes/{id}/archives": "post", "/v1/boxes:restore": "post", "/v1/templates/{id}/revisions": "post"} {
+	for endpoint, method := range map[string]string{"/v1/boxes": "post", "/v1/boxes/{id}:destroy": "post", "/v1/boxes/{id}:suspend": "post", "/v1/boxes/{id}:resume": "post", "/v1/boxes/{id}/archives": "post", "/v1/boxes:restore": "post", "/v1/templates/{id}/revisions": "post", "/v1/volumes": "post", "/v1/volumes/{id}": "delete"} {
 		operation := paths[endpoint].(map[string]any)[method].(map[string]any)
 		parameters, _ := operation["parameters"].([]any)
 		for _, parameter := range parameters {
@@ -50,11 +50,11 @@ func TestOpenAPIResponseShapesAndReferences(t *testing.T) {
 			}
 		}
 	}
-	for _, endpoint := range []string{"/v1/boxes", "/v1/boxes/{id}:destroy", "/v1/boxes/{id}:suspend", "/v1/boxes/{id}:resume", "/v1/boxes/{id}:activate", "/v1/boxes/{id}/archives", "/v1/boxes:restore"} {
-		operation := paths[endpoint].(map[string]any)["post"].(map[string]any)
+	for endpoint, method := range map[string]string{"/v1/boxes": "post", "/v1/boxes/{id}:destroy": "post", "/v1/boxes/{id}:suspend": "post", "/v1/boxes/{id}:resume": "post", "/v1/boxes/{id}:activate": "post", "/v1/boxes/{id}/archives": "post", "/v1/boxes:restore": "post", "/v1/volumes": "post", "/v1/volumes/{id}": "delete"} {
+		operation := paths[endpoint].(map[string]any)[method].(map[string]any)
 		responses := operation["responses"].(map[string]any)
 		if responses["202"] == nil {
-			t.Errorf("POST %s must return 202 with an operation", endpoint)
+			t.Errorf("%s %s must return 202 with an operation", method, endpoint)
 		}
 	}
 	var walk func(any)
@@ -97,7 +97,7 @@ func TestOpenAPIResponseShapesAndReferences(t *testing.T) {
 		t.Errorf("archive capability enum = %v, want none/stopped-workspace", archiveCapability)
 	}
 	types := map[string]any{
-		"Box": service.Box{}, "RuntimeOperation": service.Operation{},
+		"Box": service.Box{}, "Volume": service.Volume{}, "RuntimeOperation": service.Operation{},
 		"TemplateBuildOperation": catalog.Operation{}, "Template": catalog.Template{}, "TemplateRevision": catalog.Revision{},
 		"Execution": service.Execution{}, "Capabilities": service.Capabilities{},
 		"Archive": service.Archive{}, "Identity": guestapi.Identity{},
@@ -135,5 +135,32 @@ func TestOpenAPIResponseShapesAndReferences(t *testing.T) {
 	variants, ok := operation["oneOf"].([]any)
 	if !ok || len(variants) != 2 {
 		t.Fatalf("Operation must be a union of runtime and template build operation shapes: %#v", operation["oneOf"])
+	}
+	createBox := schemas["CreateBox"].(map[string]any)["properties"].(map[string]any)
+	for _, field := range []string{"id", "homeVolumeId"} {
+		if createBox[field] == nil {
+			t.Errorf("CreateBox is missing %s", field)
+		}
+	}
+	const resourceIDPattern = `^[a-z0-9]([-a-z0-9]{0,53}[a-z0-9])?$`
+	homeVolumeID := createBox["homeVolumeId"].(map[string]any)
+	if homeVolumeID["pattern"] != resourceIDPattern || homeVolumeID["maxLength"] != float64(55) {
+		t.Error("CreateBox.homeVolumeId must use the lowercase 55-character resource ID rule")
+	}
+	for _, schemaName := range []string{"CreateBox", "RestoreBox"} {
+		properties := schemas[schemaName].(map[string]any)["properties"].(map[string]any)
+		id := properties["id"].(map[string]any)
+		if id["pattern"] != resourceIDPattern || id["maxLength"] != float64(55) {
+			t.Errorf("%s.id must use the lowercase 55-character resource ID rule", schemaName)
+		}
+	}
+	volumePost := paths["/v1/volumes"].(map[string]any)["post"].(map[string]any)
+	volumeRequest := volumePost["requestBody"].(map[string]any)["content"].(map[string]any)["application/json"].(map[string]any)["schema"].(map[string]any)
+	volumeID := volumeRequest["properties"].(map[string]any)["id"].(map[string]any)
+	if volumeID["pattern"] != resourceIDPattern || volumeID["maxLength"] != float64(55) {
+		t.Error("volume id must use the lowercase 55-character resource ID rule")
+	}
+	if _, accepted := schemas["RestoreBox"].(map[string]any)["properties"].(map[string]any)["homeVolumeId"]; accepted {
+		t.Error("RestoreBox must not accept homeVolumeId")
 	}
 }

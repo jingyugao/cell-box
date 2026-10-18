@@ -134,7 +134,9 @@ func (p *fakeCoreProvider) CacheImage(ctx context.Context, image, node, namespac
 	return nil
 }
 
-func (*fakeCoreProvider) Name() string { return "docker" }
+func (*fakeCoreProvider) Name() string                                               { return "docker" }
+func (*fakeCoreProvider) CreateVolume(context.Context, boxprovider.VolumeSpec) error { return nil }
+func (*fakeCoreProvider) DeleteVolume(context.Context, boxprovider.VolumeSpec) error { return nil }
 func (p *fakeCoreProvider) Create(_ context.Context, s boxprovider.Spec) (boxprovider.Handle, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

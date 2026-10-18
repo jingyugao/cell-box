@@ -29,7 +29,22 @@ type Spec struct {
 	DebugReadOnlyHostPath  string
 	DebugReadWriteHostPath string
 	PersistentHome         bool
+	HomeVolumeUID          string
 	Staged                 bool // Start guest control, but hold the configured workload until activation.
+}
+
+// VolumeSpec identifies a node-local persistent HOME volume. UID is allocated
+// by the Cellbox service and remains stable across Box replacements.
+type VolumeSpec struct {
+	UID       string
+	NodeName  string
+	Namespace string
+}
+
+// VolumeProvider manages persistent HOME storage independently of Box runs.
+type VolumeProvider interface {
+	CreateVolume(context.Context, VolumeSpec) error
+	DeleteVolume(context.Context, VolumeSpec) error
 }
 
 type Handle struct {

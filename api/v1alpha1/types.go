@@ -61,6 +61,7 @@ type Spec struct {
 	DebugReadOnlyHostPath  string             `json:"debugReadOnlyHostPath,omitempty"`
 	DebugReadWriteHostPath string             `json:"debugReadWriteHostPath,omitempty"`
 	PersistentHome         bool               `json:"persistentHome,omitempty"`
+	HomeVolumeUID          string             `json:"homeVolumeUID,omitempty"`
 	ServicePorts           []core.ServicePort `json:"servicePorts,omitempty"`
 	RetryNonce             string             `json:"retryNonce,omitempty"`
 	StartupTimeoutSeconds  int64              `json:"startupTimeoutSeconds,omitempty"`

@@ -86,6 +86,91 @@ func TestCreateWaitsForOperationAndConnects(t *testing.T) {
 	}
 }
 
+func TestVolumeCRUDAndCreateBoxHomeVolumeWireFields(t *testing.T) {
+	var gotCreateVolume, gotDeleteVolume, gotCreateBox bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertHeaders(t, r)
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/volumes":
+			gotCreateVolume = true
+			var request CreateVolumeOptions
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			if request.ID != "p1-home" || request.OwnerKey != "project:p1" || request.ProfileID != "k8s-default" {
+				t.Errorf("create volume request = %#v", request)
+			}
+			writeJSONTest(w, Operation{ID: "op-volume", Kind: "volume-create", TargetID: "p1-home", Status: "succeeded"})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/volumes/p1-home":
+			writeJSONTest(w, Volume{ID: "p1-home", OwnerKey: "project:p1", ProfileID: "k8s-default", NodeName: "node-a", Phase: "available", ResourceVersion: 7})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/volumes":
+			writeJSONTest(w, []Volume{{ID: "p1-home", Phase: "available"}})
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/volumes/p1-home":
+			gotDeleteVolume = true
+			writeJSONTest(w, Operation{ID: "op-delete", Kind: "volume-delete", TargetID: "p1-home", Status: "succeeded", Result: map[string]string{"volumeId": "p1-home"}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/boxes":
+			gotCreateBox = true
+			var request CreateOptions
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			if request.ID != "box-p1-v2" || request.HomeVolumeID != "p1-home" {
+				t.Errorf("create box request = %#v", request)
+			}
+			writeJSONTest(w, Operation{ID: "op-box", Kind: "create", TargetID: request.ID, Status: "succeeded", Box: &SandboxInfo{ID: request.ID, HomeVolumeID: request.HomeVolumeID}})
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := testClient(t, server, "")
+
+	volume, err := client.CreateVolume(context.Background(), CreateVolumeOptions{ID: "p1-home", OwnerKey: "project:p1", ProfileID: "k8s-default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if volume.ID != "p1-home" || volume.Phase != "available" || volume.ResourceVersion != 7 {
+		t.Fatalf("created volume = %#v", volume)
+	}
+	volumes, err := client.ListVolumes(context.Background())
+	if err != nil || len(volumes) != 1 || volumes[0].ID != "p1-home" {
+		t.Fatalf("ListVolumes = %#v, %v", volumes, err)
+	}
+	deleteOp, err := client.DeleteVolume(context.Background(), "p1-home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleteOp.Result["volumeId"] != "p1-home" {
+		t.Fatalf("delete result = %#v", deleteOp.Result)
+	}
+	op, err := client.CreateAsync(context.Background(), CreateOptions{ID: "box-p1-v2", RevisionID: "rev-v2", OwnerKey: "project:p1", HomeVolumeID: "p1-home"})
+	if err != nil || op.Box == nil || op.Box.HomeVolumeID != "p1-home" {
+		t.Fatalf("CreateAsync = %#v, %v", op, err)
+	}
+	if !gotCreateVolume || !gotDeleteVolume || !gotCreateBox {
+		t.Fatalf("request coverage: createVolume=%v deleteVolume=%v createBox=%v", gotCreateVolume, gotDeleteVolume, gotCreateBox)
+	}
+}
+
+func TestDeleteVolumeConflictRemainsDiscoverableThroughSDKErrorWrapping(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertHeaders(t, r)
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/volumes/attached" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusConflict)
+		writeJSONTest(w, map[string]any{"error": map[string]string{"code": "CONFLICT", "message": "Volume is in use"}})
+	}))
+	defer server.Close()
+	client := testClient(t, server, "")
+	_, err := client.DeleteVolumeAsync(context.Background(), "attached")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusConflict || apiErr.Code != "CONFLICT" {
+		t.Fatalf("DeleteVolumeAsync error = %#v, want discoverable CONFLICT APIError", err)
+	}
+}
+
 func TestWaitOperationTreatsCancellingAsPending(t *testing.T) {
 	var gets atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

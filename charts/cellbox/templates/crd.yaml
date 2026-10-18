@@ -43,6 +43,8 @@ spec:
               x-kubernetes-validations:
                 - rule: "(has(self.persistentHome) && self.persistentHome) == (has(oldSelf.persistentHome) && oldSelf.persistentHome)"
                   message: persistentHome is immutable
+                - rule: "(has(self.homeVolumeUID) ? self.homeVolumeUID : '') == (has(oldSelf.homeVolumeUID) ? oldSelf.homeVolumeUID : '')"
+                  message: homeVolumeUID is immutable
               properties:
                 nodeName:
                   type: string
@@ -84,6 +86,10 @@ spec:
                       message: debugReadWriteHostPath is immutable
                 persistentHome:
                   type: boolean
+                homeVolumeUID:
+                  type: string
+                  maxLength: 128
+                  pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
                 retryNonce:
                   type: string
                   maxLength: 128

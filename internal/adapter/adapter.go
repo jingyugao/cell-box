@@ -86,11 +86,14 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 			return nil, fmt.Errorf("authorization Pod identity mismatch")
 		}
 		if t.HomeID != "" {
-			if _, err := homevolume.Verify(a.Base, t.OwnerUID, "", t.SpecHash, t.HomeID); err != nil {
+			if err := a.verifyHomeAttachment(t); err != nil {
+				return nil, fmt.Errorf("persistent HOME attachment: %w", err)
+			}
+			if _, err := homevolume.Verify(a.Base, ticketHomeOwner(t), "", ticketHomeSpec(t), t.HomeID); err != nil {
 				return nil, fmt.Errorf("persistent HOME unavailable: %w", err)
 			}
 			if t.Snapshot != "" {
-				if err := homevolume.ValidateCheckpoint(a.Base, t.OwnerUID, t.HomeID, t.Snapshot); err != nil {
+				if err := homevolume.ValidateCheckpoint(a.Base, ticketHomeOwner(t), t.HomeID, t.Snapshot); err != nil {
 					return nil, err
 				}
 			}
@@ -211,7 +214,28 @@ func (a Adapter) claimHome(t node.Ticket) error {
 	}
 	// Consume the disk/checkpoint pairing before restored code can mutate HOME.
 	// A crash after this fence requires inspection, never replay with newer files.
-	return homevolume.ClaimExecution(a.Base, t.OwnerUID, t.HomeID, t.PodUID, t.Snapshot)
+	if err := a.verifyHomeAttachment(t); err != nil {
+		return fmt.Errorf("persistent HOME attachment: %w", err)
+	}
+	return homevolume.ClaimExecution(a.Base, ticketHomeOwner(t), t.HomeID, t.PodUID, t.Snapshot)
+}
+
+func ticketHomeSpec(t node.Ticket) string {
+	if t.HomeVolumeUID != "" {
+		return homevolume.VolumeSpecHash
+	}
+	return t.SpecHash
+}
+
+func (a Adapter) verifyHomeAttachment(t node.Ticket) error {
+	if t.HomeVolumeUID == "" {
+		return nil // Legacy HOME identity remains bound to the Box UID/spec hash.
+	}
+	if t.NodeName == "" || t.HomeVolumeUID == "" {
+		return fmt.Errorf("incomplete persistent HOME authorization")
+	}
+	_, err := homevolume.VerifyAttachment(a.Base, t.HomeVolumeUID, t.NodeName, t.OwnerUID)
+	return err
 }
 func Main() {
 	a := Adapter{Base: node.DefaultBase, Runsc: node.DefaultRunsc}
@@ -263,7 +287,10 @@ func (a Adapter) childCreate(id string, annotations map[string]string, bundle st
 		return fmt.Errorf("child sandbox revoked")
 	}
 	if t.HomeID != "" {
-		if err := homevolume.VerifyExecution(a.Base, t.OwnerUID, t.SpecHash, t.HomeID, t.PodUID); err != nil {
+		if err := a.verifyHomeAttachment(t); err != nil {
+			return fmt.Errorf("persistent HOME attachment: %w", err)
+		}
+		if err := homevolume.VerifyExecution(a.Base, ticketHomeOwner(t), ticketHomeSpec(t), t.HomeID, t.PodUID); err != nil {
 			return fmt.Errorf("persistent HOME execution: %w", err)
 		}
 		if err := a.claimHomeChild(sid, id); err != nil {
@@ -291,7 +318,10 @@ func (a Adapter) childStart(id string) error {
 		return fmt.Errorf("child sandbox revoked")
 	}
 	if c.Ticket.HomeID != "" {
-		if err := homevolume.VerifyExecution(a.Base, c.Ticket.OwnerUID, c.Ticket.SpecHash, c.Ticket.HomeID, c.Ticket.PodUID); err != nil {
+		if err := a.verifyHomeAttachment(c.Ticket); err != nil {
+			return fmt.Errorf("persistent HOME attachment: %w", err)
+		}
+		if err := homevolume.VerifyExecution(a.Base, ticketHomeOwner(c.Ticket), ticketHomeSpec(c.Ticket), c.Ticket.HomeID, c.Ticket.PodUID); err != nil {
 			return fmt.Errorf("persistent HOME execution: %w", err)
 		}
 		if err := a.claimHomeChild(c.SandboxID, id); err != nil {

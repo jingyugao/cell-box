@@ -49,6 +49,7 @@ func TestPersistentHomeSpecPropagationAndReentryCheck(t *testing.T) {
 	p, s, ctx := fixture(t)
 	s.Config.Workspace = "/home/agent/workspace"
 	s.PersistentHome = true
+	s.HomeVolumeUID = "volume-one"
 	h, err := p.Create(ctx, s)
 	if err != nil {
 		t.Fatal(err)
@@ -57,9 +58,14 @@ func TestPersistentHomeSpecPropagationAndReentryCheck(t *testing.T) {
 	if err := p.Client.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
 		t.Fatal(err)
 	}
-	if !w.Spec.PersistentHome {
-		t.Fatal("provider lost persistentHome")
+	if !w.Spec.PersistentHome || w.Spec.HomeVolumeUID != s.HomeVolumeUID {
+		t.Fatal("provider lost persistent HOME configuration")
 	}
+	s.HomeVolumeUID = "volume-two"
+	if _, err := p.Create(ctx, s); err == nil {
+		t.Fatal("re-entered Box with a different HOME volume")
+	}
+	s.HomeVolumeUID = "volume-one"
 	s.PersistentHome = false
 	if _, err := p.Create(ctx, s); err == nil {
 		t.Fatal("re-entered Box with a different persistentHome setting")

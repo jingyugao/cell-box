@@ -29,7 +29,7 @@ type Profile struct {
 	// PersistentHome records the immutable storage layout, not an operator
 	// switch. Config validation always enables it for new resumable Boxes;
 	// old stored profiles retain false. The initially empty HOME hides image
-	// contents and is retained across suspend/resume until the Box is deleted.
+	// contents. New Boxes reference an independent HOME volume.
 	PersistentHome bool `json:"persistentHome,omitempty"`
 	// Resource limits are opt-in. Omitted or zero values leave that resource unlimited.
 	CPU       float64         `json:"cpu,omitempty"`
@@ -83,6 +83,7 @@ type Capabilities struct {
 	PersistentHome     bool   `json:"persistentHome,omitempty"`
 }
 type Box struct {
+	HomeVolumeID    string       `json:"homeVolumeId,omitempty"`
 	TemplateID      string       `json:"templateId"`
 	RevisionID      string       `json:"revisionId"`
 	TemplateName    string       `json:"templateName"`
@@ -104,6 +105,7 @@ type Box struct {
 	CreatedAt       time.Time    `json:"createdAt"`
 }
 type boxRecord struct {
+	HomeVolumeUID        string             `json:"homeVolumeUID,omitempty"`
 	Box                  Box                `json:"box"`
 	ClientID             string             `json:"clientId"`
 	Profile              Profile            `json:"profile"`

@@ -102,12 +102,17 @@ func (b *Backend) CaptureWorkspaceArchive(ctx context.Context, r *api.ResumableP
 	if err != nil {
 		return result, err
 	}
-	home, err := homevolume.Verify(b.Base, string(r.UID), r.Spec.NodeName, r.Status.SpecHash, "")
+	var home homevolume.Identity
+	if r.Spec.HomeVolumeUID != "" {
+		home, err = homevolume.VerifyAttachment(b.Base, r.Spec.HomeVolumeUID, r.Spec.NodeName, string(r.UID))
+	} else {
+		home, err = homevolume.Verify(b.Base, string(r.UID), r.Spec.NodeName, r.Status.SpecHash, "")
+	}
 	if err != nil {
 		return result, err
 	}
 	if r.Status.Phase == "Suspended" {
-		if err = homevolume.ValidateCheckpoint(b.Base, string(r.UID), home.ID, r.Status.Snapshot); err != nil {
+		if err = homevolume.ValidateCheckpoint(b.Base, homeOwner(r), home.ID, r.Status.Snapshot); err != nil {
 			return result, err
 		}
 	}
@@ -121,7 +126,7 @@ func (b *Backend) CaptureWorkspaceArchive(ctx context.Context, r *api.ResumableP
 	if !request.ExpiresAt.IsZero() && !time.Now().Before(request.ExpiresAt) {
 		return result, errors.New("workspace archive request expired")
 	}
-	root, err := homevolume.Path(b.Base, string(r.UID))
+	root, err := homevolume.Path(b.Base, homeOwner(r))
 	if err != nil {
 		return result, err
 	}

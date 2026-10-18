@@ -19,7 +19,7 @@ func (a Adapter) bindHome(bundle string, t node.Ticket) error {
 	if bundle == "" {
 		return fmt.Errorf("missing child bundle for persistent HOME")
 	}
-	source, err := homevolume.Path(a.Base, t.OwnerUID)
+	source, err := homevolume.Path(a.Base, ticketHomeOwner(t))
 	if err != nil {
 		return err
 	}
@@ -92,6 +92,13 @@ func (a Adapter) bindHome(bundle string, t node.Ticket) error {
 		return err
 	}
 	return node.AtomicJSON(path, spec)
+}
+
+func ticketHomeOwner(t node.Ticket) string {
+	if t.HomeVolumeUID != "" {
+		return t.HomeVolumeUID
+	}
+	return t.OwnerUID
 }
 
 // A Box has exactly one business container. A second child ID must not obtain

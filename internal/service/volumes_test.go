@@ -1,0 +1,365 @@
+package service
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+
+	"cellbox.local/cellbox/internal/boxprovider"
+	"cellbox.local/cellbox/internal/homevolume"
+	"cellbox.local/cellbox/internal/node"
+)
+
+// Exercise real disk identities and leases behind the HTTP service, while the
+// process provider remains a deterministic substitute for Kubernetes/runsc.
+type diskCoreProvider struct {
+	*fakeCoreProvider
+	base  string
+	mu    sync.Mutex
+	specs map[string]boxprovider.Spec
+}
+
+func (p *diskCoreProvider) CreateVolume(_ context.Context, spec boxprovider.VolumeSpec) error {
+	return (&node.Backend{Base: p.base}).CreateVolume(spec.UID, spec.NodeName)
+}
+func (p *diskCoreProvider) DeleteVolume(_ context.Context, spec boxprovider.VolumeSpec) error {
+	return (&node.Backend{Base: p.base}).DeleteVolume(spec.UID, spec.NodeName)
+}
+func (p *diskCoreProvider) Create(ctx context.Context, spec boxprovider.Spec) (boxprovider.Handle, error) {
+	h, err := p.fakeCoreProvider.Create(ctx, spec)
+	if err != nil {
+		return h, err
+	}
+	home, err := homevolume.Attach(p.base, spec.HomeVolumeUID, spec.NodeName, h.ID)
+	if err != nil {
+		return h, err
+	}
+	if err := homevolume.ClaimExecution(p.base, spec.HomeVolumeUID, home.ID, "pod-"+spec.BoxID, ""); err != nil {
+		return h, err
+	}
+	p.mu.Lock()
+	p.specs[h.ID] = spec
+	p.mu.Unlock()
+	return h, nil
+}
+func (p *diskCoreProvider) Destroy(ctx context.Context, h boxprovider.Handle) error {
+	if err := p.fakeCoreProvider.Destroy(ctx, h); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	spec := p.specs[h.ID]
+	p.mu.Unlock()
+	return homevolume.Detach(p.base, spec.HomeVolumeUID, spec.NodeName, h.ID)
+}
+
+func volumeFixture(t *testing.T) (*coreFixture, *diskCoreProvider) {
+	t.Helper()
+	f := newCoreFixture(t)
+	useK3sProfile(t, f)
+	p := &diskCoreProvider{fakeCoreProvider: f.provider, base: t.TempDir(), specs: map[string]boxprovider.Spec{}}
+	f.service.providers["resumable-k8s-pod"] = p
+	return f, p
+}
+
+func createTestVolume(t *testing.T, f *coreFixture, id string) Volume {
+	t.Helper()
+	status, body := f.call(t, "POST", "/v1/volumes", testClientToken, "", createVolumeRequest{ID: id, OwnerKey: "owner-a", ProfileID: "profile-a"})
+	wantStatus(t, status, 202, body)
+	f.waitOperation(t, decodeResponse[Operation](t, body).ID, "succeeded")
+	status, body = f.call(t, "GET", "/v1/volumes/"+id, testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	return decodeResponse[Volume](t, body)
+}
+
+func createVolumeBox(t *testing.T, f *coreFixture, input createRequest) Box {
+	t.Helper()
+	op, err := f.service.create("client-a", input, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.waitOperation(t, op.ID, "succeeded")
+	b, err := f.service.rawBox(op.TargetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.Box
+}
+
+func destroyVolumeBox(t *testing.T, f *coreFixture, id string) {
+	t.Helper()
+	op, err := f.service.action("client-a", id, "destroy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.waitOperation(t, op.ID, "succeeded")
+}
+
+func TestVolumeSurvivesSandboxUpgradeAndExplicitDelete(t *testing.T) {
+	f, p := volumeFixture(t)
+	v := createTestVolume(t, f, "project-disk")
+	template := f.template(t)
+	first := createVolumeBox(t, f, createRequest{ID: "box-v1", OwnerKey: v.OwnerKey, TemplateID: template, HomeVolumeID: v.ID})
+	record, err := f.service.store.VolumeRecord("client-a", v.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, _ := homevolume.Path(p.base, record.UID)
+	file := filepath.Join(root, "project-data")
+	if err := os.WriteFile(file, []byte("keep through upgrade"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := homevolume.Verify(p.base, record.UID, "test-node", homevolume.VolumeSpecHash, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, body := f.call(t, "DELETE", "/v1/volumes/"+v.ID, testClientToken, "", nil)
+	wantStatus(t, status, 409, body)
+	status, body = f.call(t, "GET", "/v1/volumes/"+v.ID, otherClientToken, "", nil)
+	wantStatus(t, status, 404, body)
+	destroyVolumeBox(t, f, first.ID)
+	status, body = f.call(t, "GET", "/v1/volumes/"+v.ID, testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	if got := decodeResponse[Volume](t, body); got.Phase != "available" || got.BoxID != "" {
+		t.Fatalf("destroy did not release volume: %+v", got)
+	}
+	v2 := buildCatalogRevision(t, f, template, "v2", "registry.example.test/upgraded:latest")
+	second := createVolumeBox(t, f, createRequest{ID: "box-v2", OwnerKey: v.OwnerKey, RevisionID: v2.ID, HomeVolumeID: v.ID})
+	if second.Image == first.Image || second.HomeVolumeID != first.HomeVolumeID {
+		t.Fatalf("upgrade did not change image and preserve volume: %+v -> %+v", first, second)
+	}
+	after, err := homevolume.Verify(p.base, record.UID, "test-node", homevolume.VolumeSpecHash, before.ID)
+	if err != nil || after.Inode != before.Inode {
+		t.Fatalf("disk identity changed: %+v -> %+v, %v", before, after, err)
+	}
+	if data, err := os.ReadFile(file); err != nil || string(data) != "keep through upgrade" {
+		t.Fatalf("project data lost: %q, %v", data, err)
+	}
+	if err := f.service.store.Write(context.Background(), func(tx *storeTx) error {
+		old, err := tx.Box("client-a", first.ID)
+		if err != nil {
+			return err
+		}
+		return tx.PutBox(old)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if current, err := f.service.store.VolumeRecord("client-a", v.ID); err != nil || current.Volume.BoxID != second.ID {
+		t.Fatalf("old terminal observation released the new owner: %+v, %v", current, err)
+	}
+	destroyVolumeBox(t, f, second.ID)
+	status, body = f.call(t, "DELETE", "/v1/volumes/"+v.ID, testClientToken, "", nil)
+	wantStatus(t, status, 202, body)
+	f.waitOperation(t, decodeResponse[Operation](t, body).ID, "succeeded")
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("explicit delete retained disk: %v", err)
+	}
+	status, body = f.call(t, "POST", "/v1/volumes", testClientToken, "", createVolumeRequest{ID: v.ID, OwnerKey: v.OwnerKey, ProfileID: "profile-a"})
+	wantStatus(t, status, 409, body)
+}
+
+func TestVolumeAndSandboxCreateConflictsAreAtomic(t *testing.T) {
+	f, _ := volumeFixture(t)
+	v := createTestVolume(t, f, "shared-disk")
+	template := f.template(t)
+	input := createRequest{ID: "box-one", TemplateID: template, OwnerKey: v.OwnerKey, HomeVolumeID: v.ID}
+	createVolumeBox(t, f, input)
+	status, body := f.call(t, "POST", "/v1/boxes", testClientToken, "", input)
+	wantStatus(t, status, 409, body)
+	input.ID = "box-two"
+	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "", input)
+	wantStatus(t, status, 409, body)
+	// Failed volume admission rolls back the Box ID reservation too.
+	input.HomeVolumeID = ""
+	box := createVolumeBox(t, f, input)
+	if box.HomeVolumeID == "" || box.HomeVolumeID == v.ID {
+		t.Fatalf("default create did not allocate an independent disk: %+v", box)
+	}
+	destroyVolumeBox(t, f, box.ID)
+	if err := f.service.purgeBox(context.Background(), "client-a", box.ID); err != nil {
+		t.Fatal(err)
+	}
+	status, body = f.call(t, "POST", "/v1/boxes", testClientToken, "", input)
+	wantStatus(t, status, 409, body)
+	status, body = f.call(t, "GET", "/v1/volumes/"+box.HomeVolumeID, testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+}
+
+func TestConcurrentVolumeReservationHasOneWinner(t *testing.T) {
+	f, _ := volumeFixture(t)
+	v := createTestVolume(t, f, "race-disk")
+	template := f.template(t)
+	type result struct {
+		op  Operation
+		err error
+	}
+	results := make(chan result, 2)
+	for _, id := range []string{"box-race-a", "box-race-b"} {
+		go func() {
+			op, err := f.service.create("client-a", createRequest{ID: id, OwnerKey: v.OwnerKey, TemplateID: template, HomeVolumeID: v.ID}, "", false)
+			results <- result{op, err}
+		}()
+	}
+	accepted, rejected := 0, 0
+	for range 2 {
+		r := <-results
+		if r.err == nil {
+			accepted++
+			f.waitOperation(t, r.op.ID, "succeeded")
+		} else if cloneError(r.err).Code == "CONFLICT" {
+			rejected++
+		} else {
+			t.Fatal(r.err)
+		}
+	}
+	if accepted != 1 || rejected != 1 {
+		t.Fatalf("accepted=%d rejected=%d", accepted, rejected)
+	}
+}
+
+func TestVolumeAdmissionRejectsMissingForeignAndIncompatibleDisks(t *testing.T) {
+	f, _ := volumeFixture(t)
+	v := createTestVolume(t, f, "owned-disk")
+	template := f.template(t)
+	for _, tc := range []struct {
+		name, volume, owner string
+		status              int
+	}{
+		{"missing", "unknown-disk", v.OwnerKey, 404},
+		{"different-owner", v.ID, "owner-b", 409},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := f.call(t, "POST", "/v1/boxes", testClientToken, "", createRequest{
+				ID: "box-invalid", OwnerKey: tc.owner, TemplateID: template, HomeVolumeID: tc.volume,
+			})
+			wantStatus(t, status, tc.status, body)
+		})
+	}
+	if err := f.service.store.Write(context.Background(), func(tx *storeTx) error {
+		v, err := tx.Volume("client-a", v.ID)
+		if err != nil {
+			return err
+		}
+		v.Agent.UID++
+		return tx.PutVolume(v)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status, body := f.call(t, "POST", "/v1/boxes", testClientToken, "", createRequest{
+		ID: "box-invalid", OwnerKey: v.OwnerKey, TemplateID: template, HomeVolumeID: v.ID,
+	})
+	wantStatus(t, status, 409, body)
+	status, body = f.call(t, "GET", "/v1/volumes", otherClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	if got := decodeResponse[[]Volume](t, body); len(got) != 0 {
+		t.Fatalf("other client can list disks: %+v", got)
+	}
+}
+
+func TestLegacySandboxDeletionRegistersRetainedVolume(t *testing.T) {
+	f := newCoreFixture(t)
+	useK3sProfile(t, f)
+	_, box := f.createBox(t, "legacy-box")
+	var legacyUID string
+	// Reproduce a pre-volume Box record; the node-layer test exercises the
+	// physical PromoteLegacy path after its runtime has been stopped.
+	if err := f.service.store.Write(context.Background(), func(tx *storeTx) error {
+		b, err := tx.Box("client-a", box.ID)
+		if err != nil {
+			return err
+		}
+		legacyUID = b.Handle.ID
+		b.HomeVolumeUID, b.Box.HomeVolumeID = "", ""
+		return tx.PutBox(b)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	destroyVolumeBox(t, f, box.ID)
+	b, err := f.service.rawBox(box.ID)
+	if err != nil || b.Box.HomeVolumeID == "" || b.HomeVolumeUID != "" {
+		t.Fatalf("legacy layout was changed before termination: %+v, %v", b, err)
+	}
+	v, err := f.service.store.VolumeRecord("client-a", b.Box.HomeVolumeID)
+	if err != nil || v.UID != legacyUID || v.Volume.Phase != "available" || v.Volume.BoxID != "" {
+		t.Fatalf("legacy disk was not registered and retained: %+v, %v", v, err)
+	}
+}
+
+func TestDeletedObservationReleasesVolumeWithoutReplayingDestroy(t *testing.T) {
+	f, _ := volumeFixture(t)
+	v := createTestVolume(t, f, "restart-disk")
+	box := createVolumeBox(t, f, createRequest{ID: "box-interrupted-delete", OwnerKey: v.OwnerKey, TemplateID: f.template(t), HomeVolumeID: v.ID})
+	// Terminal observation and attachment release must commit together even if
+	// the caller's destroy operation was interrupted by a process restart.
+	if err := f.service.store.Write(context.Background(), func(tx *storeTx) error {
+		b, err := tx.Box("client-a", box.ID)
+		if err != nil {
+			return err
+		}
+		b.Box.Phase = "deleted"
+		return tx.PutBox(b)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.service.store.VolumeRecord("client-a", v.ID)
+	if err != nil || got.Volume.BoxID != "" || got.Volume.Phase != "available" {
+		t.Fatalf("terminal observation retained a reservation: %+v, %v", got, err)
+	}
+}
+
+func TestVolumeRestartPreservesDataAndAllowsInterruptedDeleteCleanup(t *testing.T) {
+	f, p := volumeFixture(t)
+	v := createTestVolume(t, f, "restart-volume")
+	record, err := f.service.store.VolumeRecord("client-a", v.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, _ := homevolume.Path(p.base, record.UID)
+	file := filepath.Join(root, "retained")
+	if err := os.WriteFile(file, []byte("durable"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.store.Write(context.Background(), func(tx *storeTx) error {
+		record.Volume.Phase, record.Volume.OperationID = "deleting", "op-interrupted-volume"
+		if err := tx.PutVolume(record); err != nil {
+			return err
+		}
+		return tx.PutOperation(operationRecord{ClientID: "client-a", Operation: Operation{
+			ID: record.Volume.OperationID, Kind: "volume-delete", TargetID: v.ID, Status: "running", Version: 1,
+		}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.service, err = New(f.config, map[string]boxprovider.Provider{"resumable-k8s-pod": p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := f.service.store.VolumeRecord("client-a", v.ID)
+	if err != nil || current.Volume.Phase != "failed" || current.Volume.OperationID != "" || current.Volume.Error.Code != "UNKNOWN_OUTCOME" {
+		t.Fatalf("interrupted operation was not surfaced: %+v, %v", current, err)
+	}
+	if data, err := os.ReadFile(file); err != nil || string(data) != "durable" {
+		t.Fatalf("startup removed data or replayed delete: %q, %v", data, err)
+	}
+	status, body := f.call(t, "DELETE", "/v1/volumes/"+v.ID, testClientToken, "", nil)
+	wantStatus(t, status, 202, body)
+	f.waitOperation(t, decodeResponse[Operation](t, body).ID, "succeeded")
+}
+
+func TestPurgeDoesNotDeleteVolumeOperationsWithSamePublicID(t *testing.T) {
+	f, _ := volumeFixture(t)
+	v := createTestVolume(t, f, "shared-resource-name")
+	box := createVolumeBox(t, f, createRequest{ID: v.ID, OwnerKey: v.OwnerKey, TemplateID: f.template(t), HomeVolumeID: v.ID})
+	destroyVolumeBox(t, f, box.ID)
+	if err := f.service.purgeBox(context.Background(), "client-a", box.ID); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := f.service.store.db.QueryRow(`SELECT count(*) FROM runtime_records WHERE kind='operations' AND json_extract(record,'$.operation.kind')='volume-create'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("purge removed volume history: count=%d, %v", count, err)
+	}
+}

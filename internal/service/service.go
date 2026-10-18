@@ -406,7 +406,7 @@ func runtimeSpec(b boxRecord) boxprovider.Spec {
 		config.DebugHome = "/home/debug"
 	}
 	metadata, _ := json.Marshal(inventory.Record{ClientID: b.ClientID, Box: mustBoxJSON(b.Box), Staged: b.Staged})
-	return boxprovider.Spec{Inventory: metadata, BoxID: b.Box.ID, Image: b.Profile.Image, Config: config, CPU: b.Profile.CPU, MemoryMiB: b.Profile.MemoryMiB, Namespace: b.Profile.Namespace, NodeName: b.Profile.NodeName, SharedReadOnlyHostPath: b.Profile.SharedReadOnlyHostPath, DebugReadOnlyHostPath: b.Profile.DebugReadOnlyHostPath, DebugReadWriteHostPath: b.Profile.DebugReadWriteHostPath, PersistentHome: b.Profile.PersistentHome, Staged: b.Staged}
+	return boxprovider.Spec{Inventory: metadata, HomeVolumeUID: b.HomeVolumeUID, BoxID: b.Box.ID, Image: b.Profile.Image, Config: config, CPU: b.Profile.CPU, MemoryMiB: b.Profile.MemoryMiB, Namespace: b.Profile.Namespace, NodeName: b.Profile.NodeName, SharedReadOnlyHostPath: b.Profile.SharedReadOnlyHostPath, DebugReadOnlyHostPath: b.Profile.DebugReadOnlyHostPath, DebugReadWriteHostPath: b.Profile.DebugReadWriteHostPath, PersistentHome: b.Profile.PersistentHome, Staged: b.Staged}
 }
 func (s *Service) rawBox(id string) (boxRecord, error) {
 	return s.store.BoxRecord(id)
@@ -714,6 +714,9 @@ func (s *Service) provision(ctx context.Context, id string) (Box, error) {
 	if err != nil {
 		return Box{}, err
 	}
+	if err := s.prepareBoxVolume(ctx, b); err != nil {
+		return Box{}, err
+	}
 	createStarted := time.Now()
 	handle, err := s.providers[b.Profile.Provider].Create(ctx, runtimeSpec(b))
 	runtimeTiming(id, "cellbox.create_runtime", createStarted, err)
@@ -740,13 +743,21 @@ func (s *Service) provision(ctx context.Context, id string) (Box, error) {
 }
 
 type createRequest struct {
-	TemplateID string `json:"templateId,omitempty"`
-	RevisionID string `json:"revisionId,omitempty"`
-	OwnerKey   string `json:"ownerKey"`
-	Staged     bool   `json:"staged,omitempty"`
+	ID           string `json:"id,omitempty"`
+	HomeVolumeID string `json:"homeVolumeId,omitempty"`
+	TemplateID   string `json:"templateId,omitempty"`
+	RevisionID   string `json:"revisionId,omitempty"`
+	OwnerKey     string `json:"ownerKey"`
+	Staged       bool   `json:"staged,omitempty"`
 }
 
 func (s *Service) create(client string, input createRequest, archiveID string, acceptImageChange bool) (Operation, error) {
+	if input.ID == "" {
+		input.ID = randomID("box-")
+	}
+	if err := validateResourceID(input.ID); err != nil {
+		return Operation{}, err
+	}
 	if input.OwnerKey == "" || len(input.OwnerKey) > 256 {
 		return Operation{}, apiError("INVALID_REQUEST", "ownerKey must contain 1..256 bytes")
 	}
@@ -758,6 +769,17 @@ func (s *Service) create(client string, input createRequest, archiveID string, a
 		return Operation{}, err
 	}
 	profile := tmpl.Profile
+	if archiveID != "" && input.HomeVolumeID != "" {
+		return Operation{}, apiError("INVALID_REQUEST", "Archive restore requires a new HOME volume")
+	}
+	if input.HomeVolumeID != "" && (profile.Provider != "resumable-k8s-pod" || !profile.PersistentHome) {
+		return Operation{}, boxprovider.ErrUnsupported
+	}
+	if profile.PersistentHome {
+		if _, err := s.volumeProvider(profile); err != nil {
+			return Operation{}, err
+		}
+	}
 	if profile.Provider != "resumable-k8s-pod" && (archiveID != "" || input.Staged) {
 		return Operation{}, boxprovider.ErrUnsupported
 	}
@@ -770,6 +792,9 @@ func (s *Service) create(client string, input createRequest, archiveID string, a
 	}
 	var source Archive
 	op, err := s.prepareOperation(client, kind, "", func(tx *storeTx, op *Operation) error {
+		if err := tx.reserveID("boxes", input.ID, client); err != nil {
+			return err
+		}
 		if archiveID != "" {
 			a, err := tx.Archive(client, archiveID)
 			if err != nil {
@@ -786,7 +811,7 @@ func (s *Service) create(client string, input createRequest, archiveID string, a
 				return apiError("ARCHIVE_INCOMPATIBLE", "Archive image differs from target image")
 			}
 		}
-		id := randomID("box-")
+		id := input.ID
 		op.TargetID = id
 		if archiveID != "" {
 			op.Result = map[string]string{"archiveId": archiveID}
@@ -799,6 +824,9 @@ func (s *Service) create(client string, input createRequest, archiveID string, a
 			OwnerKey: input.OwnerKey, ProfileID: profile.ID, Phase: phase, Version: 1, Image: profile.Image, Workspace: profile.Guest.Workspace,
 			Capabilities: profileCapabilities(profile), OperationID: op.ID, CreatedAt: time.Now().UTC()},
 			ClientID: client, Profile: profile, Staged: archiveID != "" || input.Staged, RestoreComplete: input.Staged && archiveID == "", RestoreArchiveID: archiveID, AcceptImageChange: acceptImageChange}
+		if err := s.admitBoxVolume(tx, &b, input.HomeVolumeID); err != nil {
+			return err
+		}
 		return tx.PutBox(b)
 	})
 	if err != nil {
@@ -887,6 +915,9 @@ func (s *Service) actionContextWithGeneration(ctx context.Context, client, id, a
 			if b.Box.Phase == "deleted" {
 				return apiError("CONFLICT", "Box was already deleted")
 			}
+			if err := s.registerLegacyVolume(tx, &b); err != nil {
+				return err
+			}
 		}
 		b.Box.OperationID = op.ID
 		b.Box.Error = nil
@@ -938,6 +969,9 @@ func (s *Service) actionContextWithGeneration(ctx context.Context, client, id, a
 		}
 		return map[string]string{"boxId": id}, nil
 	}, func(tx *storeTx) error {
+		if action == "destroy" {
+			return releaseBoxVolume(tx, b)
+		}
 		if action != "activate" {
 			return nil
 		}

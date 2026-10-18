@@ -92,6 +92,18 @@ func newRuntime(kube *rest.Config, options nodeOptions, readDesired func(context
 	local := runtimecontrol.New(p.Client)
 	p.Client, p.Local = local, local
 	p.ConfirmExecutionLocal = backend.ConfirmExecution
+	p.CreateVolumeLocal = func(ctx context.Context, spec boxprovider.VolumeSpec) error {
+		if spec.NodeName != options.Node || spec.Namespace != options.Namespace {
+			return errors.New("volume target differs from this server's node or namespace")
+		}
+		return backend.CreateVolume(spec.UID, spec.NodeName)
+	}
+	p.DeleteVolumeLocal = func(ctx context.Context, spec boxprovider.VolumeSpec) error {
+		if spec.NodeName != options.Node || spec.Namespace != options.Namespace {
+			return errors.New("volume target differs from this server's node or namespace")
+		}
+		return backend.DeleteVolume(spec.UID, spec.NodeName)
+	}
 	p.CacheImageLocal = func(ctx context.Context, image, nodeName, namespace string) error {
 		if nodeName != options.Node || namespace != options.Namespace {
 			return errors.New("image cache target differs from this server's node or namespace")

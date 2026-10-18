@@ -33,13 +33,15 @@ type Manifest struct {
 	Files     map[string]string `json:"files"`
 }
 type Ticket struct {
-	HomeID    string `json:"persistentHomeID,omitempty"`
-	OwnerUID  string `json:"ownerUID"`
-	PodUID    string `json:"podUID"`
-	Namespace string `json:"namespace"`
-	PodName   string `json:"podName"`
-	Snapshot  string `json:"snapshot"`
-	SpecHash  string `json:"specHash"`
+	HomeID        string `json:"persistentHomeID,omitempty"`
+	HomeVolumeUID string `json:"homeVolumeUID,omitempty"`
+	OwnerUID      string `json:"ownerUID"`
+	NodeName      string `json:"nodeName,omitempty"`
+	PodUID        string `json:"podUID"`
+	Namespace     string `json:"namespace"`
+	PodName       string `json:"podName"`
+	Snapshot      string `json:"snapshot"`
+	SpecHash      string `json:"specHash"`
 }
 
 func SnapshotPath(base, owner, snapshot string) (string, error) {

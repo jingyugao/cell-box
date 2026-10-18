@@ -149,12 +149,12 @@ func (b *Backend) ActivateWarm(ctx context.Context, w *api.ResumablePod, p *core
 	if err != nil {
 		return true, err
 	}
-	homeID, err := b.persistentHome(w, false)
-	if err != nil {
-		return true, err
-	}
-	t := Ticket{OwnerUID: string(w.UID), PodUID: string(p.UID), Namespace: p.Namespace, PodName: p.Name, Snapshot: w.Status.Snapshot, SpecHash: w.Status.SpecHash, HomeID: homeID}
 	if l.Phase == "claimed" || l.Phase == "restoring" {
+		homeID, err := b.persistentHome(w, w.Status.Cycle == 1 && w.Status.Snapshot == "")
+		if err != nil {
+			return true, err
+		}
+		t := Ticket{OwnerUID: string(w.UID), NodeName: w.Spec.NodeName, HomeVolumeUID: w.Spec.HomeVolumeUID, PodUID: string(p.UID), Namespace: p.Namespace, PodName: p.Name, Snapshot: w.Status.Snapshot, SpecHash: w.Status.SpecHash, HomeID: homeID}
 		if l.Ticket != t {
 			return true, fmt.Errorf("warm slot assigned to another execution")
 		}
@@ -163,9 +163,16 @@ func (b *Backend) ActivateWarm(ctx context.Context, w *api.ResumablePod, p *core
 	if l.Phase == "expired" || (l.Phase == "waiting" && !time.Now().Before(l.Deadline)) {
 		return true, backend.ErrWarmExpired
 	}
-	if l.SpecHash != w.Status.SpecHash || t.Snapshot == "" {
+	warmSpec := w.DeepCopy()
+	warmSpec.Spec.HomeVolumeUID = ""
+	if l.SpecHash != api.SpecFingerprint(warmSpec) || w.Status.Snapshot == "" {
 		return true, fmt.Errorf("incompatible warm restore")
 	}
+	homeID, err := b.persistentHome(w, w.Status.Cycle == 1 && w.Status.Snapshot == "")
+	if err != nil {
+		return true, err
+	}
+	t := Ticket{OwnerUID: string(w.UID), NodeName: w.Spec.NodeName, HomeVolumeUID: w.Spec.HomeVolumeUID, PodUID: string(p.UID), Namespace: p.Namespace, PodName: p.Name, Snapshot: w.Status.Snapshot, SpecHash: w.Status.SpecHash, HomeID: homeID}
 	if err = b.prepareSnapshot(ctx, w); err != nil {
 		return true, err
 	}
