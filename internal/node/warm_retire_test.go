@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -36,14 +37,14 @@ func TestTryRetireWarmProtectsClaimedAndRestoringLeases(t *testing.T) {
 			}
 			if gotLease.UID != lease.UID || gotLease.Name != lease.Name || gotLease.Namespace != lease.Namespace ||
 				gotLease.SpecHash != lease.SpecHash || gotLease.SID != lease.SID || gotLease.Phase != lease.Phase ||
-				!gotLease.Deadline.Equal(lease.Deadline) || gotLease.Ticket != lease.Ticket {
+				!gotLease.Deadline.Equal(lease.Deadline) || !reflect.DeepEqual(gotLease.Ticket, lease.Ticket) {
 				t.Fatalf("lease changed on protected phase: got %+v, want %+v", gotLease, lease)
 			}
 			var gotTicket Ticket
 			if err := ReadJSON(filepath.Join(base, "tickets", string(p.UID)+".json"), &gotTicket); err != nil {
 				t.Fatal(err)
 			}
-			if gotTicket != ticket {
+			if !reflect.DeepEqual(gotTicket, ticket) {
 				t.Fatalf("ticket changed: got %+v, want %+v", gotTicket, ticket)
 			}
 		})

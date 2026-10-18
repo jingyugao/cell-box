@@ -95,6 +95,7 @@ func decodeOptionalLimit(w http.ResponseWriter, r *http.Request, target any, lim
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/profiles", s.listProfiles)
+	s.registerVolumes(mux)
 	if s.catalog != nil {
 		s.catalog.Register(mux, clientID)
 		s.registerTemplateRuntime(mux)

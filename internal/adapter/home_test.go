@@ -35,6 +35,51 @@ func homeChildFixture(t *testing.T) (Adapter, node.Ticket, string, string, strin
 	return a, ticket, sid, id, bundle, annotations
 }
 
+func TestBindHomeMountsAllAuthorizedPathsWithReadOnlyOptions(t *testing.T) {
+	a := Adapter{Base: t.TempDir()}
+	identity, err := homevolume.Prepare(a.Base, "data-volume", "node-a", homevolume.VolumeSpecHash, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket := node.Ticket{OwnerUID: "owner", NodeName: "node-a", PodUID: "pod", Mounts: []node.VolumeMountAuthorization{{
+		UID: "data-volume", MountPath: "/data", ReadOnly: true, HomeID: identity.ID,
+	}}}
+	bundle := filepath.Join(a.Base, "bundle")
+	if err := node.AtomicJSON(filepath.Join(bundle, "config.json"), map[string]any{"mounts": []any{
+		map[string]any{"destination": "/data", "source": "/untrusted/source", "type": "bind", "options": []string{"rw"}},
+		map[string]any{"destination": "/data/cache", "source": "/other", "type": "bind"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.bindHome(bundle, ticket); err != nil {
+		t.Fatal(err)
+	}
+	var spec struct {
+		Mounts []struct {
+			Destination string   `json:"destination"`
+			Source      string   `json:"source"`
+			Type        string   `json:"type"`
+			Options     []string `json:"options"`
+		} `json:"mounts"`
+	}
+	if err := node.ReadJSON(filepath.Join(bundle, "config.json"), &spec); err != nil {
+		t.Fatal(err)
+	}
+	root, _ := homevolume.Path(a.Base, "data-volume")
+	var dataMounts int
+	for _, mount := range spec.Mounts {
+		if mount.Destination == "/data" {
+			dataMounts++
+			if mount.Source != root || mount.Type != "bind" || len(mount.Options) != 3 || mount.Options[2] != "ro" {
+				t.Fatalf("readonly mount not enforced: %+v", mount)
+			}
+		}
+	}
+	if dataMounts != 1 {
+		t.Fatalf("got %d managed mounts for /data", dataMounts)
+	}
+}
+
 func TestHomeChildBindingAndSingleExecution(t *testing.T) {
 	a, ticket, _, id, bundle, annotations := homeChildFixture(t)
 	if err := a.childCreate(id, annotations, bundle); err != nil {
@@ -74,7 +119,7 @@ func TestHomeChildBindingAndSingleExecution(t *testing.T) {
 	}
 }
 
-func TestHomeChildRejectsUnsafeMounts(t *testing.T) {
+func TestHomeChildOverridesManagedMountAndAllowsOverlappingPaths(t *testing.T) {
 	for _, kind := range []string{"other-owner", "read-only", "parent", "descendant", "duplicate", "idmap", "symlink"} {
 		t.Run(kind, func(t *testing.T) {
 			a, ticket, _, id, bundle, annotations := homeChildFixture(t)
@@ -108,11 +153,40 @@ func TestHomeChildRejectsUnsafeMounts(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := a.childCreate(id, annotations, bundle); err == nil {
-				t.Fatal("unsafe mount accepted")
+			err := a.childCreate(id, annotations, bundle)
+			if kind == "symlink" {
+				if err == nil {
+					t.Fatal("symlinked OCI spec accepted")
+				}
+				if _, err := os.Stat(filepath.Join(a.Base, "children", id+".json")); !os.IsNotExist(err) {
+					t.Fatal("rejected child was authorized")
+				}
+				return
 			}
-			if _, err := os.Stat(filepath.Join(a.Base, "children", id+".json")); !os.IsNotExist(err) {
-				t.Fatal("rejected child was authorized")
+			if err != nil {
+				t.Fatalf("valid overlapping mount layout rejected: %v", err)
+			}
+			var spec struct {
+				Mounts []struct {
+					Destination string   `json:"destination"`
+					Source      string   `json:"source"`
+					Options     []string `json:"options"`
+				} `json:"mounts"`
+			}
+			if err := node.ReadJSON(filepath.Join(bundle, "config.json"), &spec); err != nil {
+				t.Fatal(err)
+			}
+			var homeCount int
+			for _, got := range spec.Mounts {
+				if got.Destination == homevolume.MountPath {
+					homeCount++
+					if got.Source != source || len(got.Options) != 3 {
+						t.Fatalf("managed mount not replaced: %+v", got)
+					}
+				}
+			}
+			if homeCount != 1 {
+				t.Fatalf("got %d managed HOME mounts", homeCount)
 			}
 		})
 	}

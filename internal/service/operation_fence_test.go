@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 )
 
@@ -32,7 +33,7 @@ func TestGetBoxDoesNotInspectRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if before.Box != after.Box || before.TransitionID != after.TransitionID || before.ObservedTransitionID != after.ObservedTransitionID {
+	if !reflect.DeepEqual(before.Box, after.Box) || before.TransitionID != after.TransitionID || before.ObservedTransitionID != after.ObservedTransitionID {
 		t.Fatalf("GET mutated the local projection: before=%+v after=%+v", before, after)
 	}
 }

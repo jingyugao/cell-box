@@ -18,6 +18,7 @@ import (
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/boxprovider"
 	"cellbox.local/cellbox/internal/guestapi"
+	"cellbox.local/cellbox/internal/homevolume"
 	"cellbox.local/cellbox/internal/inventory"
 	"cellbox.local/cellbox/internal/runtimecontrol"
 	"cellbox.local/cellbox/internal/telemetry"
@@ -43,6 +44,8 @@ type Provider struct {
 	// Local connects HTTP to the embedded runtime and its durable local journal.
 	Local                 *runtimecontrol.Client
 	CacheImageLocal       func(context.Context, string, string, string) error
+	CreateVolumeLocal     func(context.Context, boxprovider.VolumeSpec) error
+	DeleteVolumeLocal     func(context.Context, boxprovider.VolumeSpec) error
 	ConfirmExecutionLocal func(context.Context, *api.ResumablePod, *core.Pod) (*api.Execution, error)
 	warmMu                sync.RWMutex
 	warmSnapshot          warmtemplates.Snapshot
@@ -67,6 +70,22 @@ func buildWanted(spec boxprovider.Spec) (*api.ResumablePod, error) {
 	}
 	if spec.Namespace == "" || spec.NodeName == "" {
 		return nil, errors.New("namespace and node name are required")
+	}
+	if spec.HomeVolumeUID != "" && !spec.PersistentHome {
+		return nil, errors.New("homeVolumeUID requires persistentHome")
+	}
+	if spec.Mounts != nil {
+		if len(spec.Mounts) == 0 {
+			return nil, errors.New("mounts must not be empty when specified")
+		}
+		for i, mount := range spec.Mounts {
+			if _, err := homevolume.Path(homevolume.DefaultBase, mount.UID); err != nil {
+				return nil, fmt.Errorf("mount %d UID: %w", i, err)
+			}
+			if !path.IsAbs(mount.MountPath) || path.Clean(mount.MountPath) != mount.MountPath || mount.MountPath == "/" || len(mount.MountPath) > 4096 || strings.ContainsAny(mount.MountPath, "\x00\r\n") {
+				return nil, fmt.Errorf("mount %d path must be a clean absolute path other than /", i)
+			}
+		}
 	}
 	if !validImage.MatchString(spec.Image) {
 		return nil, errors.New("immutable image repository@sha256:<digest> is required")
@@ -124,7 +143,7 @@ func buildWanted(spec boxprovider.Spec) (*api.ResumablePod, error) {
 		ObjectMeta: meta.ObjectMeta{Name: crname, Namespace: spec.Namespace, Labels: map[string]string{managedLabel: "true", boxLabel: spec.BoxID}},
 		Spec: api.Spec{NodeName: spec.NodeName, DesiredState: "Running", Container: container,
 			SharedReadOnlyHostPath: spec.SharedReadOnlyHostPath, DebugReadOnlyHostPath: spec.DebugReadOnlyHostPath,
-			DebugReadWriteHostPath: spec.DebugReadWriteHostPath, PersistentHome: spec.PersistentHome,
+			DebugReadWriteHostPath: spec.DebugReadWriteHostPath, PersistentHome: spec.PersistentHome, HomeVolumeUID: spec.HomeVolumeUID, Mounts: append([]api.VolumeMount(nil), spec.Mounts...),
 			ServicePorts: []core.ServicePort{{Name: "guest", Port: guestapi.Port, TargetPort: intstr.FromInt32(guestapi.Port), Protocol: core.ProtocolTCP}}},
 	}
 	if len(spec.Inventory) > 0 {
@@ -174,7 +193,7 @@ func (p *Provider) Create(ctx context.Context, spec boxprovider.Spec) (boxprovid
 }
 
 func matchExisting(actual, wanted *api.ResumablePod) error {
-	if actual.UID == "" || actual.DeletionTimestamp != nil || actual.Labels[managedLabel] != "true" || actual.Labels[boxLabel] != wanted.Labels[boxLabel] || actual.Annotations[inventory.Annotation] != wanted.Annotations[inventory.Annotation] || actual.Labels[inventory.ClientLabel] != wanted.Labels[inventory.ClientLabel] || actual.Spec.NodeName != wanted.Spec.NodeName || actual.Spec.SharedReadOnlyHostPath != wanted.Spec.SharedReadOnlyHostPath || actual.Spec.DebugReadOnlyHostPath != wanted.Spec.DebugReadOnlyHostPath || actual.Spec.DebugReadWriteHostPath != wanted.Spec.DebugReadWriteHostPath || actual.Spec.PersistentHome != wanted.Spec.PersistentHome || !apiequality.Semantic.DeepEqual(actual.Spec.Container, wanted.Spec.Container) || !apiequality.Semantic.DeepEqual(actual.Spec.ServicePorts, wanted.Spec.ServicePorts) {
+	if actual.UID == "" || actual.DeletionTimestamp != nil || actual.Labels[managedLabel] != "true" || actual.Labels[boxLabel] != wanted.Labels[boxLabel] || actual.Annotations[inventory.Annotation] != wanted.Annotations[inventory.Annotation] || actual.Labels[inventory.ClientLabel] != wanted.Labels[inventory.ClientLabel] || actual.Spec.NodeName != wanted.Spec.NodeName || actual.Spec.SharedReadOnlyHostPath != wanted.Spec.SharedReadOnlyHostPath || actual.Spec.DebugReadOnlyHostPath != wanted.Spec.DebugReadOnlyHostPath || actual.Spec.DebugReadWriteHostPath != wanted.Spec.DebugReadWriteHostPath || actual.Spec.PersistentHome != wanted.Spec.PersistentHome || actual.Spec.HomeVolumeUID != wanted.Spec.HomeVolumeUID || !apiequality.Semantic.DeepEqual(actual.Spec.Mounts, wanted.Spec.Mounts) || !apiequality.Semantic.DeepEqual(actual.Spec.Container, wanted.Spec.Container) || !apiequality.Semantic.DeepEqual(actual.Spec.ServicePorts, wanted.Spec.ServicePorts) {
 		return fmt.Errorf("ResumablePod %s already exists with different ownership or immutable profile", actual.Name)
 	}
 	return nil

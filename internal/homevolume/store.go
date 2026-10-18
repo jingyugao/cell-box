@@ -20,6 +20,9 @@ import (
 const DefaultBase = "/var/lib/cellbox"
 const MountPath = "/home/agent"
 
+// VolumeSpecHash identifies the immutable on-disk format for independent HOME volumes.
+const VolumeSpecHash = "cellbox-home-volume-v1"
+
 const (
 	identityName = ".identity.json"
 	initName     = ".identity.initializing"
@@ -29,7 +32,7 @@ const (
 
 var ownerPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
-// Identity ties a home directory to one Box lifecycle and its backing inode.
+// Identity ties a HOME directory to its logical owner and backing inode.
 type Identity struct {
 	ID       string `json:"id"`
 	OwnerUID string `json:"ownerUID"`
@@ -44,6 +47,184 @@ type executionState struct {
 	Pod              string `json:"pod,omitempty"`
 	Snapshot         string `json:"snapshot,omitempty"`
 	ConsumedSnapshot string `json:"consumedSnapshot,omitempty"`
+}
+
+// RemoveVolume deletes an independently managed volume after validating its
+// immutable identity and data inode. Missing volumes are already removed.
+func RemoveVolume(base, volumeUID, node string) error {
+	if strings.TrimSpace(node) == "" {
+		return errors.New("node is required")
+	}
+	homes, dir, _, err := paths(base, volumeUID)
+	if err != nil {
+		return err
+	}
+	if err := ensurePrivateDir(homes, false); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	unlock, err := lockOwner(base, volumeUID, false)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := checkPathNoSymlink(base, dir); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if _, err := verify(base, volumeUID, node, VolumeSpecHash, ""); err != nil {
+		return err
+	}
+	return os.RemoveAll(dir)
+}
+
+// SyncVolume flushes an independently managed volume after validating its
+// immutable identity and backing inode.
+func SyncVolume(base, volumeUID, node, id string) error {
+	if strings.TrimSpace(node) == "" || id == "" {
+		return errors.New("node and volume identity are required")
+	}
+	unlock, err := lockOwner(base, volumeUID, false)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	_, _, data, err := paths(base, volumeUID)
+	if err != nil {
+		return err
+	}
+	if _, err := verify(base, volumeUID, node, VolumeSpecHash, id); err != nil {
+		return err
+	}
+	f, err := os.Open(data)
+	if err != nil {
+		return err
+	}
+	err = syncFS(int(f.Fd()))
+	closeErr := f.Close()
+	if err != nil {
+		return fmt.Errorf("sync home volume filesystem: %w", err)
+	}
+	return closeErr
+}
+
+// PromoteLegacy converts a legacy per-sandbox HOME into an independent HOME
+// volume in place. The caller must first ensure the legacy runtime is stopped
+// and cleaned up. A missing legacy HOME is initialized as an empty volume.
+func PromoteLegacy(base, owner, node, spec string) error {
+	if strings.TrimSpace(node) == "" {
+		return errors.New("node is required")
+	}
+	homes, dir, data, err := paths(base, owner)
+	if err != nil {
+		return err
+	}
+	if err := ensurePrivateDir(homes, false); errors.Is(err, fs.ErrNotExist) {
+		_, err := Prepare(base, owner, node, VolumeSpecHash, true)
+		return err
+	} else if err != nil {
+		return err
+	}
+	// Older layouts may have the data directory but no lock directory. Create
+	// the lock directory before taking the owner lock so promotion is atomic
+	// with respect to all normal HOME operations.
+	if err := ensureLockDir(base, true); err != nil {
+		return err
+	}
+	unlock, err := lockOwner(base, owner, true)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := checkPathNoSymlink(base, dir); errors.Is(err, fs.ErrNotExist) {
+		if err := ensureOwnerDir(dir); err != nil {
+			return err
+		}
+		_, err := initializeHome(dir, data, owner, node, VolumeSpecHash)
+		return err
+	} else if err != nil {
+		return err
+	}
+	markerPath := filepath.Join(dir, identityName)
+	if _, markerErr := os.Lstat(markerPath); errors.Is(markerErr, fs.ErrNotExist) {
+		if spec != "" {
+			return errors.New("legacy spec is required to identify an existing HOME")
+		}
+		// With no legacy identity, initializeHome accepts only a genuinely empty
+		// unknown directory (or a matching interrupted initialization). It
+		// refuses non-empty data whose ownership cannot be established.
+		_, err := initializeHome(dir, data, owner, node, VolumeSpecHash)
+		return err
+	} else if markerErr != nil {
+		return markerErr
+	}
+	if spec == "" {
+		// Empty legacy spec cannot identify a legacy marker. A marker already
+		// promoted to the independent-volume format is safe to retry.
+		if _, err := verify(base, owner, node, VolumeSpecHash, ""); err == nil {
+			return removeVolumeState(filepath.Join(dir, stateName))
+		}
+		return errors.New("legacy spec is required to promote an existing HOME")
+	}
+	identity, err := verify(base, owner, node, spec, "")
+	if err != nil {
+		// A successful conversion is an idempotent retry.
+		if _, promotedErr := verify(base, owner, node, VolumeSpecHash, ""); promotedErr == nil {
+			return removeVolumeState(filepath.Join(dir, stateName))
+		}
+		return err
+	}
+	statePath := filepath.Join(dir, stateName)
+	state, err := readState(statePath)
+	if err != nil {
+		return err
+	}
+	f, err := os.Open(data)
+	if err != nil {
+		return err
+	}
+	err = syncFS(int(f.Fd()))
+	closeErr := f.Close()
+	if err != nil {
+		return fmt.Errorf("sync home filesystem: %w", err)
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	state.Phase, state.Pod = "new", ""
+	state.Snapshot, state.ConsumedSnapshot = "", ""
+	// Commit the reset before changing the identity marker. If the marker write
+	// fails, retry still recognizes the legacy identity and repeats this reset;
+	// the reverse order could leave a promoted identity with stale active state.
+	if err := writeJSONAtomic(statePath, state, 0600); err != nil {
+		return err
+	}
+	identity.SpecHash = VolumeSpecHash
+	if err := writeJSONAtomic(filepath.Join(dir, identityName), identity, 0600); err != nil {
+		return err
+	}
+	return removeVolumeState(statePath)
+}
+
+func removeVolumeState(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	err = dir.Sync()
+	closeErr := dir.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
 }
 
 type initializingIdentity struct {
@@ -242,6 +423,11 @@ func ClaimExecution(base, owner, id, pod, snapshot string) error {
 	if _, err := Verify(base, owner, "", "", id); err != nil {
 		return err
 	}
+	return claimExecutionLocked(base, owner, id, pod, snapshot)
+}
+
+// claimExecutionLocked requires the caller to hold lockOwner for owner.
+func claimExecutionLocked(base, owner, id, pod, snapshot string) error {
 	_, dir, _, _ := paths(base, owner)
 	state, err := readState(filepath.Join(dir, stateName))
 	if err != nil {
@@ -312,6 +498,15 @@ func initializeHome(dir, data, owner, node, spec string) (Identity, error) {
 		}
 		if err := verifyData(data, identity); err != nil {
 			return Identity{}, err
+		}
+		if spec == VolumeSpecHash {
+			if err := removeVolumeState(filepath.Join(dir, stateName)); err != nil {
+				return Identity{}, err
+			}
+			if err := removeMatchingInitMarker(initMarker, identity); err != nil {
+				return Identity{}, err
+			}
+			return identity, nil
 		}
 		_, stateErr := readState(filepath.Join(dir, stateName))
 		if errors.Is(stateErr, fs.ErrNotExist) {
@@ -389,8 +584,10 @@ func initializeHome(dir, data, owner, node, spec string) (Identity, error) {
 	if err := writeJSONAtomic(marker, identity, 0600); err != nil {
 		return Identity{}, err
 	}
-	if err := writeJSONAtomic(filepath.Join(dir, stateName), executionState{Phase: "new"}, 0600); err != nil {
-		return Identity{}, err
+	if spec != VolumeSpecHash {
+		if err := writeJSONAtomic(filepath.Join(dir, stateName), executionState{Phase: "new"}, 0600); err != nil {
+			return Identity{}, err
+		}
 	}
 	if err := os.Remove(initMarker); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return Identity{}, err

@@ -131,6 +131,21 @@ func TestPersistentHomePodMountAndFingerprint(t *testing.T) {
 	if admittedDebugMount(w, tampered) {
 		t.Fatal("Pod mounting another Box's HOME was admitted")
 	}
+
+	w.Spec.HomeVolumeUID = "volume-stable"
+	w.Status.SpecHash = fingerprint(w)
+	volumePath, _ := homevolume.Path(homevolume.DefaultBase, w.Spec.HomeVolumeUID)
+	for _, v := range hostVolumes(w) {
+		if v.Name == "agent-home" && v.HostPath.Path != volumePath {
+			t.Fatalf("Pod mounted %q, want independent volume path %q", v.HostPath.Path, volumePath)
+		}
+	}
+	if fingerprint(w) == homeHash {
+		t.Fatal("selecting an independent HOME volume must change the runtime fingerprint")
+	}
+	if got := warmFingerprint(w); got != homeHash {
+		t.Fatal("warm fingerprint must ignore the selected HOME volume UID")
+	}
 }
 
 type persistentHomePoolRuntime struct {
@@ -153,20 +168,24 @@ func TestPersistentHomeWarmPodHasNoTemplateHomeAndCanBeClaimed(t *testing.T) {
 	ctx := context.Background()
 	r, f, w := fixture(t)
 	w.Spec.PersistentHome = true
+	w.Spec.HomeVolumeUID = "volume-selected"
 	w.Spec.DesiredState = "Running"
-	template := warmtemplates.Template{ID: "template-a", Slots: 1, Spec: w.Spec}
+	templateSpec := w.Spec
+	templateSpec.HomeVolumeUID = ""
+	template := warmtemplates.Template{ID: "template-a", Slots: 1, Spec: templateSpec}
 	templateHash, err := warmtemplates.HashTemplates([]warmtemplates.Template{template})
 	if err != nil {
 		t.Fatal(err)
 	}
 	oldTemplate := w.DeepCopy()
 	oldTemplate.UID = "normal-box"
+	oldTemplate.Spec.HomeVolumeUID = ""
 	oldTemplate.Status.SpecHash = fingerprint(oldTemplate)
 	warm := warmExecutionPod(oldTemplate, "warm-old")
 	warm.UID = types.UID("warm-slot")
 	warm.Spec.SchedulingGates = nil
 	warm.Labels = map[string]string{warmLabel: "true"}
-	warm.Annotations = map[string]string{warmSpec: oldTemplate.Status.SpecHash}
+	warm.Annotations = map[string]string{warmSpec: warmFingerprint(oldTemplate)}
 	if err := r.Create(ctx, warm); err != nil {
 		t.Fatal(err)
 	}
@@ -189,6 +208,9 @@ func TestPersistentHomeWarmPodHasNoTemplateHomeAndCanBeClaimed(t *testing.T) {
 
 	if pod, err := pool.acquire(ctx, w); err != nil || pod == nil {
 		t.Fatalf("persistent-home restore should reuse its template slot without mounting HOME in the pooled Pod: pod=%v err=%v", pod, err)
+	}
+	if warm.Annotations[warmSpec] == w.Status.SpecHash || w.Status.SpecHash != fingerprint(w) {
+		t.Fatal("warm pool compatibility hash replaced or included the runtime Box fingerprint")
 	}
 	if err := pool.reconcile(ctx); err != nil {
 		t.Fatal(err)

@@ -7,6 +7,126 @@ import (
 	"testing"
 )
 
+func TestIndependentVolumeSyncAndRemove(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "cellbox")
+	const volumeUID = "volume-data"
+	identity, err := Prepare(base, volumeUID, "node", VolumeSpecHash, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, dir, data, _ := paths(base, volumeUID)
+	if _, err := os.Stat(filepath.Join(dir, stateName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("independent volume unexpectedly has execution state: %v", err)
+	}
+	oldSync := syncFS
+	syncCalls := 0
+	syncFS = func(int) error { syncCalls++; return nil }
+	t.Cleanup(func() { syncFS = oldSync })
+	if err := os.WriteFile(filepath.Join(data, "persisted"), []byte("durable volume data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SyncVolume(base, volumeUID, "node", identity.ID); err != nil {
+		t.Fatal(err)
+	}
+	if syncCalls != 1 {
+		t.Fatalf("SyncVolume called syncfs %d times, want 1", syncCalls)
+	}
+	for _, tc := range []struct{ node, id string }{{"wrong-node", identity.ID}, {"node", "wrong-id"}} {
+		if err := SyncVolume(base, volumeUID, tc.node, tc.id); err == nil {
+			t.Fatalf("SyncVolume accepted node=%q id=%q", tc.node, tc.id)
+		}
+	}
+	if syncCalls != 1 {
+		t.Fatalf("invalid SyncVolume calls reached syncfs: %d", syncCalls-1)
+	}
+	if err := RemoveVolume(base, volumeUID, "wrong-node"); err == nil {
+		t.Fatal("RemoveVolume accepted a mismatched node")
+	}
+	if err := RemoveVolume(base, volumeUID, "node"); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveVolume(base, volumeUID, "node"); err != nil {
+		t.Fatalf("repeated RemoveVolume should be idempotent: %v", err)
+	}
+	if _, err := os.Stat(data); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("RemoveVolume left data behind: %v", err)
+	}
+}
+
+func TestPromoteLegacyPreservesDataAndIsIdempotent(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "cellbox")
+	identity, err := Prepare(base, "legacy-box", "node", "legacy-spec", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSync := syncFS
+	syncFS = func(int) error { return nil }
+	t.Cleanup(func() { syncFS = oldSync })
+	if err := ClaimExecution(base, "legacy-box", identity.ID, "old-pod", ""); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := Path(base, "legacy-box")
+	if err := os.WriteFile(filepath.Join(data, "user-data"), []byte("preserve me"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Checkpoint(base, "legacy-box", identity.ID, "old-pod", "old-snapshot"); err != nil {
+		t.Fatal(err)
+	}
+	if err := PromoteLegacy(base, "legacy-box", "node", "legacy-spec"); err != nil {
+		t.Fatal(err)
+	}
+	promoted, err := Verify(base, "legacy-box", "node", VolumeSpecHash, identity.ID)
+	if err != nil {
+		t.Fatalf("promoted identity did not verify: %v", err)
+	}
+	if promoted.ID != identity.ID || promoted.Device != identity.Device || promoted.Inode != identity.Inode {
+		t.Fatalf("promotion changed the HOME ID or inode: before=%#v after=%#v", identity, promoted)
+	}
+	if got, err := os.ReadFile(filepath.Join(data, "user-data")); err != nil || string(got) != "preserve me" {
+		t.Fatalf("legacy data changed: data=%q err=%v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "homes", "legacy-box", stateName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("promotion retained legacy execution state: %v", err)
+	}
+	if err := PromoteLegacy(base, "legacy-box", "node", "legacy-spec"); err != nil {
+		t.Fatalf("promotion retry failed: %v", err)
+	}
+}
+
+func TestPromoteLegacyInitializesMissingHomeAndRejectsUnknownData(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "cellbox")
+	if err := PromoteLegacy(base, "missing-box", "node", "legacy-spec"); err != nil {
+		t.Fatalf("missing legacy HOME did not create an empty volume: %v", err)
+	}
+	if _, err := Verify(base, "missing-box", "node", VolumeSpecHash, ""); err != nil {
+		t.Fatalf("initialized volume did not verify: %v", err)
+	}
+	if err := PromoteLegacy(base, "missing-empty-spec", "node", ""); err != nil {
+		t.Fatalf("missing legacy HOME with empty legacy spec did not create an empty volume: %v", err)
+	}
+	if _, err := Verify(base, "missing-empty-spec", "node", VolumeSpecHash, ""); err != nil {
+		t.Fatalf("empty-spec initialized volume did not verify: %v", err)
+	}
+	if _, err := Prepare(base, "legacy-empty-spec", "node", "legacy-spec", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := PromoteLegacy(base, "legacy-empty-spec", "node", ""); err == nil {
+		t.Fatal("promotion accepted an empty spec for an existing legacy identity")
+	}
+	if err := os.MkdirAll(filepath.Join(base, "homes", "unknown-box", "data"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "homes", "unknown-box", "data", "unknown"), []byte("do not adopt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := PromoteLegacy(base, "unknown-box", "node", "legacy-spec"); err == nil {
+		t.Fatal("promotion adopted a non-empty unknown HOME directory")
+	}
+	if err := PromoteLegacy(base, "unknown-box", "node", ""); err == nil {
+		t.Fatal("empty-spec promotion adopted a non-empty unknown HOME directory")
+	}
+}
+
 func TestPrepareVerifyAndOwnerIsolation(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cellbox")
 	if _, err := Path("relative", "owner-a"); err == nil {
@@ -174,10 +294,10 @@ func TestClaimCheckpointResumeConsumesSnapshot(t *testing.T) {
 
 func TestRemoveOnlyRemovesValidatedOwnerAndDoesNotFollowGuestSymlink(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cellbox")
-	if _, err := Prepare(base, "owner-a", "node", "spec", true); err != nil {
+	if _, err := Prepare(base, "owner-a", "node", VolumeSpecHash, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Prepare(base, "owner-b", "node", "spec", true); err != nil {
+	if _, err := Prepare(base, "owner-b", "node", VolumeSpecHash, true); err != nil {
 		t.Fatal(err)
 	}
 	outside := filepath.Join(t.TempDir(), "outside")
@@ -192,19 +312,19 @@ func TestRemoveOnlyRemovesValidatedOwnerAndDoesNotFollowGuestSymlink(t *testing.
 	if err := os.Symlink(outside, filepath.Join(data, "guest-link")); err != nil {
 		t.Fatal(err)
 	}
-	if err := Remove(base, "owner-a", "wrong-node", "spec"); err == nil {
-		t.Fatal("Remove accepted a mismatched node")
+	if err := RemoveVolume(base, "owner-a", "wrong-node"); err == nil {
+		t.Fatal("RemoveVolume accepted a mismatched node")
 	}
-	if err := Remove(base, "owner-a", "node", "spec"); err != nil {
+	if err := RemoveVolume(base, "owner-a", "node"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(sentinel); err != nil {
 		t.Fatalf("Remove followed a guest symlink: %v", err)
 	}
-	if _, err := Verify(base, "owner-b", "node", "spec", ""); err != nil {
+	if _, err := Verify(base, "owner-b", "node", VolumeSpecHash, ""); err != nil {
 		t.Fatalf("removing owner-a affected owner-b: %v", err)
 	}
-	if err := Remove(base, "owner-a", "node", "spec"); err != nil && !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("repeated Remove should be idempotent: %v", err)
+	if err := RemoveVolume(base, "owner-a", "node"); err != nil {
+		t.Fatalf("repeated RemoveVolume should be idempotent: %v", err)
 	}
 }

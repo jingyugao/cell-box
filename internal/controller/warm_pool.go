@@ -95,6 +95,8 @@ func warmExecutionPod(w *api.ResumablePod, name string) *core.Pod {
 	// Only the root sandbox is precreated. Its eventual child Gofer receives
 	// the claimed Box's HOME from the adapter, never from this template Box.
 	template.Spec.PersistentHome = false
+	template.Spec.HomeVolumeUID = ""
+	template.Spec.Mounts = nil
 	return executionPod(template, name)
 }
 
@@ -533,7 +535,7 @@ func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (result *co
 			continue
 		}
 		candidate := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{Name: template.ID, Namespace: p.Namespace, UID: types.UID("00000000-0000-4000-8000-000000000001")}, Spec: template.Spec}
-		if validate(candidate) == nil && fingerprint(candidate) == w.Status.SpecHash {
+		if validate(candidate) == nil && fingerprint(candidate) == warmFingerprint(w) {
 			allowed = true
 			break
 		}
@@ -541,6 +543,7 @@ func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (result *co
 	if !allowed {
 		return nil, nil
 	}
+	warmHash := warmFingerprint(w)
 	if w.Spec.NodeName != r.NodeName {
 		return nil, nil
 	}
@@ -580,7 +583,7 @@ func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (result *co
 		if owner != nil && !owned(w, pod) {
 			continue
 		}
-		if pod.Annotations[warmSpec] != w.Status.SpecHash || pod.DeletionTimestamp != nil || !admittedDebugMount(w, pod) {
+		if pod.Annotations[warmSpec] != warmHash || pod.DeletionTimestamp != nil || !admittedDebugMount(w, pod) {
 			continue
 		}
 		if owned(w, pod) {
@@ -592,7 +595,7 @@ func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (result *co
 				}
 				return nil, err
 			}
-			if current.UID != pod.UID || !owned(w, current) || current.DeletionTimestamp != nil || current.Annotations[warmSpec] != w.Status.SpecHash {
+			if current.UID != pod.UID || !owned(w, current) || current.DeletionTimestamp != nil || current.Annotations[warmSpec] != warmHash {
 				continue
 			}
 			pod = current

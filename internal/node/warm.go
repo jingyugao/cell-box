@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"time"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
@@ -56,7 +57,7 @@ func warmUpdateContext(_ context.Context, base, uid string, create bool, fn func
 	if err = fn(&l); err != nil {
 		return l, err
 	}
-	if before != l {
+	if !reflect.DeepEqual(before, l) {
 		err = AtomicJSON(path, l)
 	}
 	return l, err
@@ -118,7 +119,7 @@ func WaitWarm(base, uid, sid string) (Ticket, error) {
 				if err := ReadJSON(filepath.Join(base, "tickets", uid+".json"), &live); err != nil {
 					return err
 				}
-				if live != l.Ticket {
+				if !reflect.DeepEqual(live, l.Ticket) {
 					return fmt.Errorf("warm assignment revoked")
 				}
 				l.Phase = "restoring"
@@ -149,13 +150,13 @@ func (b *Backend) ActivateWarm(ctx context.Context, w *api.ResumablePod, p *core
 	if err != nil {
 		return true, err
 	}
-	homeID, err := b.persistentHome(w, false)
-	if err != nil {
-		return true, err
-	}
-	t := Ticket{OwnerUID: string(w.UID), PodUID: string(p.UID), Namespace: p.Namespace, PodName: p.Name, Snapshot: w.Status.Snapshot, SpecHash: w.Status.SpecHash, HomeID: homeID}
 	if l.Phase == "claimed" || l.Phase == "restoring" {
-		if l.Ticket != t {
+		mounts, err := b.prepareVolumeMounts(w, w.Status.Cycle == 1 && w.Status.Snapshot == "")
+		if err != nil {
+			return true, err
+		}
+		t := warmTicket(w, p, mounts)
+		if !reflect.DeepEqual(l.Ticket, t) {
 			return true, fmt.Errorf("warm slot assigned to another execution")
 		}
 		return true, nil
@@ -163,9 +164,17 @@ func (b *Backend) ActivateWarm(ctx context.Context, w *api.ResumablePod, p *core
 	if l.Phase == "expired" || (l.Phase == "waiting" && !time.Now().Before(l.Deadline)) {
 		return true, backend.ErrWarmExpired
 	}
-	if l.SpecHash != w.Status.SpecHash || t.Snapshot == "" {
+	warmSpec := w.DeepCopy()
+	warmSpec.Spec.HomeVolumeUID = ""
+	warmSpec.Spec.Mounts = nil
+	if l.SpecHash != api.SpecFingerprint(warmSpec) || w.Status.Snapshot == "" {
 		return true, fmt.Errorf("incompatible warm restore")
 	}
+	mounts, err := b.prepareVolumeMounts(w, w.Status.Cycle == 1 && w.Status.Snapshot == "")
+	if err != nil {
+		return true, err
+	}
+	t := warmTicket(w, p, mounts)
 	if err = b.prepareSnapshot(ctx, w); err != nil {
 		return true, err
 	}
@@ -181,6 +190,16 @@ func (b *Backend) ActivateWarm(ctx context.Context, w *api.ResumablePod, p *core
 		return nil
 	})
 	return true, err
+}
+
+func warmTicket(w *api.ResumablePod, p *core.Pod, mounts []VolumeMountAuthorization) Ticket {
+	t := Ticket{OwnerUID: string(w.UID), NodeName: w.Spec.NodeName, HomeVolumeUID: w.Spec.HomeVolumeUID, PodUID: string(p.UID), Namespace: p.Namespace, PodName: p.Name, Snapshot: w.Status.Snapshot, SpecHash: w.Status.SpecHash}
+	if w.Spec.Mounts != nil {
+		t.Mounts = mounts
+	} else if len(mounts) > 0 {
+		t.HomeID = mounts[0].HomeID
+	}
+	return t
 }
 
 func RetireWarm(base, uid string) error {

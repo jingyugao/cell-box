@@ -13,9 +13,12 @@ import (
 
 // CreateOptions selects a fixed revision, or the current stable revision of a template.
 type CreateOptions struct {
-	RevisionID string `json:"revisionId,omitempty"`
-	TemplateID string `json:"templateId,omitempty"`
-	OwnerKey   string `json:"ownerKey"`
+	ID           string  `json:"id,omitempty"`
+	RevisionID   string  `json:"revisionId,omitempty"`
+	TemplateID   string  `json:"templateId,omitempty"`
+	OwnerKey     string  `json:"ownerKey"`
+	HomeVolumeID string  `json:"homeVolumeId,omitempty"`
+	Mounts       []Mount `json:"mounts,omitempty"`
 	// Staged holds the configured workload until explicitly activated via the API.
 	Staged bool `json:"staged,omitempty"`
 }
@@ -24,6 +27,8 @@ type CreateOptions struct {
 type SandboxInfo struct {
 	ID              string       `json:"id"`
 	OwnerKey        string       `json:"ownerKey"`
+	HomeVolumeID    string       `json:"homeVolumeId,omitempty"`
+	Mounts          []Mount      `json:"mounts,omitempty"`
 	TemplateID      string       `json:"templateId"`
 	RevisionID      string       `json:"revisionId"`
 	TemplateName    string       `json:"templateName"`
@@ -41,6 +46,33 @@ type SandboxInfo struct {
 	Error           *APIError    `json:"error,omitempty"`
 	CreatedAt       time.Time    `json:"createdAt"`
 	ObservedAt      *time.Time   `json:"observedAt,omitempty"`
+}
+
+// Mount attaches a persistent volume at a fixed absolute path in a sandbox.
+type Mount struct {
+	VolumeID  string `json:"volumeId"`
+	MountPath string `json:"mountPath"`
+	ReadOnly  bool   `json:"readOnly,omitempty"`
+}
+
+// CreateVolumeOptions creates a persistent volume for later mounting.
+type CreateVolumeOptions struct {
+	ID        string `json:"id,omitempty"`
+	OwnerKey  string `json:"ownerKey"`
+	ProfileID string `json:"profileId"`
+}
+
+// Volume describes an independently managed persistent volume.
+type Volume struct {
+	ID              string    `json:"id"`
+	OwnerKey        string    `json:"ownerKey"`
+	ProfileID       string    `json:"profileId"`
+	NodeName        string    `json:"nodeName"`
+	Phase           string    `json:"phase"`
+	ResourceVersion uint64    `json:"resourceVersion"`
+	CreatedAt       time.Time `json:"createdAt"`
+	OperationID     string    `json:"operationId,omitempty"`
+	Error           *APIError `json:"error,omitempty"`
 }
 
 type Capabilities struct {

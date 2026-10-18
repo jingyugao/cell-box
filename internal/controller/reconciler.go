@@ -4,8 +4,6 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
@@ -98,48 +96,16 @@ func (r *Reconciler) phase(ctx context.Context, w *api.ResumablePod, phase, mess
 	return again, r.Status().Update(ctx, w)
 }
 func fingerprint(w *api.ResumablePod) string {
-	legacy := struct {
-		Node      string
-		Container core.Container
-		Ports     []core.ServicePort
-	}{w.Spec.NodeName, w.Spec.Container, w.Spec.ServicePorts}
-	var b []byte
-	if w.Spec.SharedReadOnlyHostPath != "" {
-		b, _ = json.Marshal(struct {
-			Node                   string
-			Container              core.Container
-			Ports                  []core.ServicePort
-			SharedReadOnlyHostPath string
-			DebugReadOnlyHostPath  string
-			DebugReadWriteHostPath string
-		}{legacy.Node, legacy.Container, legacy.Ports, w.Spec.SharedReadOnlyHostPath, w.Spec.DebugReadOnlyHostPath, w.Spec.DebugReadWriteHostPath})
-	} else if w.Spec.DebugReadOnlyHostPath == "" && w.Spec.DebugReadWriteHostPath == "" {
-		// Keep the fingerprint of existing workloads unchanged.
-		b, _ = json.Marshal(legacy)
-	} else if w.Spec.DebugReadWriteHostPath == "" {
-		b, _ = json.Marshal(struct {
-			Node                  string
-			Container             core.Container
-			Ports                 []core.ServicePort
-			DebugReadOnlyHostPath string
-		}{legacy.Node, legacy.Container, legacy.Ports, w.Spec.DebugReadOnlyHostPath})
-	} else {
-		b, _ = json.Marshal(struct {
-			Node                   string
-			Container              core.Container
-			Ports                  []core.ServicePort
-			DebugReadWriteHostPath string
-		}{legacy.Node, legacy.Container, legacy.Ports, w.Spec.DebugReadWriteHostPath})
-	}
-	if w.Spec.PersistentHome {
-		// Preserve all existing fingerprints when the optional mode is disabled.
-		b, _ = json.Marshal(struct {
-			Legacy         json.RawMessage
-			PersistentHome bool
-		}{b, true})
-	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
+	return api.SpecFingerprint(w)
+}
+
+// warmFingerprint ignores the selected HOME volume so one warm runtime profile
+// can serve Boxes that attach different volumes.
+func warmFingerprint(w *api.ResumablePod) string {
+	copy := w.DeepCopy()
+	copy.Spec.HomeVolumeUID = ""
+	copy.Spec.Mounts = nil
+	return api.SpecFingerprint(copy)
 }
 func debugHostVolumes(w *api.ResumablePod) []core.Volume {
 	if w.Spec.DebugReadWriteHostPath != "" {
@@ -161,12 +127,34 @@ func debugHostMounts(w *api.ResumablePod) []core.VolumeMount {
 	}
 	return []core.VolumeMount{{Name: "debug-host", MountPath: api.DebugHostMountPath, ReadOnly: true}}
 }
+
+func workloadMounts(w *api.ResumablePod) []api.VolumeMount {
+	if w.Spec.Mounts != nil {
+		return w.Spec.Mounts
+	}
+	if !w.Spec.PersistentHome {
+		return nil
+	}
+	uid := w.Spec.HomeVolumeUID
+	if uid == "" {
+		uid = string(w.UID)
+	}
+	return []api.VolumeMount{{UID: uid, MountPath: homevolume.MountPath}}
+}
+
+func mountVolumeName(mount api.VolumeMount, index int) string {
+	if mount.MountPath == homevolume.MountPath {
+		return "agent-home"
+	}
+	return fmt.Sprintf("cellbox-volume-%d", index)
+}
+
 func hostVolumes(w *api.ResumablePod) []core.Volume {
 	volumes := debugHostVolumes(w)
-	if w.Spec.PersistentHome {
-		home, _ := homevolume.Path(homevolume.DefaultBase, string(w.UID)) // validate checks the owner first.
+	for i, mount := range workloadMounts(w) {
+		home, _ := homevolume.Path(homevolume.DefaultBase, mount.UID) // validate checks each volume UID first.
 		directory := core.HostPathDirectory
-		volumes = append(volumes, core.Volume{Name: "agent-home", VolumeSource: core.VolumeSource{HostPath: &core.HostPathVolumeSource{Path: home, Type: &directory}}})
+		volumes = append(volumes, core.Volume{Name: mountVolumeName(mount, i), VolumeSource: core.VolumeSource{HostPath: &core.HostPathVolumeSource{Path: home, Type: &directory}}})
 	}
 	if w.Spec.SharedReadOnlyHostPath != "" {
 		directory := core.HostPathDirectory
@@ -176,8 +164,8 @@ func hostVolumes(w *api.ResumablePod) []core.Volume {
 }
 func hostMounts(w *api.ResumablePod) []core.VolumeMount {
 	mounts := debugHostMounts(w)
-	if w.Spec.PersistentHome {
-		mounts = append(mounts, core.VolumeMount{Name: "agent-home", MountPath: homevolume.MountPath})
+	for i, mount := range workloadMounts(w) {
+		mounts = append(mounts, core.VolumeMount{Name: mountVolumeName(mount, i), MountPath: mount.MountPath, ReadOnly: mount.ReadOnly})
 	}
 	if w.Spec.SharedReadOnlyHostPath != "" {
 		mounts = append(mounts, core.VolumeMount{Name: "shared", MountPath: api.SharedMountPath, ReadOnly: true})
@@ -194,6 +182,8 @@ func admittedDebugMount(w *api.ResumablePod, p *core.Pod) bool {
 		// child OCI create binds HOME after this Pod has been claimed.
 		template = w.DeepCopy()
 		template.Spec.PersistentHome = false
+		template.Spec.HomeVolumeUID = ""
+		template.Spec.Mounts = nil
 	}
 	wantVolumes, wantMounts := hostVolumes(template), hostMounts(template)
 	if len(p.Spec.Volumes) != len(wantVolumes) || len(p.Spec.Containers[0].VolumeMounts) != len(wantMounts) {
@@ -207,8 +197,27 @@ func admittedDebugMount(w *api.ResumablePod, p *core.Pod) bool {
 func validate(w *api.ResumablePod) error {
 	c := w.Spec.Container
 	if w.Spec.PersistentHome {
-		if _, err := homevolume.Path(homevolume.DefaultBase, string(w.UID)); err != nil {
+		owner := string(w.UID)
+		if w.Spec.HomeVolumeUID != "" {
+			owner = w.Spec.HomeVolumeUID
+		}
+		if _, err := homevolume.Path(homevolume.DefaultBase, owner); err != nil {
 			return err
+		}
+	} else if w.Spec.HomeVolumeUID != "" {
+		return fmt.Errorf("homeVolumeUID requires persistentHome")
+	}
+	if w.Spec.Mounts != nil {
+		if len(w.Spec.Mounts) == 0 {
+			return fmt.Errorf("mounts must not be empty when specified")
+		}
+		for i, mount := range w.Spec.Mounts {
+			if _, err := homevolume.Path(homevolume.DefaultBase, mount.UID); err != nil {
+				return fmt.Errorf("mount %d UID: %w", i, err)
+			}
+			if !path.IsAbs(mount.MountPath) || path.Clean(mount.MountPath) != mount.MountPath || mount.MountPath == "/" || len(mount.MountPath) > 4096 || strings.ContainsAny(mount.MountPath, "\x00\r\n") {
+				return fmt.Errorf("mount %d path must be a clean absolute path other than /", i)
+			}
 		}
 	}
 	if w.Spec.DesiredState != "Running" && w.Spec.DesiredState != "Suspended" {
