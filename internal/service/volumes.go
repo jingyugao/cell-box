@@ -96,7 +96,7 @@ func (s *Store) VolumeRecord(client, id string) (volumeRecord, error) {
 }
 
 func (v volumeRecord) spec() boxprovider.VolumeSpec {
-	return boxprovider.VolumeSpec{UID: v.UID, NodeName: v.Volume.NodeName, Namespace: v.Namespace}
+	return boxprovider.VolumeSpec{UID: v.UID, NodeName: v.Volume.NodeName, Namespace: v.Namespace, Agent: v.Agent}
 }
 
 func newVolume(id, owner, client string, p Profile) volumeRecord {

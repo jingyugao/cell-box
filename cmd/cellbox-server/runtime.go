@@ -96,7 +96,7 @@ func newRuntime(kube *rest.Config, options nodeOptions, readDesired func(context
 		if spec.NodeName != options.Node || spec.Namespace != options.Namespace {
 			return errors.New("volume target differs from this server's node or namespace")
 		}
-		return backend.CreateVolume(spec.UID, spec.NodeName)
+		return backend.CreateVolume(spec.UID, spec.NodeName, spec.Agent)
 	}
 	p.DeleteVolumeLocal = func(ctx context.Context, spec boxprovider.VolumeSpec) error {
 		if spec.NodeName != options.Node || spec.Namespace != options.Namespace {

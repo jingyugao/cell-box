@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
+	"cellbox.local/cellbox/internal/guestapi"
 	"cellbox.local/cellbox/internal/homevolume"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -104,7 +105,7 @@ func TestIndependentHomeVolumeSurvivesBoxReplacementAndExplicitDelete(t *testing
 	base := t.TempDir()
 	b := &Backend{Base: base}
 	const volumeUID = "volume-001"
-	if err := b.CreateVolume(volumeUID, "node"); err != nil {
+	if err := b.CreateVolume(volumeUID, "node", guestapi.Identity{UID: uint32(os.Getuid()), GID: uint32(os.Getgid())}); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
@@ -163,7 +164,7 @@ func TestMultipleVolumeCheckpointIdentityAndReplacement(t *testing.T) {
 	base := t.TempDir()
 	b := &Backend{Base: base}
 	for _, uid := range []string{"home-volume", "data-volume"} {
-		if err := b.CreateVolume(uid, "node"); err != nil {
+		if err := b.CreateVolume(uid, "node", guestapi.Identity{UID: uint32(os.Getuid()), GID: uint32(os.Getgid())}); err != nil {
 			t.Fatal(err)
 		}
 	}

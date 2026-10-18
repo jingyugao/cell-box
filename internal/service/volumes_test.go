@@ -20,7 +20,7 @@ type diskCoreProvider struct {
 }
 
 func (p *diskCoreProvider) CreateVolume(_ context.Context, spec boxprovider.VolumeSpec) error {
-	return (&node.Backend{Base: p.base}).CreateVolume(spec.UID, spec.NodeName)
+	return (&node.Backend{Base: p.base}).CreateVolume(spec.UID, spec.NodeName, spec.Agent)
 }
 func (p *diskCoreProvider) DeleteVolume(_ context.Context, spec boxprovider.VolumeSpec) error {
 	return (&node.Backend{Base: p.base}).DeleteVolume(spec.UID, spec.NodeName)
@@ -47,6 +47,13 @@ func volumeFixture(t *testing.T) (*coreFixture, *diskCoreProvider) {
 	t.Helper()
 	f := newCoreFixture(t)
 	useK3sProfile(t, f)
+	if os.Geteuid() != 0 {
+		for i := range f.config.Profiles {
+			f.config.Profiles[i].Guest.Agent.UID = uint32(os.Getuid())
+			f.config.Profiles[i].Guest.Agent.GID = uint32(os.Getgid())
+		}
+		f.service.config.Profiles = append([]Profile(nil), f.config.Profiles...)
+	}
 	p := &diskCoreProvider{fakeCoreProvider: f.provider, base: t.TempDir()}
 	f.service.providers["resumable-k8s-pod"] = p
 	return f, p

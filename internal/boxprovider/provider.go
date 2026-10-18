@@ -41,6 +41,7 @@ type VolumeSpec struct {
 	UID       string
 	NodeName  string
 	Namespace string
+	Agent     guestapi.Identity
 }
 
 // VolumeProvider manages persistent HOME storage independently of Box runs.
