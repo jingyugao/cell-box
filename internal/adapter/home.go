@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
-	"strings"
 
 	"cellbox.local/cellbox/internal/homevolume"
 	"cellbox.local/cellbox/internal/node"
@@ -19,9 +17,9 @@ func (a Adapter) bindHome(bundle string, t node.Ticket) error {
 	if bundle == "" {
 		return fmt.Errorf("missing child bundle for persistent HOME")
 	}
-	source, err := homevolume.Path(a.Base, ticketHomeOwner(t))
-	if err != nil {
-		return err
+	authorized := ticketMounts(t)
+	if len(authorized) == 0 {
+		return nil
 	}
 	path := filepath.Join(bundle, "config.json")
 	info, err := os.Lstat(path)
@@ -44,50 +42,42 @@ func (a Adapter) bindHome(bundle string, t node.Ticket) error {
 			return fmt.Errorf("invalid OCI mounts: %w", err)
 		}
 	}
-	found := false
+	managedDestinations := make(map[string]struct{}, len(authorized))
+	for _, authorization := range authorized {
+		managedDestinations[authorization.MountPath] = struct{}{}
+	}
+	kept := make([]json.RawMessage, 0, len(mounts)+len(authorized))
 	for _, raw := range mounts {
 		var mount struct {
-			Destination string          `json:"destination"`
-			Source      string          `json:"source"`
-			Type        string          `json:"type"`
-			Options     []string        `json:"options"`
-			UIDMappings json.RawMessage `json:"uidMappings"`
-			GIDMappings json.RawMessage `json:"gidMappings"`
+			Destination string `json:"destination"`
 		}
 		if err := json.Unmarshal(raw, &mount); err != nil {
 			return fmt.Errorf("invalid OCI mount: %w", err)
 		}
-		dest := filepath.Clean(mount.Destination)
-		if dest != homevolume.MountPath {
-			if strings.HasPrefix(homevolume.MountPath, dest+"/") || dest == "/" || strings.HasPrefix(dest, homevolume.MountPath+"/") {
-				return fmt.Errorf("OCI mount overlaps persistent HOME: %q", mount.Destination)
-			}
-			continue
+		if _, managed := managedDestinations[mount.Destination]; !managed {
+			kept = append(kept, raw)
 		}
-		// Cold Pods keep kubelet's existing HOME bind mount. It must refer to
-		// exactly the authorized directory with the same restore-compatible
-		// options used below; never overwrite an unexpected mount silently.
-		slices.Sort(mount.Options)
-		if found || mount.Destination != homevolume.MountPath || mount.Source != source || mount.Type != "bind" ||
-			!slices.Equal(mount.Options, []string{"rbind", "rprivate", "rw"}) ||
-			(len(mount.UIDMappings) > 0 && string(mount.UIDMappings) != "null" && string(mount.UIDMappings) != "[]") ||
-			(len(mount.GIDMappings) > 0 && string(mount.GIDMappings) != "null" && string(mount.GIDMappings) != "[]") {
-			return fmt.Errorf("OCI persistent HOME mount does not match authorization")
+	}
+	for _, authorization := range authorized {
+		source, err := homevolume.Path(a.Base, authorization.UID)
+		if err != nil {
+			return err
 		}
-		found = true
+		wantRO := "rw"
+		if authorization.ReadOnly {
+			wantRO = "ro"
+		}
+		wantOptions := []string{"rbind", "rprivate", wantRO}
+		mount, err := json.Marshal(map[string]any{
+			"destination": authorization.MountPath, "source": source, "type": "bind",
+			"options": wantOptions,
+		})
+		if err != nil {
+			return err
+		}
+		kept = append(kept, mount)
 	}
-	if found {
-		return nil
-	}
-	mount, err := json.Marshal(map[string]any{
-		"destination": homevolume.MountPath, "source": source, "type": "bind",
-		"options": []string{"rbind", "rprivate", "rw"},
-	})
-	if err != nil {
-		return err
-	}
-	mounts = append(mounts, mount)
-	spec["mounts"], err = json.Marshal(mounts)
+	spec["mounts"], err = json.Marshal(kept)
 	if err != nil {
 		return err
 	}

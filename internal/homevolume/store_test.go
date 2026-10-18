@@ -27,7 +27,7 @@ func TestIndependentVolumeDetachAndReattachPreservesData(t *testing.T) {
 	if _, err := Attach(base, volumeUID, "node", sandboxA); err != nil {
 		t.Fatalf("same attachment was not idempotent: %v", err)
 	}
-	if err := ClaimExecution(base, volumeUID, identity.ID, "pod-a", ""); err != nil {
+	if err := ClaimAttachedExecution(base, volumeUID, "node", sandboxA, identity.ID, "pod-a", ""); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := Path(base, volumeUID)
@@ -68,7 +68,14 @@ func TestIndependentVolumeDetachAndReattachPreservesData(t *testing.T) {
 	if err := Detach(base, volumeUID, "node", sandboxA); err == nil {
 		t.Fatal("old sandbox detached a volume attached to its replacement")
 	}
-	if err := ClaimExecution(base, volumeUID, identity.ID, "pod-b", ""); err != nil {
+	if err := ClaimAttachedExecution(base, volumeUID, "node", sandboxA, identity.ID, "stale-pod", ""); err == nil {
+		t.Fatal("old sandbox claimed a volume attached to its replacement")
+	}
+	state, err := readState(filepath.Join(base, "homes", volumeUID, stateName))
+	if err != nil || state.Attachment != sandboxB || state.Phase != "new" || state.Pod != "" {
+		t.Fatalf("failed stale claim changed replacement volume state: %#v, %v", state, err)
+	}
+	if err := ClaimAttachedExecution(base, volumeUID, "node", sandboxB, identity.ID, "pod-b", ""); err != nil {
 		t.Fatalf("replacement sandbox could not cold claim the volume: %v", err)
 	}
 	if err := VerifyExecution(base, volumeUID, VolumeSpecHash, identity.ID, "pod-b"); err != nil {

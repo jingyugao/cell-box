@@ -224,7 +224,7 @@ func (s *Service) box(client, id string) (boxRecord, error) {
 	if err == nil && b.ClientID != client {
 		return boxRecord{}, apiError("NOT_FOUND", "Box not found")
 	}
-	b.Box.Capabilities = profileCapabilities(b.Profile)
+	b.Box.Capabilities = boxCapabilities(b)
 	return b, err
 }
 func (s *Service) profile(client, id string) (Profile, error) {
@@ -406,7 +406,7 @@ func runtimeSpec(b boxRecord) boxprovider.Spec {
 		config.DebugHome = "/home/debug"
 	}
 	metadata, _ := json.Marshal(inventory.Record{ClientID: b.ClientID, Box: mustBoxJSON(b.Box), Staged: b.Staged})
-	return boxprovider.Spec{Inventory: metadata, HomeVolumeUID: b.HomeVolumeUID, BoxID: b.Box.ID, Image: b.Profile.Image, Config: config, CPU: b.Profile.CPU, MemoryMiB: b.Profile.MemoryMiB, Namespace: b.Profile.Namespace, NodeName: b.Profile.NodeName, SharedReadOnlyHostPath: b.Profile.SharedReadOnlyHostPath, DebugReadOnlyHostPath: b.Profile.DebugReadOnlyHostPath, DebugReadWriteHostPath: b.Profile.DebugReadWriteHostPath, PersistentHome: b.Profile.PersistentHome, Staged: b.Staged}
+	return boxprovider.Spec{Inventory: metadata, Mounts: b.VolumeMounts, HomeVolumeUID: b.HomeVolumeUID, BoxID: b.Box.ID, Image: b.Profile.Image, Config: config, CPU: b.Profile.CPU, MemoryMiB: b.Profile.MemoryMiB, Namespace: b.Profile.Namespace, NodeName: b.Profile.NodeName, SharedReadOnlyHostPath: b.Profile.SharedReadOnlyHostPath, DebugReadOnlyHostPath: b.Profile.DebugReadOnlyHostPath, DebugReadWriteHostPath: b.Profile.DebugReadWriteHostPath, PersistentHome: b.Profile.PersistentHome, Staged: b.Staged}
 }
 func (s *Service) rawBox(id string) (boxRecord, error) {
 	return s.store.BoxRecord(id)
@@ -743,12 +743,13 @@ func (s *Service) provision(ctx context.Context, id string) (Box, error) {
 }
 
 type createRequest struct {
-	ID           string `json:"id,omitempty"`
-	HomeVolumeID string `json:"homeVolumeId,omitempty"`
-	TemplateID   string `json:"templateId,omitempty"`
-	RevisionID   string `json:"revisionId,omitempty"`
-	OwnerKey     string `json:"ownerKey"`
-	Staged       bool   `json:"staged,omitempty"`
+	Mounts       []Mount `json:"mounts,omitempty"`
+	ID           string  `json:"id,omitempty"`
+	HomeVolumeID string  `json:"homeVolumeId,omitempty"`
+	TemplateID   string  `json:"templateId,omitempty"`
+	RevisionID   string  `json:"revisionId,omitempty"`
+	OwnerKey     string  `json:"ownerKey"`
+	Staged       bool    `json:"staged,omitempty"`
 }
 
 func (s *Service) create(client string, input createRequest, archiveID string, acceptImageChange bool) (Operation, error) {
@@ -769,10 +770,13 @@ func (s *Service) create(client string, input createRequest, archiveID string, a
 		return Operation{}, err
 	}
 	profile := tmpl.Profile
-	if archiveID != "" && input.HomeVolumeID != "" {
+	if len(input.Mounts) > 0 && input.HomeVolumeID != "" {
+		return Operation{}, apiError("INVALID_REQUEST", "Specify mounts or homeVolumeId, not both")
+	}
+	if archiveID != "" && (input.HomeVolumeID != "" || len(input.Mounts) > 0) {
 		return Operation{}, apiError("INVALID_REQUEST", "Archive restore requires a new HOME volume")
 	}
-	if input.HomeVolumeID != "" && (profile.Provider != "resumable-k8s-pod" || !profile.PersistentHome) {
+	if (input.HomeVolumeID != "" || len(input.Mounts) > 0) && (profile.Provider != "resumable-k8s-pod" || !profile.PersistentHome) {
 		return Operation{}, boxprovider.ErrUnsupported
 	}
 	if profile.PersistentHome {
@@ -824,7 +828,7 @@ func (s *Service) create(client string, input createRequest, archiveID string, a
 			OwnerKey: input.OwnerKey, ProfileID: profile.ID, Phase: phase, Version: 1, Image: profile.Image, Workspace: profile.Guest.Workspace,
 			Capabilities: profileCapabilities(profile), OperationID: op.ID, CreatedAt: time.Now().UTC()},
 			ClientID: client, Profile: profile, Staged: archiveID != "" || input.Staged, RestoreComplete: input.Staged && archiveID == "", RestoreArchiveID: archiveID, AcceptImageChange: acceptImageChange}
-		if err := s.admitBoxVolume(tx, &b, input.HomeVolumeID); err != nil {
+		if err := s.admitBoxMounts(tx, &b, input.Mounts, input.HomeVolumeID); err != nil {
 			return err
 		}
 		return tx.PutBox(b)

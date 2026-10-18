@@ -10,6 +10,7 @@ import (
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -223,7 +224,7 @@ func TestWarmClaimRaceAndExpiry(t *testing.T) {
 	if err = ReadJSON(filepath.Join(base, "tickets", "pod.json"), &ticket); err != nil {
 		t.Fatal(err)
 	}
-	if ticket != l.Ticket {
+	if !reflect.DeepEqual(ticket, l.Ticket) {
 		t.Fatal("losing claim overwrote winner ticket")
 	}
 	if err = RetireWarm(base, "pod"); err != nil {

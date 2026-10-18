@@ -92,6 +92,33 @@ func TestCaptureWorkspaceArchiveFromSuspendedHomeIsBoundedAndIdempotent(t *testi
 	}
 }
 
+func TestWorkspaceArchiveRejectsOverlappingVolumesButAllowsExternalMounts(t *testing.T) {
+	config, err := json.Marshal(guestapi.Config{Workspace: "/home/agent/workspace/src"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := []api.VolumeMount{
+		{UID: "home-volume", MountPath: "/home/agent"},
+		{UID: "data-volume", MountPath: "/data"},
+	}
+	w := &api.ResumablePod{Spec: api.Spec{Mounts: base, Container: core.Container{Args: []string{"--config-base64", base64.StdEncoding.EncodeToString(config)}}}}
+	if _, err := writableWorkspaceHomeMount(w); err != nil {
+		t.Fatalf("external data volume should not block archive: %v", err)
+	}
+	w.Spec.Mounts = []api.VolumeMount{{UID: "data-volume", MountPath: "/data"}}
+	if _, err := writableWorkspaceHomeMount(w); err == nil {
+		t.Fatal("data-only mounts unexpectedly support HOME workspace archives")
+	}
+	for _, mountPath := range []string{"/home", "/home/agent/workspace", "/home/agent/workspace/src/cache"} {
+		t.Run(mountPath, func(t *testing.T) {
+			w.Spec.Mounts = append(append([]api.VolumeMount(nil), base...), api.VolumeMount{UID: "overlap-volume", MountPath: mountPath})
+			if _, err := writableWorkspaceHomeMount(w); err == nil {
+				t.Fatalf("overlapping volume %q was archived", mountPath)
+			}
+		})
+	}
+}
+
 func TestCaptureWorkspaceArchiveRejectsIntermediateSymlink(t *testing.T) {
 	base := t.TempDir()
 	identity, err := homevolume.Prepare(base, "owner", "node-a", "spec", true)

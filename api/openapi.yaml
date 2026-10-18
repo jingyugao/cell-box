@@ -220,7 +220,11 @@ components:
           type: integer
         homeVolumeId:
           type: string
-          description: Persistent HOME volume attached to this box, when known.
+          description: Compatibility shorthand for the volume mounted at /home/agent; omitted when this Box has no HOME mount.
+        mounts:
+          type: array
+          description: Explicit volume mounts attached to this box; when omitted on create, legacy behavior creates a dedicated /home/agent volume.
+          items: {$ref: '#/components/schemas/Mount'}
         executionId:
           description: Current runtime execution identity when observed; omitted when unknown or unavailable.
           type: string
@@ -286,6 +290,20 @@ components:
       - workspace
       - capabilities
       - createdAt
+      type: object
+    Mount:
+      additionalProperties: false
+      description: One exclusively attached persistent volume. Mount paths must be clean absolute directory paths other than / and cannot contain control characters. Duplicate, overlapping, or nested paths are not checked.
+      properties:
+        volumeId: {type: string, minLength: 1, maxLength: 55, pattern: '^[a-z0-9]([-a-z0-9]{0,53}[a-z0-9])?$'}
+        mountPath:
+          type: string
+          minLength: 2
+          description: Clean absolute directory path other than /; control characters are rejected.
+        readOnly:
+          type: boolean
+          default: false
+      required: [volumeId, mountPath]
       type: object
     Volume:
       additionalProperties: false
@@ -385,6 +403,10 @@ components:
           maxLength: 55
           pattern: '^[a-z0-9]([-a-z0-9]{0,53}[a-z0-9])?$'
           description: Existing available persistent HOME volume to attach. Must belong to the same client and owner and be on a compatible node. Docker profiles return UNSUPPORTED_CAPABILITY. Omit for a Kubernetes box to create its own retained HOME volume.
+        mounts:
+          type: array
+          description: Complete exclusive volume mount list. A non-empty mounts list and homeVolumeId are mutually exclusive; when both are supplied the request returns 400. When supplied, Cellbox does not add an implicit /home/agent mount. Each volume must be available, belong to the same client and owner, and be compatible with the target node and guest identity. Paths must be clean absolute directories other than / with no control characters. Duplicate or nested paths are not checked. Docker profiles return UNSUPPORTED_CAPABILITY. Omit to create a dedicated /home/agent volume. Empty-array behavior is unspecified; omit the field when requesting legacy behavior.
+          items: {$ref: '#/components/schemas/Mount'}
         ownerKey:
           maxLength: 256
           minLength: 1
@@ -623,7 +645,7 @@ components:
       oneOf:
       - required: [templateId]
       - required: [revisionId]
-      description: Restore the archive into a new empty staged Kubernetes sandbox using its template or revision image and runtime configuration. The caller provisions credentials and explicitly activates it. A failed restore candidate is terminal and should be destroyed. Restore always creates a new HOME volume; homeVolumeId is not accepted. Docker returns UNSUPPORTED_CAPABILITY.
+      description: Restore the archive into a new empty staged Kubernetes sandbox using its template or revision image and runtime configuration. The caller provisions credentials and explicitly activates it. A failed restore candidate is terminal and should be destroyed. Restore always creates a new HOME volume; homeVolumeId and mounts are not accepted. Docker returns UNSUPPORTED_CAPABILITY.
       properties:
         id:
           type: string
@@ -842,6 +864,11 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
+        "400":
+          description: homeVolumeId and a non-empty mounts list were both supplied, or a mount path is invalid.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
         default:
           $ref: '#/components/responses/Error'
       summary: Create a box asynchronously
@@ -966,7 +993,7 @@ paths:
       summary: Inspect owned box and refresh provider lifecycle phase
   /v1/boxes/{id}/archives:
     post:
-      description: Captures a suspended or failed Kubernetes sandbox with persistent HOME. Requires node archive support and configured object storage. The source is not resumed automatically. Excludes credentials outside workspace.
+      description: Captures a suspended or failed Kubernetes sandbox with persistent HOME. Offline archives capture only the single writable HOME backing directory, so the workspace must be under /home/agent. If another volume overlays the workspace, any descendant of it, or any ancestor mount path, capture returns UNSUPPORTED_CAPABILITY because the HOME backing directory would omit that volume's data. These mount layouts remain valid for Box creation and runtime. Requires node archive support and configured object storage. Read-only HOME mounts are not archivable. The source is not resumed automatically. Excludes credentials outside workspace.
       operationId: captureArchive
       requestBody:
         required: false
@@ -1364,7 +1391,7 @@ paths:
       summary: Checkpoint a resumable Kubernetes box on its node
   /v1/boxes:restore:
     post:
-      description: Restore an archive into a new empty staged Kubernetes sandbox with a new HOME volume. homeVolumeId is not accepted. The caller provisions credentials and explicitly activates it. Failed restore candidates are terminal and should be destroyed. Docker returns UNSUPPORTED_CAPABILITY.
+      description: Restore an archive into a new empty staged Kubernetes sandbox with a new HOME volume. homeVolumeId and mounts are not accepted. The caller provisions credentials and explicitly activates it. Failed restore candidates are terminal and should be destroyed. Docker returns UNSUPPORTED_CAPABILITY.
       operationId: restoreBox
       parameters:
       requestBody:

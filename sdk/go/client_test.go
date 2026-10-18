@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -110,8 +111,12 @@ func TestVolumeCRUDAndCreateBoxHomeVolumeWireFields(t *testing.T) {
 			writeJSONTest(w, Operation{ID: "op-delete", Kind: "volume-delete", TargetID: "p1-home", Status: "succeeded", Result: map[string]string{"volumeId": "p1-home"}})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/boxes":
 			gotCreateBox = true
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
 			var request CreateOptions
-			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			if err := json.Unmarshal(body, &request); err != nil {
 				t.Fatal(err)
 			}
 			if request.ID != "box-p1-v2" || request.HomeVolumeID != "p1-home" {
@@ -150,6 +155,59 @@ func TestVolumeCRUDAndCreateBoxHomeVolumeWireFields(t *testing.T) {
 	}
 	if !gotCreateVolume || !gotDeleteVolume || !gotCreateBox {
 		t.Fatalf("request coverage: createVolume=%v deleteVolume=%v createBox=%v", gotCreateVolume, gotDeleteVolume, gotCreateBox)
+	}
+}
+
+func TestCreateOptionsSendsMultipleMountsWithoutCheckingPathOverlap(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertHeaders(t, r)
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/boxes" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var request CreateOptions
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Fatal(err)
+		}
+		want := []Mount{
+			{VolumeID: "p1-home", MountPath: "/home/agent"},
+			{VolumeID: "p1-data", MountPath: "/data"},
+			{VolumeID: "p1-data-copy", MountPath: "/data"},
+			{VolumeID: "p1-nested", MountPath: "/data/cache", ReadOnly: true},
+		}
+		if fmt.Sprint(request.Mounts) != fmt.Sprint(want) {
+			t.Errorf("decoded mounts = %#v, want %#v", request.Mounts, want)
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(body, &raw); err != nil {
+			t.Fatal(err)
+		}
+		mounts := raw["mounts"].([]any)
+		if mounts[3].(map[string]any)["readOnly"] != true {
+			t.Errorf("readOnly=true was not serialized: %s", body)
+		}
+		if _, exists := mounts[1].(map[string]any)["readOnly"]; exists {
+			t.Errorf("readOnly=false should be omitted by the SDK: %s", body)
+		}
+		writeJSONTest(w, Operation{ID: "op-mounts", Kind: "create", TargetID: request.ID, Status: "succeeded", Box: &SandboxInfo{ID: request.ID, Mounts: request.Mounts}})
+	}))
+	defer server.Close()
+	client := testClient(t, server, "")
+	options := CreateOptions{ID: "box-mounts", RevisionID: "rev-v1", OwnerKey: "project:p1", Mounts: []Mount{
+		{VolumeID: "p1-home", MountPath: "/home/agent"},
+		{VolumeID: "p1-data", MountPath: "/data"},
+		{VolumeID: "p1-data-copy", MountPath: "/data"},
+		{VolumeID: "p1-nested", MountPath: "/data/cache", ReadOnly: true},
+	}}
+	op, err := client.CreateAsync(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op.Box == nil || fmt.Sprint(op.Box.Mounts) != fmt.Sprint(options.Mounts) {
+		t.Fatalf("box response mounts = %#v, want %#v", op.Box, options.Mounts)
 	}
 }
 

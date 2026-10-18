@@ -62,9 +62,17 @@ type Spec struct {
 	DebugReadWriteHostPath string             `json:"debugReadWriteHostPath,omitempty"`
 	PersistentHome         bool               `json:"persistentHome,omitempty"`
 	HomeVolumeUID          string             `json:"homeVolumeUID,omitempty"`
+	Mounts                 []VolumeMount      `json:"mounts,omitempty"`
 	ServicePorts           []core.ServicePort `json:"servicePorts,omitempty"`
 	RetryNonce             string             `json:"retryNonce,omitempty"`
 	StartupTimeoutSeconds  int64              `json:"startupTimeoutSeconds,omitempty"`
+}
+
+// VolumeMount attaches one independently managed volume into the guest.
+type VolumeMount struct {
+	UID       string `json:"uid"`
+	MountPath string `json:"mountPath"`
+	ReadOnly  bool   `json:"readOnly,omitempty"`
 }
 type Status struct {
 	Phase              string `json:"phase,omitempty"`
@@ -111,6 +119,9 @@ func (r *ResumablePod) DeepCopy() *ResumablePod {
 		for i := range r.Spec.ServicePorts {
 			r.Spec.ServicePorts[i].DeepCopyInto(&out.Spec.ServicePorts[i])
 		}
+	}
+	if r.Spec.Mounts != nil {
+		out.Spec.Mounts = append([]VolumeMount(nil), r.Spec.Mounts...)
 	}
 	out.Status.Conditions = append([]meta.Condition(nil), r.Status.Conditions...)
 	if r.Status.Execution != nil {

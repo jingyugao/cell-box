@@ -25,23 +25,36 @@ var safeID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]{0,100}$`)
 func ValidID(s string) bool { return safeID.MatchString(s) }
 
 type Manifest struct {
-	HomeID    string            `json:"persistentHomeID,omitempty"`
-	OwnerUID  string            `json:"ownerUID"`
-	SpecHash  string            `json:"specHash"`
-	ImageID   string            `json:"imageID"`
-	RunscHash string            `json:"runscHash"`
-	Files     map[string]string `json:"files"`
+	HomeID    string                     `json:"persistentHomeID,omitempty"`
+	Mounts    []VolumeMountAuthorization `json:"mounts,omitempty"`
+	OwnerUID  string                     `json:"ownerUID"`
+	SpecHash  string                     `json:"specHash"`
+	ImageID   string                     `json:"imageID"`
+	RunscHash string                     `json:"runscHash"`
+	Files     map[string]string          `json:"files"`
 }
+
+// VolumeMountAuthorization binds a mount path to its immutable independent
+// volume identity for this Box execution and checkpoint.
+type VolumeMountAuthorization struct {
+	UID       string `json:"uid"`
+	MountPath string `json:"mountPath"`
+	ReadOnly  bool   `json:"readOnly,omitempty"`
+	HomeID    string `json:"homeID"`
+	Legacy    bool   `json:"legacy,omitempty"`
+}
+
 type Ticket struct {
-	HomeID        string `json:"persistentHomeID,omitempty"`
-	HomeVolumeUID string `json:"homeVolumeUID,omitempty"`
-	OwnerUID      string `json:"ownerUID"`
-	NodeName      string `json:"nodeName,omitempty"`
-	PodUID        string `json:"podUID"`
-	Namespace     string `json:"namespace"`
-	PodName       string `json:"podName"`
-	Snapshot      string `json:"snapshot"`
-	SpecHash      string `json:"specHash"`
+	HomeID        string                     `json:"persistentHomeID,omitempty"`
+	HomeVolumeUID string                     `json:"homeVolumeUID,omitempty"`
+	Mounts        []VolumeMountAuthorization `json:"mounts,omitempty"`
+	OwnerUID      string                     `json:"ownerUID"`
+	NodeName      string                     `json:"nodeName,omitempty"`
+	PodUID        string                     `json:"podUID"`
+	Namespace     string                     `json:"namespace"`
+	PodName       string                     `json:"podName"`
+	Snapshot      string                     `json:"snapshot"`
+	SpecHash      string                     `json:"specHash"`
 }
 
 func SnapshotPath(base, owner, snapshot string) (string, error) {

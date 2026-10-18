@@ -2,6 +2,7 @@
 package boxprovider
 
 import (
+	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/guestapi"
 	"cellbox.local/cellbox/internal/inventory"
 	"context"
@@ -30,6 +31,7 @@ type Spec struct {
 	DebugReadWriteHostPath string
 	PersistentHome         bool
 	HomeVolumeUID          string
+	Mounts                 []api.VolumeMount
 	Staged                 bool // Start guest control, but hold the configured workload until activation.
 }
 

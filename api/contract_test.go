@@ -97,7 +97,7 @@ func TestOpenAPIResponseShapesAndReferences(t *testing.T) {
 		t.Errorf("archive capability enum = %v, want none/stopped-workspace", archiveCapability)
 	}
 	types := map[string]any{
-		"Box": service.Box{}, "Volume": service.Volume{}, "RuntimeOperation": service.Operation{},
+		"Box": service.Box{}, "Volume": service.Volume{}, "Mount": service.Mount{}, "RuntimeOperation": service.Operation{},
 		"TemplateBuildOperation": catalog.Operation{}, "Template": catalog.Template{}, "TemplateRevision": catalog.Revision{},
 		"Execution": service.Execution{}, "Capabilities": service.Capabilities{},
 		"Archive": service.Archive{}, "Identity": guestapi.Identity{},
@@ -137,7 +137,7 @@ func TestOpenAPIResponseShapesAndReferences(t *testing.T) {
 		t.Fatalf("Operation must be a union of runtime and template build operation shapes: %#v", operation["oneOf"])
 	}
 	createBox := schemas["CreateBox"].(map[string]any)["properties"].(map[string]any)
-	for _, field := range []string{"id", "homeVolumeId"} {
+	for _, field := range []string{"id", "homeVolumeId", "mounts"} {
 		if createBox[field] == nil {
 			t.Errorf("CreateBox is missing %s", field)
 		}
@@ -162,5 +162,12 @@ func TestOpenAPIResponseShapesAndReferences(t *testing.T) {
 	}
 	if _, accepted := schemas["RestoreBox"].(map[string]any)["properties"].(map[string]any)["homeVolumeId"]; accepted {
 		t.Error("RestoreBox must not accept homeVolumeId")
+	}
+	if _, accepted := schemas["RestoreBox"].(map[string]any)["properties"].(map[string]any)["mounts"]; accepted {
+		t.Error("RestoreBox must not accept mounts")
+	}
+	mountItems := createBox["mounts"].(map[string]any)["items"].(map[string]any)
+	if mountItems["$ref"] != "#/components/schemas/Mount" {
+		t.Errorf("CreateBox.mounts items = %#v, want Mount reference", mountItems)
 	}
 }

@@ -5,15 +5,26 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"path"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
+	"unicode"
 
+	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/boxprovider"
 	"cellbox.local/cellbox/internal/guestapi"
 )
 
-// Volume is a node-local HOME filesystem with a lifetime independent of a Box.
+// Mount selects an independent volume and its destination inside a Box.
+type Mount struct {
+	VolumeID  string `json:"volumeId"`
+	MountPath string `json:"mountPath"`
+	ReadOnly  bool   `json:"readOnly,omitempty"`
+}
+
+// Volume is a node-local filesystem with a lifetime independent of a Box.
 type Volume struct {
 	ID          string    `json:"id"`
 	OwnerKey    string    `json:"ownerKey"`
@@ -98,7 +109,7 @@ func newVolume(id, owner, client string, p Profile) volumeRecord {
 func (s *Service) volumeProvider(p Profile) (boxprovider.VolumeProvider, error) {
 	vp, ok := s.providers[p.Provider].(boxprovider.VolumeProvider)
 	if !ok || p.Provider != "resumable-k8s-pod" || !p.PersistentHome {
-		return nil, apiError("UNSUPPORTED_CAPABILITY", "HOME volumes require the node-local resumable provider")
+		return nil, apiError("UNSUPPORTED_CAPABILITY", "Volumes require the node-local resumable provider")
 	}
 	return vp, nil
 }
@@ -239,55 +250,120 @@ func (s *Service) registerVolumes(mux *http.ServeMux) {
 
 // Admission and Box creation share one transaction: a failed reservation cannot
 // leave a phantom attachment, and two concurrent creates cannot claim one disk.
-func (s *Service) admitBoxVolume(tx *storeTx, b *boxRecord, id string) error {
+func (s *Service) admitBoxMounts(tx *storeTx, b *boxRecord, mounts []Mount, homeID string) error {
 	if !b.Profile.PersistentHome {
 		return nil
 	}
-	var v volumeRecord
-	if id == "" {
-		id = randomID("vol-")
-		if err := tx.reserveID("volumes", id, b.ClientID); err != nil {
+	automatic := len(mounts) == 0 && homeID == ""
+	if len(mounts) == 0 {
+		id := homeID
+		if automatic {
+			id = randomID("vol-")
+		}
+		mounts = []Mount{{VolumeID: id, MountPath: "/home/agent"}}
+	}
+	resolved := make(map[string]volumeRecord)
+	for _, mount := range mounts {
+		if err := validateResourceID(mount.VolumeID); err != nil {
 			return err
+		}
+		if !path.IsAbs(mount.MountPath) || path.Clean(mount.MountPath) != mount.MountPath || mount.MountPath == "/" || strings.IndexFunc(mount.MountPath, unicode.IsControl) >= 0 {
+			return apiError("INVALID_REQUEST", "mountPath must be a clean absolute directory path other than /")
+		}
+		// Preserve the caller's ordering and repeated/nested destinations. Those
+		// are runtime mount semantics, not an admission conflict policy.
+		v, exists := resolved[mount.VolumeID]
+		if !exists {
+			var err error
+			v, err = s.reserveBoxVolume(tx, b, mount.VolumeID, automatic)
+			if err != nil {
+				return err
+			}
+			resolved[mount.VolumeID] = v
+		}
+		b.Box.Mounts = append(b.Box.Mounts, mount)
+		b.VolumeMounts = append(b.VolumeMounts, api.VolumeMount{UID: v.UID, MountPath: mount.MountPath, ReadOnly: mount.ReadOnly})
+		if mount.MountPath == "/home/agent" {
+			b.Box.HomeVolumeID, b.HomeVolumeUID = v.Volume.ID, v.UID
+		}
+	}
+	b.Box.Capabilities = boxCapabilities(*b)
+	return nil
+}
+
+func boxCapabilities(b boxRecord) Capabilities {
+	c := profileCapabilities(b.Profile)
+	if len(b.VolumeMounts) == 0 {
+		return c
+	}
+	c.PersistentHome = false
+	for _, mount := range b.VolumeMounts {
+		if mount.MountPath == "/home/agent" {
+			c.PersistentHome = true
+		}
+	}
+	if !boxCanArchiveWorkspace(b) || !workspaceUnderPersistentHome(b.Profile.Guest.Workspace) {
+		c.Archives = "none"
+	}
+	return c
+}
+
+func (s *Service) reserveBoxVolume(tx *storeTx, b *boxRecord, id string, automatic bool) (volumeRecord, error) {
+	var v volumeRecord
+	if automatic {
+		if err := tx.reserveID("volumes", id, b.ClientID); err != nil {
+			return v, err
 		}
 		v = newVolume(id, b.Box.OwnerKey, b.ClientID, b.Profile)
 	} else {
-		if err := validateResourceID(id); err != nil {
-			return err
-		}
 		var err error
 		v, err = tx.Volume(b.ClientID, id)
 		if err != nil {
-			return err
+			return v, err
 		}
 		if v.Volume.Phase != "available" || v.Volume.BoxID != "" || v.Volume.OperationID != "" {
-			return apiError("CONFLICT", "Volume is not available")
+			return v, apiError("CONFLICT", "Volume is not available")
 		}
 		if v.Volume.OwnerKey != b.Box.OwnerKey || v.Provider != b.Profile.Provider ||
 			v.Volume.NodeName != b.Profile.NodeName || v.Namespace != b.Profile.Namespace || v.Agent != b.Profile.Guest.Agent {
-			return apiError("CONFLICT", "Volume owner, node, namespace, or agent UID/GID differs from the target Box")
+			return v, apiError("CONFLICT", "Volume owner, node, namespace, or agent UID/GID differs from the target Box")
 		}
 		v.Volume.Phase = "in-use"
 	}
 	v.Volume.BoxID = b.Box.ID
 	v.Volume.Version++
-	b.Box.HomeVolumeID, b.HomeVolumeUID = id, v.UID
-	return tx.PutVolume(v)
+	return v, tx.PutVolume(v)
 }
 
 func (s *Service) prepareBoxVolume(ctx context.Context, b boxRecord) error {
-	if b.HomeVolumeUID == "" {
-		return nil
+	seen := make(map[string]bool)
+	for i, mount := range boxVolumeMounts(b) {
+		if seen[mount.VolumeID] {
+			continue
+		}
+		seen[mount.VolumeID] = true
+		uid := b.HomeVolumeUID
+		if i < len(b.VolumeMounts) {
+			uid = b.VolumeMounts[i].UID
+		}
+		if err := s.prepareVolumeForBox(ctx, b, mount.VolumeID, uid); err != nil {
+			return err
+		}
 	}
-	v, err := s.store.VolumeRecord(b.ClientID, b.Box.HomeVolumeID)
+	return nil
+}
+
+func (s *Service) prepareVolumeForBox(ctx context.Context, b boxRecord, id, uid string) error {
+	v, err := s.store.VolumeRecord(b.ClientID, id)
 	if err != nil {
 		return err
 	}
-	if v.UID != b.HomeVolumeUID || v.Volume.BoxID != b.Box.ID {
-		return apiError("CONFLICT", "Box no longer owns its HOME volume reservation")
+	if v.UID != uid || v.Volume.BoxID != b.Box.ID {
+		return apiError("CONFLICT", "Box no longer owns its volume reservation")
 	}
 	if v.Volume.Phase != "creating" {
 		if v.Volume.Phase != "in-use" {
-			return apiError("CONFLICT", "HOME volume is not ready")
+			return apiError("CONFLICT", "Volume is not ready")
 		}
 		return nil
 	}
@@ -319,7 +395,7 @@ func (s *Service) prepareBoxVolume(ctx context.Context, b boxRecord) error {
 // Existing Boxes retain their original runtime layout until termination. The
 // node finalizer promotes that HOME in place after all of its writers stop.
 func (s *Service) registerLegacyVolume(tx *storeTx, b *boxRecord) error {
-	if !b.Profile.PersistentHome || b.Box.HomeVolumeID != "" || b.Handle.ID == "" {
+	if !b.Profile.PersistentHome || len(b.VolumeMounts) != 0 || b.Box.HomeVolumeID != "" || b.Handle.ID == "" {
 		return nil
 	}
 	id := randomID("vol-")
@@ -333,10 +409,21 @@ func (s *Service) registerLegacyVolume(tx *storeTx, b *boxRecord) error {
 }
 
 func releaseBoxVolume(tx *storeTx, b boxRecord) error {
-	if b.Box.HomeVolumeID == "" {
-		return nil
+	seen := make(map[string]bool)
+	for _, mount := range boxVolumeMounts(b) {
+		if seen[mount.VolumeID] {
+			continue
+		}
+		seen[mount.VolumeID] = true
+		if err := releaseVolumeForBox(tx, b, mount.VolumeID); err != nil {
+			return err
+		}
 	}
-	v, err := tx.Volume(b.ClientID, b.Box.HomeVolumeID)
+	return nil
+}
+
+func releaseVolumeForBox(tx *storeTx, b boxRecord, id string) error {
+	v, err := tx.Volume(b.ClientID, id)
 	if err != nil {
 		return err
 	}
@@ -352,4 +439,52 @@ func releaseBoxVolume(tx *storeTx, b boxRecord) error {
 	}
 	v.Volume.Version++
 	return tx.PutVolume(v)
+}
+
+func boxVolumeMounts(b boxRecord) []Mount {
+	if len(b.Box.Mounts) != 0 {
+		return b.Box.Mounts
+	}
+	if b.Box.HomeVolumeID != "" {
+		return []Mount{{VolumeID: b.Box.HomeVolumeID, MountPath: "/home/agent"}}
+	}
+	return nil
+}
+
+func boxHasWritableHome(b boxRecord) bool {
+	if len(b.VolumeMounts) == 0 {
+		return b.Profile.PersistentHome // Legacy layout.
+	}
+	writable := false
+	for _, mount := range b.VolumeMounts {
+		if mount.MountPath == "/home/agent" {
+			writable = !mount.ReadOnly
+		}
+	}
+	return writable
+}
+
+// Offline workspace capture reads a backing directory, not a running mount
+// namespace. It cannot faithfully include another volume overlaid in that tree.
+// Such mounts remain valid for creation; only archive capture is unavailable.
+func boxCanArchiveWorkspace(b boxRecord) bool {
+	if !boxHasWritableHome(b) {
+		return false
+	}
+	homeIndex := -1
+	for i, mount := range b.VolumeMounts {
+		if mount.MountPath == "/home/agent" {
+			homeIndex = i
+		}
+	}
+	workspace := b.Profile.Guest.Workspace
+	for i, mount := range b.VolumeMounts {
+		if i == homeIndex {
+			continue
+		}
+		if workspace == mount.MountPath || strings.HasPrefix(workspace, mount.MountPath+"/") || strings.HasPrefix(mount.MountPath, workspace+"/") {
+			return false
+		}
+	}
+	return true
 }

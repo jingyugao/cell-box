@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"syscall"
@@ -85,18 +86,8 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 		if t.PodUID != uid || spec.Annotations["io.kubernetes.cri.sandbox-uid"] != uid || spec.Annotations["io.kubernetes.cri.sandbox-name"] != t.PodName || spec.Annotations["io.kubernetes.cri.sandbox-namespace"] != t.Namespace {
 			return nil, fmt.Errorf("authorization Pod identity mismatch")
 		}
-		if t.HomeID != "" {
-			if err := a.verifyHomeAttachment(t); err != nil {
-				return nil, fmt.Errorf("persistent HOME attachment: %w", err)
-			}
-			if _, err := homevolume.Verify(a.Base, ticketHomeOwner(t), "", ticketHomeSpec(t), t.HomeID); err != nil {
-				return nil, fmt.Errorf("persistent HOME unavailable: %w", err)
-			}
-			if t.Snapshot != "" {
-				if err := homevolume.ValidateCheckpoint(a.Base, ticketHomeOwner(t), t.HomeID, t.Snapshot); err != nil {
-					return nil, err
-				}
-			}
+		if err := a.verifyVolumeAttachments(t); err != nil {
+			return nil, fmt.Errorf("persistent volume attachment: %w", err)
 		}
 		if t.Snapshot != "" {
 			path, err := node.SnapshotPath(a.Base, t.OwnerUID, t.Snapshot)
@@ -107,8 +98,8 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 			if err != nil {
 				return nil, fmt.Errorf("refusing restore: %w", err)
 			}
-			if m.HomeID != t.HomeID {
-				return nil, fmt.Errorf("checkpoint persistent HOME identity mismatch")
+			if err := verifyTicketManifest(t, m); err != nil {
+				return nil, err
 			}
 		}
 		// A Pod UID gets one sandbox execution, including across kubelet retries.
@@ -166,7 +157,7 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 		if err = node.ReadJSON(filepath.Join(a.Base, "tickets", t.PodUID+".json"), &live); err != nil {
 			return nil, fmt.Errorf("authorization revoked: %w", err)
 		}
-		if live != t {
+		if !reflect.DeepEqual(live, t) {
 			return nil, fmt.Errorf("authorization changed")
 		}
 		started := request + ".started"
@@ -191,8 +182,8 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 			if err != nil {
 				return nil, err
 			}
-			if m.HomeID != t.HomeID {
-				return nil, fmt.Errorf("checkpoint persistent HOME identity mismatch")
+			if err := verifyTicketManifest(t, m); err != nil {
+				return nil, err
 			}
 			if err = a.claimHome(t); err != nil {
 				return nil, err
@@ -209,15 +200,18 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 }
 
 func (a Adapter) claimHome(t node.Ticket) error {
-	if t.HomeID == "" {
-		return nil
+	for _, mount := range uniqueTicketMounts(ticketMounts(t)) {
+		var err error
+		if mount.Legacy {
+			err = homevolume.ClaimExecution(a.Base, mount.UID, mount.HomeID, t.PodUID, t.Snapshot)
+		} else {
+			err = homevolume.ClaimAttachedExecution(a.Base, mount.UID, t.NodeName, t.OwnerUID, mount.HomeID, t.PodUID, t.Snapshot)
+		}
+		if err != nil {
+			return fmt.Errorf("claim volume %s: %w", mount.UID, err)
+		}
 	}
-	// Consume the disk/checkpoint pairing before restored code can mutate HOME.
-	// A crash after this fence requires inspection, never replay with newer files.
-	if err := a.verifyHomeAttachment(t); err != nil {
-		return fmt.Errorf("persistent HOME attachment: %w", err)
-	}
-	return homevolume.ClaimExecution(a.Base, ticketHomeOwner(t), t.HomeID, t.PodUID, t.Snapshot)
+	return nil
 }
 
 func ticketHomeSpec(t node.Ticket) string {
@@ -228,14 +222,88 @@ func ticketHomeSpec(t node.Ticket) string {
 }
 
 func (a Adapter) verifyHomeAttachment(t node.Ticket) error {
-	if t.HomeVolumeUID == "" {
-		return nil // Legacy HOME identity remains bound to the Box UID/spec hash.
+	return a.verifyVolumeAttachments(t)
+}
+
+func ticketMounts(t node.Ticket) []node.VolumeMountAuthorization {
+	if t.Mounts != nil {
+		return t.Mounts
 	}
-	if t.NodeName == "" || t.HomeVolumeUID == "" {
-		return fmt.Errorf("incomplete persistent HOME authorization")
+	if t.HomeID == "" {
+		return nil
 	}
-	_, err := homevolume.VerifyAttachment(a.Base, t.HomeVolumeUID, t.NodeName, t.OwnerUID)
-	return err
+	uid := t.HomeVolumeUID
+	legacy := uid == ""
+	if legacy {
+		uid = t.OwnerUID
+	}
+	return []node.VolumeMountAuthorization{{UID: uid, MountPath: homevolume.MountPath, HomeID: t.HomeID, Legacy: legacy}}
+}
+
+func uniqueTicketMounts(mounts []node.VolumeMountAuthorization) []node.VolumeMountAuthorization {
+	seen := make(map[string]struct{}, len(mounts))
+	unique := make([]node.VolumeMountAuthorization, 0, len(mounts))
+	for _, mount := range mounts {
+		if _, exists := seen[mount.UID]; exists {
+			continue
+		}
+		seen[mount.UID] = struct{}{}
+		unique = append(unique, mount)
+	}
+	return unique
+}
+
+func (a Adapter) verifyVolumeAttachments(t node.Ticket) error {
+	for _, mount := range uniqueTicketMounts(ticketMounts(t)) {
+		var identity homevolume.Identity
+		var err error
+		if mount.Legacy {
+			identity, err = homevolume.Verify(a.Base, mount.UID, "", t.SpecHash, mount.HomeID)
+		} else {
+			if t.NodeName == "" || t.OwnerUID == "" {
+				return fmt.Errorf("incomplete volume authorization")
+			}
+			identity, err = homevolume.VerifyAttachment(a.Base, mount.UID, t.NodeName, t.OwnerUID)
+		}
+		if err != nil {
+			return fmt.Errorf("volume %s unavailable: %w", mount.UID, err)
+		}
+		if identity.ID != mount.HomeID {
+			return fmt.Errorf("volume %s identity mismatch", mount.UID)
+		}
+		if t.Snapshot != "" {
+			if err = homevolume.ValidateCheckpoint(a.Base, mount.UID, mount.HomeID, t.Snapshot); err != nil {
+				return fmt.Errorf("volume %s checkpoint: %w", mount.UID, err)
+			}
+		}
+	}
+	return nil
+}
+
+func verifyTicketManifest(t node.Ticket, manifest *node.Manifest) error {
+	if t.Mounts != nil {
+		if manifest.HomeID != "" || !reflect.DeepEqual(manifest.Mounts, t.Mounts) {
+			return fmt.Errorf("checkpoint volume mount identity mismatch")
+		}
+		return nil
+	}
+	if manifest.HomeID != t.HomeID || len(manifest.Mounts) != 0 {
+		return fmt.Errorf("checkpoint persistent HOME identity mismatch")
+	}
+	return nil
+}
+
+func verifyVolumeExecution(base string, t node.Ticket) error {
+	for _, mount := range uniqueTicketMounts(ticketMounts(t)) {
+		spec := homevolume.VolumeSpecHash
+		if mount.Legacy {
+			spec = t.SpecHash
+		}
+		if err := homevolume.VerifyExecution(base, mount.UID, spec, mount.HomeID, t.PodUID); err != nil {
+			return fmt.Errorf("volume %s: %w", mount.UID, err)
+		}
+	}
+	return nil
 }
 func Main() {
 	a := Adapter{Base: node.DefaultBase, Runsc: node.DefaultRunsc}
@@ -283,15 +351,15 @@ func (a Adapter) childCreate(id string, annotations map[string]string, bundle st
 	if err := node.ReadJSON(filepath.Join(a.Base, "tickets", t.PodUID+".json"), &live); err != nil {
 		return err
 	}
-	if live != t {
+	if !reflect.DeepEqual(live, t) {
 		return fmt.Errorf("child sandbox revoked")
 	}
-	if t.HomeID != "" {
-		if err := a.verifyHomeAttachment(t); err != nil {
-			return fmt.Errorf("persistent HOME attachment: %w", err)
+	if len(ticketMounts(t)) > 0 {
+		if err := a.verifyVolumeAttachments(t); err != nil {
+			return fmt.Errorf("persistent volume attachment: %w", err)
 		}
-		if err := homevolume.VerifyExecution(a.Base, ticketHomeOwner(t), ticketHomeSpec(t), t.HomeID, t.PodUID); err != nil {
-			return fmt.Errorf("persistent HOME execution: %w", err)
+		if err := verifyVolumeExecution(a.Base, t); err != nil {
+			return fmt.Errorf("persistent volume execution: %w", err)
 		}
 		if err := a.claimHomeChild(sid, id); err != nil {
 			return err
@@ -314,15 +382,15 @@ func (a Adapter) childStart(id string) error {
 	if err := node.ReadJSON(filepath.Join(a.Base, "requests", c.SandboxID+".json"), &parent); err != nil {
 		return err
 	}
-	if live != c.Ticket || parent != c.Ticket {
+	if !reflect.DeepEqual(live, c.Ticket) || !reflect.DeepEqual(parent, c.Ticket) {
 		return fmt.Errorf("child sandbox revoked")
 	}
-	if c.Ticket.HomeID != "" {
-		if err := a.verifyHomeAttachment(c.Ticket); err != nil {
-			return fmt.Errorf("persistent HOME attachment: %w", err)
+	if len(ticketMounts(c.Ticket)) > 0 {
+		if err := a.verifyVolumeAttachments(c.Ticket); err != nil {
+			return fmt.Errorf("persistent volume attachment: %w", err)
 		}
-		if err := homevolume.VerifyExecution(a.Base, ticketHomeOwner(c.Ticket), ticketHomeSpec(c.Ticket), c.Ticket.HomeID, c.Ticket.PodUID); err != nil {
-			return fmt.Errorf("persistent HOME execution: %w", err)
+		if err := verifyVolumeExecution(a.Base, c.Ticket); err != nil {
+			return fmt.Errorf("persistent volume execution: %w", err)
 		}
 		if err := a.claimHomeChild(c.SandboxID, id); err != nil {
 			return err

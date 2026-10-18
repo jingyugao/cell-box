@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -145,7 +146,7 @@ func runningImageMatches(actual string, image *cri.Image) bool {
 func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.Pod) (resultErr error) {
 	ctx, span := telemetry.Start(ctx, "node.checkpoint")
 	defer func() { telemetry.End(span, resultErr) }()
-	homeID, err := b.persistentHome(r, false)
+	mounts, err := b.prepareVolumeMounts(r, false)
 	if err != nil {
 		return err
 	}
@@ -210,12 +211,24 @@ func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.P
 	if err = b.command(ctx, "checkpoint", "--image-path="+pending, live[0].Id); err != nil {
 		return err
 	}
-	if homeID != "" {
-		if err = homevolume.Checkpoint(b.Base, homeOwner(r), homeID, string(p.UID), r.Status.Snapshot); err != nil {
+	if r.Spec.Mounts != nil {
+		for _, mount := range uniqueVolumeMounts(mounts) {
+			if err = homevolume.Checkpoint(b.Base, mount.UID, mount.HomeID, string(p.UID), r.Status.Snapshot); err != nil {
+				return err
+			}
+		}
+	} else if len(mounts) > 0 {
+		if err = homevolume.Checkpoint(b.Base, mounts[0].UID, mounts[0].HomeID, string(p.UID), r.Status.Snapshot); err != nil {
 			return err
 		}
 	}
-	if err = Seal(pending, Manifest{OwnerUID: string(r.UID), SpecHash: r.Status.SpecHash, ImageID: image.Id, RunscHash: binaryHash, HomeID: homeID}); err != nil {
+	manifest := Manifest{OwnerUID: string(r.UID), SpecHash: r.Status.SpecHash, ImageID: image.Id, RunscHash: binaryHash}
+	if r.Spec.Mounts != nil {
+		manifest.Mounts = mounts
+	} else if len(mounts) > 0 {
+		manifest.HomeID = mounts[0].HomeID
+	}
+	if err = Seal(pending, manifest); err != nil {
 		return err
 	}
 	if err = os.Rename(pending, path); err != nil {
@@ -249,15 +262,34 @@ func (b *Backend) verifySnapshotImage(ctx context.Context, r *api.ResumablePod, 
 }
 
 func (b *Backend) verifySnapshotHome(r *api.ResumablePod, m *Manifest) error {
-	homeID, err := b.persistentHome(r, false)
+	if r.Spec.Mounts != nil {
+		mounts, err := b.prepareVolumeMounts(r, false)
+		if err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(m.Mounts, mounts) || m.HomeID != "" {
+			return fmt.Errorf("checkpoint volume mount identity mismatch")
+		}
+		for _, mount := range uniqueVolumeMounts(mounts) {
+			if err := homevolume.ValidateCheckpoint(b.Base, mount.UID, mount.HomeID, r.Status.Snapshot); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	mounts, err := b.prepareVolumeMounts(r, false)
 	if err != nil {
 		return err
 	}
-	if m.HomeID != homeID {
+	var homeID string
+	if len(mounts) > 0 {
+		homeID = mounts[0].HomeID
+	}
+	if m.HomeID != homeID || len(m.Mounts) != 0 {
 		return fmt.Errorf("checkpoint persistent HOME identity mismatch")
 	}
 	if homeID != "" {
-		return homevolume.ValidateCheckpoint(b.Base, homeOwner(r), homeID, r.Status.Snapshot)
+		return homevolume.ValidateCheckpoint(b.Base, mounts[0].UID, homeID, r.Status.Snapshot)
 	}
 	return nil
 }
@@ -282,14 +314,20 @@ func (b *Backend) prepareSnapshot(ctx context.Context, r *api.ResumablePod) erro
 }
 
 func (b *Backend) Prepare(ctx context.Context, r *api.ResumablePod, p *core.Pod) (resultErr error) {
-	homeID, err := b.persistentHome(r, r.Status.Cycle == 1 && r.Status.Snapshot == "")
+	mounts, err := b.prepareVolumeMounts(r, r.Status.Cycle == 1 && r.Status.Snapshot == "")
 	if err != nil {
 		return err
 	}
 	if err := b.prepareSnapshot(ctx, r); err != nil {
 		return err
 	}
-	return AtomicJSON(filepath.Join(b.Base, "tickets", string(p.UID)+".json"), Ticket{OwnerUID: string(r.UID), NodeName: r.Spec.NodeName, HomeVolumeUID: r.Spec.HomeVolumeUID, PodUID: string(p.UID), Namespace: p.Namespace, PodName: p.Name, Snapshot: r.Status.Snapshot, SpecHash: r.Status.SpecHash, HomeID: homeID})
+	ticket := Ticket{OwnerUID: string(r.UID), NodeName: r.Spec.NodeName, HomeVolumeUID: r.Spec.HomeVolumeUID, PodUID: string(p.UID), Namespace: p.Namespace, PodName: p.Name, Snapshot: r.Status.Snapshot, SpecHash: r.Status.SpecHash}
+	if r.Spec.Mounts != nil {
+		ticket.Mounts = mounts
+	} else if len(mounts) > 0 {
+		ticket.HomeID = mounts[0].HomeID
+	}
+	return AtomicJSON(filepath.Join(b.Base, "tickets", string(p.UID)+".json"), ticket)
 }
 
 func homeOwner(r *api.ResumablePod) string {
@@ -300,24 +338,17 @@ func homeOwner(r *api.ResumablePod) string {
 }
 
 func (b *Backend) persistentHome(r *api.ResumablePod, initialize bool) (string, error) {
-	if !r.Spec.PersistentHome {
+	if !r.Spec.PersistentHome || r.Spec.Mounts != nil {
 		return "", nil
 	}
-	var home homevolume.Identity
-	var err error
-	if r.Spec.HomeVolumeUID != "" {
-		if initialize {
-			home, err = homevolume.Attach(b.Base, r.Spec.HomeVolumeUID, r.Spec.NodeName, string(r.UID))
-		} else {
-			home, err = homevolume.VerifyAttachment(b.Base, r.Spec.HomeVolumeUID, r.Spec.NodeName, string(r.UID))
-		}
-	} else {
-		home, err = homevolume.Prepare(b.Base, string(r.UID), r.Spec.NodeName, r.Status.SpecHash, initialize)
-	}
+	mounts, err := b.prepareVolumeMounts(r, initialize)
 	if err != nil {
 		return "", fmt.Errorf("persistent HOME: %w", err)
 	}
-	return home.ID, nil
+	if len(mounts) == 0 {
+		return "", nil
+	}
+	return mounts[0].HomeID, nil
 }
 func (b *Backend) Cleanup(ctx context.Context, p *core.Pod) error {
 	if p.UID == "" {
@@ -415,12 +446,8 @@ func (b *Backend) Forget(ctx context.Context, r *api.ResumablePod) error {
 	}
 	// Runtime/snapshot cleanup also calls Forget while the Box still exists.
 	// Independent HOME storage is detached on deletion and retained as a volume.
-	if deleting && r.Spec.PersistentHome {
-		if r.Spec.HomeVolumeUID != "" {
-			if err := homevolume.Detach(b.Base, r.Spec.HomeVolumeUID, r.Spec.NodeName, string(r.UID)); err != nil {
-				return err
-			}
-		} else if err := homevolume.PromoteLegacy(b.Base, string(r.UID), r.Spec.NodeName, r.Status.SpecHash); err != nil {
+	if deleting && len(configuredVolumeMounts(r)) > 0 {
+		if err := b.detachVolumeMounts(r, configuredVolumeMounts(r)); err != nil {
 			return err
 		}
 	}

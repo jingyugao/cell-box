@@ -58,6 +58,12 @@ func SpecFingerprint(w *ResumablePod) string {
 			HomeVolumeUID string
 		}{b, w.Spec.HomeVolumeUID})
 	}
+	if w.Spec.Mounts != nil {
+		b, _ = json.Marshal(struct {
+			Legacy json.RawMessage
+			Mounts []VolumeMount
+		}{b, w.Spec.Mounts})
+	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }

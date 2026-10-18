@@ -76,6 +76,46 @@ func configuredWorkspace(r *api.ResumablePod) (string, error) {
 	return "", errors.New("embedded guest configuration is missing")
 }
 
+func writableWorkspaceHomeMount(r *api.ResumablePod) (VolumeMountAuthorization, error) {
+	if r == nil {
+		return VolumeMountAuthorization{}, errors.New("workspace archive requires a writable /home/agent volume mount")
+	}
+	var home *VolumeMountAuthorization
+	homeIndex := -1
+	mounts := configuredVolumeMounts(r)
+	for i := range mounts {
+		mount := mounts[i]
+		if mount.MountPath == homevolume.MountPath {
+			copy := mount
+			home = &copy
+			homeIndex = i
+		}
+	}
+	if home == nil || home.ReadOnly {
+		return VolumeMountAuthorization{}, errors.New("workspace archive requires a writable /home/agent volume mount")
+	}
+	workspaceRel, err := configuredWorkspace(r)
+	if err != nil {
+		return VolumeMountAuthorization{}, err
+	}
+	workspacePath := path.Join(homevolume.MountPath, workspaceRel)
+	for i, mount := range mounts {
+		if i == homeIndex {
+			continue
+		}
+		// Packing the HOME directory directly would omit a nested volume (or
+		// include data from a shadowed ancestor). Such layouts are valid runtime
+		// mounts, but cannot produce a faithful workspace archive.
+		if mount.MountPath == homevolume.MountPath ||
+			mount.MountPath == workspacePath ||
+			strings.HasPrefix(mount.MountPath, workspacePath+"/") ||
+			strings.HasPrefix(workspacePath, strings.TrimSuffix(mount.MountPath, "/")+"/") {
+			return VolumeMountAuthorization{}, errors.New("workspace archive is unsupported when another volume overlaps the workspace")
+		}
+	}
+	return *home, nil
+}
+
 func (b *Backend) CaptureWorkspaceArchive(ctx context.Context, r *api.ResumablePod, request api.ArchiveCaptureRequest) (api.ArchiveCaptureResult, error) {
 	result := api.ArchiveCaptureResult{ID: request.ID, Snapshot: request.Snapshot}
 	if r != nil {
@@ -87,9 +127,13 @@ func (b *Backend) CaptureWorkspaceArchive(ctx context.Context, r *api.ResumableP
 	if !workspaceArchiveID.MatchString(request.ID) {
 		return result, errors.New("invalid workspace archive identifier")
 	}
-	if r == nil || !r.Spec.PersistentHome ||
+	if r == nil ||
 		r.Status.PodUID != "" || r.Status.PodName != "" || r.DeletionTimestamp != nil {
-		return result, errors.New("workspace archive source must be stopped with a persistent HOME")
+		return result, errors.New("workspace archive source must be stopped")
+	}
+	homeMount, err := writableWorkspaceHomeMount(r)
+	if err != nil {
+		return result, err
 	}
 	if r.Status.Phase == "Suspended" {
 		if r.Spec.DesiredState != "Suspended" || r.Status.Snapshot == "" || r.Status.Snapshot != request.Snapshot {
@@ -103,16 +147,16 @@ func (b *Backend) CaptureWorkspaceArchive(ctx context.Context, r *api.ResumableP
 		return result, err
 	}
 	var home homevolume.Identity
-	if r.Spec.HomeVolumeUID != "" {
-		home, err = homevolume.VerifyAttachment(b.Base, r.Spec.HomeVolumeUID, r.Spec.NodeName, string(r.UID))
+	if homeMount.Legacy {
+		home, err = homevolume.Verify(b.Base, homeMount.UID, r.Spec.NodeName, r.Status.SpecHash, "")
 	} else {
-		home, err = homevolume.Verify(b.Base, string(r.UID), r.Spec.NodeName, r.Status.SpecHash, "")
+		home, err = homevolume.VerifyAttachment(b.Base, homeMount.UID, r.Spec.NodeName, string(r.UID))
 	}
 	if err != nil {
 		return result, err
 	}
 	if r.Status.Phase == "Suspended" {
-		if err = homevolume.ValidateCheckpoint(b.Base, homeOwner(r), home.ID, r.Status.Snapshot); err != nil {
+		if err = homevolume.ValidateCheckpoint(b.Base, homeMount.UID, home.ID, r.Status.Snapshot); err != nil {
 			return result, err
 		}
 	}
@@ -126,7 +170,7 @@ func (b *Backend) CaptureWorkspaceArchive(ctx context.Context, r *api.ResumableP
 	if !request.ExpiresAt.IsZero() && !time.Now().Before(request.ExpiresAt) {
 		return result, errors.New("workspace archive request expired")
 	}
-	root, err := homevolume.Path(b.Base, homeOwner(r))
+	root, err := homevolume.Path(b.Base, homeMount.UID)
 	if err != nil {
 		return result, err
 	}

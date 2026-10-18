@@ -491,10 +491,36 @@ func ClaimExecution(base, owner, id, pod, snapshot string) error {
 	if _, err := Verify(base, owner, "", "", id); err != nil {
 		return err
 	}
+	return claimExecutionLocked(base, owner, id, pod, snapshot, "", false)
+}
+
+// ClaimAttachedExecution validates the independent volume's current sandbox
+// attachment and claims its execution under one owner lock. This prevents a
+// stale adapter from claiming a volume after it was detached and reattached.
+func ClaimAttachedExecution(base, volumeUID, node, attachment, id, pod, snapshot string) error {
+	if !validOwner(attachment) || strings.TrimSpace(node) == "" || id == "" || pod == "" {
+		return errors.New("node, attachment, home, and pod are required")
+	}
+	unlock, err := lockOwner(base, volumeUID, false)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if _, err := verify(base, volumeUID, node, VolumeSpecHash, id); err != nil {
+		return err
+	}
+	return claimExecutionLocked(base, volumeUID, id, pod, snapshot, attachment, true)
+}
+
+// claimExecutionLocked requires the caller to hold lockOwner for owner.
+func claimExecutionLocked(base, owner, id, pod, snapshot, attachment string, requireAttachment bool) error {
 	_, dir, _, _ := paths(base, owner)
 	state, err := readState(filepath.Join(dir, stateName))
 	if err != nil {
 		return err
+	}
+	if requireAttachment && state.Attachment != attachment {
+		return errors.New("home volume is not attached to this sandbox")
 	}
 	if snapshot == "" {
 		if state.Phase != "new" || state.Snapshot != "" {

@@ -207,7 +207,7 @@ func (s *Service) captureArchive(w http.ResponseWriter, r *http.Request) {
 		if active {
 			return apiError("BUSY", "Box has an active execution")
 		}
-		if box.Profile.Provider != "resumable-k8s-pod" || !box.Profile.PersistentHome || !workspaceUnderPersistentHome(box.Profile.Guest.Workspace) {
+		if box.Profile.Provider != "resumable-k8s-pod" || !boxCanArchiveWorkspace(box) || !workspaceUnderPersistentHome(box.Profile.Guest.Workspace) {
 			return apiError("UNSUPPORTED_CAPABILITY", "Archives require a resumable Kubernetes box with persistent HOME workspace")
 		}
 		if _, ok := s.providers[box.Profile.Provider].(boxprovider.WorkspaceArchiveProvider); !ok || s.objects == nil {
@@ -242,7 +242,7 @@ func (s *Service) captureStoppedWorkspaceArchive(ctx context.Context, b boxRecor
 		return Archive{}, apiError("CONFLICT", "Archive requires a suspended or failed box")
 	}
 	provider, ok := s.providers[b.Profile.Provider].(boxprovider.WorkspaceArchiveProvider)
-	if !ok || b.Profile.Provider != "resumable-k8s-pod" || !b.Profile.PersistentHome || s.objects == nil || !workspaceUnderPersistentHome(b.Profile.Guest.Workspace) {
+	if !ok || b.Profile.Provider != "resumable-k8s-pod" || !boxCanArchiveWorkspace(b) || s.objects == nil || !workspaceUnderPersistentHome(b.Profile.Guest.Workspace) {
 		return Archive{}, apiError("UNSUPPORTED_CAPABILITY", "Stopped workspace archives are unavailable")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 14*time.Minute)

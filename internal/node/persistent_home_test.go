@@ -4,12 +4,14 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/homevolume"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 func TestPersistentHomeRestoreAndCleanupBoundaries(t *testing.T) {
@@ -154,5 +156,73 @@ func TestPersistentHomeRestoreNeverCreatesMissingStorage(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(b.Base, "tickets", "pod.json")); !os.IsNotExist(err) {
 		t.Fatal("restore wrote authorization for missing HOME")
+	}
+}
+
+func TestMultipleVolumeCheckpointIdentityAndReplacement(t *testing.T) {
+	base := t.TempDir()
+	b := &Backend{Base: base}
+	for _, uid := range []string{"home-volume", "data-volume"} {
+		if err := b.CreateVolume(uid, "node"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx := context.Background()
+	mounts := []api.VolumeMount{
+		{UID: "home-volume", MountPath: "/home/agent"},
+		{UID: "data-volume", MountPath: "/data", ReadOnly: true},
+	}
+	w := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{UID: "box-a"}, Spec: api.Spec{NodeName: "node", Mounts: mounts, Container: core.Container{Image: "image-a"}}, Status: api.Status{Cycle: 1, SpecHash: "image-a"}}
+	p := &core.Pod{ObjectMeta: meta.ObjectMeta{UID: "pod-a", Namespace: "test"}}
+	if err := b.Prepare(ctx, w, p); err != nil {
+		t.Fatal(err)
+	}
+	var ticket Ticket
+	if err := ReadJSON(filepath.Join(base, "tickets", "pod-a.json"), &ticket); err != nil {
+		t.Fatal(err)
+	}
+	if len(ticket.Mounts) != 2 || !reflect.DeepEqual(ticket.Mounts, []VolumeMountAuthorization{
+		{UID: "home-volume", MountPath: "/home/agent", HomeID: ticket.Mounts[0].HomeID},
+		{UID: "data-volume", MountPath: "/data", ReadOnly: true, HomeID: ticket.Mounts[1].HomeID},
+	}) {
+		t.Fatalf("runtime ticket lost mount identity/configuration: %+v", ticket.Mounts)
+	}
+	for _, mount := range ticket.Mounts {
+		if err := homevolume.ClaimAttachedExecution(base, mount.UID, "node", "box-a", mount.HomeID, "pod-a", ""); err != nil {
+			t.Fatal(err)
+		}
+		root, _ := homevolume.Path(base, mount.UID)
+		if err := os.WriteFile(filepath.Join(root, "marker"), []byte(mount.UID), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := homevolume.Checkpoint(base, mount.UID, mount.HomeID, "pod-a", "snapshot-a"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.Status.Snapshot = "snapshot-a"
+	manifest := &Manifest{Mounts: ticket.Mounts}
+	if err := b.verifySnapshotHome(w, manifest); err != nil {
+		t.Fatalf("matching multi-volume checkpoint rejected: %v", err)
+	}
+	w.Spec.Mounts[1].ReadOnly = false
+	if err := b.verifySnapshotHome(w, manifest); err == nil {
+		t.Fatal("checkpoint accepted a changed mount mode")
+	}
+	w.Spec.Mounts = mounts
+	now := meta.Now()
+	w.DeletionTimestamp = &now
+	if err := b.Forget(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	for _, uid := range []string{"home-volume", "data-volume"} {
+		second := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{UID: "box-b"}, Spec: api.Spec{NodeName: "node", Mounts: []api.VolumeMount{{UID: uid, MountPath: "/data"}}}, Status: api.Status{Cycle: 1, SpecHash: "image-b"}}
+		secondPod := &core.Pod{ObjectMeta: meta.ObjectMeta{UID: types.UID("pod-b-" + uid), Namespace: "test"}}
+		if err := b.Prepare(ctx, second, secondPod); err != nil {
+			t.Fatalf("replacement Box could not attach %s: %v", uid, err)
+		}
+		root, _ := homevolume.Path(base, uid)
+		if got, err := os.ReadFile(filepath.Join(root, "marker")); err != nil || string(got) != uid {
+			t.Fatalf("replacement Box lost %s data: %q %v", uid, got, err)
+		}
 	}
 }

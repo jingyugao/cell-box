@@ -96,6 +96,7 @@ func warmExecutionPod(w *api.ResumablePod, name string) *core.Pod {
 	// the claimed Box's HOME from the adapter, never from this template Box.
 	template.Spec.PersistentHome = false
 	template.Spec.HomeVolumeUID = ""
+	template.Spec.Mounts = nil
 	return executionPod(template, name)
 }
 

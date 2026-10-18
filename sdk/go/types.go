@@ -13,11 +13,12 @@ import (
 
 // CreateOptions selects a fixed revision, or the current stable revision of a template.
 type CreateOptions struct {
-	ID           string `json:"id,omitempty"`
-	RevisionID   string `json:"revisionId,omitempty"`
-	TemplateID   string `json:"templateId,omitempty"`
-	OwnerKey     string `json:"ownerKey"`
-	HomeVolumeID string `json:"homeVolumeId,omitempty"`
+	ID           string  `json:"id,omitempty"`
+	RevisionID   string  `json:"revisionId,omitempty"`
+	TemplateID   string  `json:"templateId,omitempty"`
+	OwnerKey     string  `json:"ownerKey"`
+	HomeVolumeID string  `json:"homeVolumeId,omitempty"`
+	Mounts       []Mount `json:"mounts,omitempty"`
 	// Staged holds the configured workload until explicitly activated via the API.
 	Staged bool `json:"staged,omitempty"`
 }
@@ -27,6 +28,7 @@ type SandboxInfo struct {
 	ID              string       `json:"id"`
 	OwnerKey        string       `json:"ownerKey"`
 	HomeVolumeID    string       `json:"homeVolumeId,omitempty"`
+	Mounts          []Mount      `json:"mounts,omitempty"`
 	TemplateID      string       `json:"templateId"`
 	RevisionID      string       `json:"revisionId"`
 	TemplateName    string       `json:"templateName"`
@@ -44,6 +46,13 @@ type SandboxInfo struct {
 	Error           *APIError    `json:"error,omitempty"`
 	CreatedAt       time.Time    `json:"createdAt"`
 	ObservedAt      *time.Time   `json:"observedAt,omitempty"`
+}
+
+// Mount attaches one exclusive persistent volume at a fixed absolute path in a sandbox.
+type Mount struct {
+	VolumeID  string `json:"volumeId"`
+	MountPath string `json:"mountPath"`
+	ReadOnly  bool   `json:"readOnly,omitempty"`
 }
 
 // CreateVolumeOptions creates a persistent HOME volume for later attachment.

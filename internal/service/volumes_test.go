@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/boxprovider"
 	"cellbox.local/cellbox/internal/homevolume"
 	"cellbox.local/cellbox/internal/node"
@@ -32,12 +33,19 @@ func (p *diskCoreProvider) Create(ctx context.Context, spec boxprovider.Spec) (b
 	if err != nil {
 		return h, err
 	}
-	home, err := homevolume.Attach(p.base, spec.HomeVolumeUID, spec.NodeName, h.ID)
-	if err != nil {
-		return h, err
-	}
-	if err := homevolume.ClaimExecution(p.base, spec.HomeVolumeUID, home.ID, "pod-"+spec.BoxID, ""); err != nil {
-		return h, err
+	seen := make(map[string]bool)
+	for _, mount := range spec.Mounts {
+		if seen[mount.UID] {
+			continue
+		}
+		seen[mount.UID] = true
+		home, err := homevolume.Attach(p.base, mount.UID, spec.NodeName, h.ID)
+		if err != nil {
+			return h, err
+		}
+		if err := homevolume.ClaimExecution(p.base, mount.UID, home.ID, "pod-"+spec.BoxID, ""); err != nil {
+			return h, err
+		}
 	}
 	p.mu.Lock()
 	p.specs[h.ID] = spec
@@ -51,7 +59,17 @@ func (p *diskCoreProvider) Destroy(ctx context.Context, h boxprovider.Handle) er
 	p.mu.Lock()
 	spec := p.specs[h.ID]
 	p.mu.Unlock()
-	return homevolume.Detach(p.base, spec.HomeVolumeUID, spec.NodeName, h.ID)
+	seen := make(map[string]bool)
+	for _, mount := range spec.Mounts {
+		if seen[mount.UID] {
+			continue
+		}
+		seen[mount.UID] = true
+		if err := homevolume.Detach(p.base, mount.UID, spec.NodeName, h.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func volumeFixture(t *testing.T) (*coreFixture, *diskCoreProvider) {
@@ -271,6 +289,7 @@ func TestLegacySandboxDeletionRegistersRetainedVolume(t *testing.T) {
 		}
 		legacyUID = b.Handle.ID
 		b.HomeVolumeUID, b.Box.HomeVolumeID = "", ""
+		b.VolumeMounts, b.Box.Mounts = nil, nil
 		return tx.PutBox(b)
 	}); err != nil {
 		t.Fatal(err)
@@ -361,5 +380,136 @@ func TestPurgeDoesNotDeleteVolumeOperationsWithSamePublicID(t *testing.T) {
 	var count int
 	if err := f.service.store.db.QueryRow(`SELECT count(*) FROM runtime_records WHERE kind='operations' AND json_extract(record,'$.operation.kind')='volume-create'`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("purge removed volume history: count=%d, %v", count, err)
+	}
+}
+
+func TestMultipleMountsSurviveSandboxReplacement(t *testing.T) {
+	f, p := volumeFixture(t)
+	home := createTestVolume(t, f, "multi-home")
+	data := createTestVolume(t, f, "multi-data")
+	template := f.template(t)
+	mounts := []Mount{{VolumeID: home.ID, MountPath: "/home/agent"}, {VolumeID: data.ID, MountPath: "/data", ReadOnly: true}}
+	first := createVolumeBox(t, f, createRequest{ID: "multi-v1", OwnerKey: home.OwnerKey, TemplateID: template, Mounts: mounts})
+	if len(first.Mounts) != 2 || first.Mounts[1] != mounts[1] || first.HomeVolumeID != home.ID {
+		t.Fatalf("mounts changed during admission: %+v", first)
+	}
+	for _, volume := range []Volume{home, data} {
+		record, err := f.service.store.VolumeRecord("client-a", volume.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		root, _ := homevolume.Path(p.base, record.UID)
+		if err := os.WriteFile(filepath.Join(root, "marker"), []byte(volume.ID), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	destroyVolumeBox(t, f, first.ID)
+	mounts[1].MountPath, mounts[1].ReadOnly = "/srv/data", false
+	v2 := buildCatalogRevision(t, f, template, "multi-v2", "registry.example.test/multi-v2:latest")
+	second := createVolumeBox(t, f, createRequest{ID: "multi-v2", OwnerKey: home.OwnerKey, RevisionID: v2.ID, Mounts: mounts})
+	if second.Image == first.Image || second.Mounts[1].MountPath != "/srv/data" {
+		t.Fatalf("replacement did not apply new image and paths: %+v", second)
+	}
+	for _, volume := range []Volume{home, data} {
+		record, err := f.service.store.VolumeRecord("client-a", volume.ID)
+		if err != nil || record.Volume.BoxID != second.ID {
+			t.Fatalf("disk was not transferred: %+v, %v", record, err)
+		}
+		root, _ := homevolume.Path(p.base, record.UID)
+		if content, err := os.ReadFile(filepath.Join(root, "marker")); err != nil || string(content) != volume.ID {
+			t.Fatalf("disk data lost: %q, %v", content, err)
+		}
+	}
+	destroyVolumeBox(t, f, second.ID)
+}
+
+func TestRepeatedAndNestedMountPathsArePassedThrough(t *testing.T) {
+	f, _ := volumeFixture(t)
+	first := createTestVolume(t, f, "mount-a")
+	second := createTestVolume(t, f, "mount-b")
+	mounts := []Mount{
+		{VolumeID: first.ID, MountPath: "/data"},
+		{VolumeID: second.ID, MountPath: "/data/logs"},
+		{VolumeID: first.ID, MountPath: "/data", ReadOnly: true},
+	}
+	box := createVolumeBox(t, f, createRequest{ID: "mount-paths", OwnerKey: first.OwnerKey, TemplateID: f.template(t), Mounts: mounts})
+	if len(box.Mounts) != len(mounts) || box.HomeVolumeID != "" || box.Capabilities.Archives != "none" {
+		t.Fatalf("data-only mounts introduced an implicit HOME: %+v", box)
+	}
+	for i := range mounts {
+		if box.Mounts[i] != mounts[i] {
+			t.Fatalf("mount[%d] was rewritten: %+v", i, box.Mounts)
+		}
+	}
+	status, body := f.call(t, "GET", "/v1/boxes/"+box.ID, testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	if got := decodeResponse[Box](t, body); got.Capabilities.PersistentHome || got.Capabilities.Archives != "none" || len(got.Mounts) != 3 {
+		t.Fatalf("GET replaced mount-derived capabilities: %+v", got)
+	}
+	destroyVolumeBox(t, f, box.ID)
+	status, body = f.call(t, "GET", "/v1/volumes", testClientToken, "", nil)
+	wantStatus(t, status, 200, body)
+	volumes := decodeResponse[[]Volume](t, body)
+	if len(volumes) != 2 {
+		t.Fatalf("destroy created an unexpected legacy HOME: %+v", volumes)
+	}
+	for _, volume := range volumes {
+		if volume.Phase != "available" || volume.BoxID != "" {
+			t.Fatalf("destroy did not release each unique disk: %+v", volume)
+		}
+	}
+}
+
+func TestMultiVolumeAdmissionRollsBackAllReservations(t *testing.T) {
+	f, _ := volumeFixture(t)
+	a := createTestVolume(t, f, "atomic-a")
+	b := createTestVolume(t, f, "atomic-b")
+	template := f.template(t)
+	createVolumeBox(t, f, createRequest{ID: "existing-owner", OwnerKey: b.OwnerKey, TemplateID: template, Mounts: []Mount{{VolumeID: b.ID, MountPath: "/data"}}})
+	input := createRequest{ID: "atomic-box", OwnerKey: a.OwnerKey, TemplateID: template, Mounts: []Mount{{VolumeID: a.ID, MountPath: "/data"}, {VolumeID: b.ID, MountPath: "/other"}}}
+	status, body := f.call(t, "POST", "/v1/boxes", testClientToken, "", input)
+	wantStatus(t, status, 409, body)
+	if record, err := f.service.store.VolumeRecord("client-a", a.ID); err != nil || record.Volume.Phase != "available" || record.Volume.BoxID != "" {
+		t.Fatalf("failed second disk claim retained the first: %+v, %v", record, err)
+	}
+	input.Mounts = input.Mounts[:1]
+	createVolumeBox(t, f, input)
+}
+
+func TestMountFormatAndArchiveCoverage(t *testing.T) {
+	f, _ := volumeFixture(t)
+	v := createTestVolume(t, f, "format-disk")
+	template := f.template(t)
+	for _, mountPath := range []string{"relative", "/", "/data/../other", "/data\x01", "/data\n"} {
+		status, body := f.call(t, "POST", "/v1/boxes", testClientToken, "", createRequest{ID: "invalid-format", OwnerKey: v.OwnerKey, TemplateID: template, Mounts: []Mount{{VolumeID: v.ID, MountPath: mountPath}}})
+		wantStatus(t, status, 400, body)
+	}
+	status, body := f.call(t, "POST", "/v1/boxes", testClientToken, "", createRequest{ID: "invalid-format", OwnerKey: v.OwnerKey, TemplateID: template, HomeVolumeID: v.ID, Mounts: []Mount{{VolumeID: v.ID, MountPath: "/data"}}})
+	wantStatus(t, status, 400, body)
+	box := createVolumeBox(t, f, createRequest{ID: "invalid-format", OwnerKey: v.OwnerKey, TemplateID: template, Mounts: []Mount{{VolumeID: v.ID, MountPath: "/home/agent", ReadOnly: true}}})
+	if box.Capabilities.Archives != "none" {
+		t.Fatal("read-only HOME advertised workspace capture")
+	}
+	record, err := f.service.rawBox(box.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := record.VolumeMounts[0]
+	home.ReadOnly = false
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"/data", true},
+		{"/home/agent/other", true},
+		{"/home/agent/workspace", false},
+		{"/home/agent/workspace/logs", false},
+		{"/home", false},
+	} {
+		overlay := api.VolumeMount{UID: "another-volume", MountPath: tc.path}
+		record.VolumeMounts = []api.VolumeMount{home, overlay}
+		if got := boxCanArchiveWorkspace(record); got != tc.want {
+			t.Fatalf("archive coverage for %s = %v, want %v", tc.path, got, tc.want)
+		}
 	}
 }
