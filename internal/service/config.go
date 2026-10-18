@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"path"
 	"regexp"
 	"strings"
@@ -79,9 +80,6 @@ func (c *Config) Validate() error {
 		if p.Provider != "docker" && p.Provider != "resumable-k8s-pod" {
 			return fmt.Errorf("profile %s has unknown provider", p.ID)
 		}
-		if p.UnlimitedResources && p.Provider != "resumable-k8s-pod" {
-			return fmt.Errorf("profile %s unlimitedResources requires resumable-k8s-pod provider", p.ID)
-		}
 		// New resumable Boxes always persist HOME. Stored immutable profiles are
 		// decoded separately, so pre-upgrade Boxes retain their original layout.
 		p.PersistentHome = p.Provider == "resumable-k8s-pod"
@@ -103,17 +101,11 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("debugHomeImages must contain immutable repository@sha256:digest references")
 			}
 		}
-		if p.CPU == 0 {
-			p.CPU = 1
-		}
-		if p.MemoryMiB == 0 {
-			p.MemoryMiB = 512
-		}
 		if p.Provider == "docker" && (p.Namespace != "" || p.NodeName != "") {
 			return fmt.Errorf("Docker profiles do not accept namespace or nodeName")
 		}
-		if p.CPU < 0 || p.CPU > 1024 || p.MemoryMiB < 0 || p.MemoryMiB > 1048576 {
-			return fmt.Errorf("invalid profile resource limits")
+		if math.IsNaN(p.CPU) || math.IsInf(p.CPU, 0) || p.CPU < 0 || p.MemoryMiB < 0 {
+			return fmt.Errorf("profile resource limits must be finite and nonnegative")
 		}
 		if p.Provider == "resumable-k8s-pod" && (p.Namespace == "" || p.NodeName == "") {
 			return fmt.Errorf("resumable profile requires namespace and nodeName")

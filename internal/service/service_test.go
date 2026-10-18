@@ -86,20 +86,32 @@ func TestPersistentHomeIsFixedForNewBoxesAndPreservesLegacyLayout(t *testing.T) 
 	}
 }
 
-func TestUnlimitedResourcesRequiresResumableProviderAndIsForwarded(t *testing.T) {
-	image := "registry.example.invalid/image@sha256:" + strings.Repeat("a", 64)
-	docker := Config{Profiles: []Profile{{ID: "unlimited", Provider: "docker", Image: image, UnlimitedResources: true}}}
-	if err := docker.Validate(); err == nil {
-		t.Fatal("Docker profile accepted unlimitedResources")
-	}
-
-	k8s := Config{Profiles: []Profile{{ID: "unlimited", Provider: "resumable-k8s-pod", Image: image,
-		Namespace: "boxes", NodeName: "node-a", UnlimitedResources: true}}}
-	if err := k8s.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	if !runtimeSpec(boxRecord{Box: Box{ID: "box-1"}, Profile: k8s.Profiles[0]}).UnlimitedResources {
-		t.Fatal("unlimitedResources was not forwarded to the provider spec")
+func TestProfileResourceLimitsAreOptIn(t *testing.T) {
+	for _, provider := range []string{"docker", "resumable-k8s-pod"} {
+		for _, tc := range []struct {
+			name   string
+			cpu    float64
+			memory int64
+		}{{"omitted", 0, 0}, {"CPU only", 0.5, 0}, {"memory only", 0, 256}, {"caller chosen values", 2048, 2097152}} {
+			t.Run(provider+"/"+tc.name, func(t *testing.T) {
+				p := Profile{ID: "resources", Provider: provider, Image: "registry.example.invalid/image@sha256:" + strings.Repeat("a", 64), CPU: tc.cpu, MemoryMiB: tc.memory}
+				if provider == "resumable-k8s-pod" {
+					p.Namespace, p.NodeName = "boxes", "node-a"
+				}
+				data, err := json.Marshal(Config{Profiles: []Profile{p}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				config, err := LoadConfig(bytes.NewReader(data))
+				if err != nil {
+					t.Fatal(err)
+				}
+				got := runtimeSpec(boxRecord{Box: Box{ID: "box-1"}, Profile: config.Profiles[0]})
+				if got.CPU != tc.cpu || got.MemoryMiB != tc.memory {
+					t.Fatalf("resource limits changed from caller values: CPU=%v memoryMiB=%v", got.CPU, got.MemoryMiB)
+				}
+			})
+		}
 	}
 }
 

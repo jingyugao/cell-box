@@ -31,11 +31,10 @@ type Profile struct {
 	// old stored profiles retain false. The initially empty HOME hides image
 	// contents and is retained across suspend/resume until the Box is deleted.
 	PersistentHome bool `json:"persistentHome,omitempty"`
-	// UnlimitedResources omits Pod container limits for private test profiles.
-	UnlimitedResources bool            `json:"unlimitedResources,omitempty"`
-	CPU                float64         `json:"cpu,omitempty"`
-	MemoryMiB          int64           `json:"memoryMiB,omitempty"`
-	Guest              guestapi.Config `json:"guest"`
+	// Resource limits are opt-in. Omitted or zero values leave that resource unlimited.
+	CPU       float64         `json:"cpu,omitempty"`
+	MemoryMiB int64           `json:"memoryMiB,omitempty"`
+	Guest     guestapi.Config `json:"guest"`
 }
 type Config struct {
 	CatalogBuilder catalog.Builder `json:"-"`

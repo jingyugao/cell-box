@@ -142,11 +142,11 @@ func validateSpec(s boxprovider.Spec) error {
 	if s.Image == "" || strings.HasPrefix(s.Image, "-") {
 		return errors.New("image required")
 	}
-	if math.IsNaN(s.CPU) || math.IsInf(s.CPU, 0) || s.CPU <= 0 || s.CPU > 1024 {
-		return errors.New("CPU must be in (0, 1024]")
+	if math.IsNaN(s.CPU) || math.IsInf(s.CPU, 0) || s.CPU < 0 {
+		return errors.New("CPU must be non-negative and finite")
 	}
-	if s.MemoryMiB < 64 || s.MemoryMiB > 1048576 {
-		return errors.New("memory must be 64 through 1048576 MiB")
+	if s.MemoryMiB < 0 {
+		return errors.New("memory must be non-negative")
 	}
 	if s.NodeName != "" || s.Namespace != "" {
 		return errors.New("node and namespace are unsupported by Docker")
@@ -220,7 +220,14 @@ func (p *Provider) Create(ctx context.Context, s boxprovider.Spec) (boxprovider.
 	if err != nil {
 		return boxprovider.Handle{}, err
 	}
-	args := []string{"create", "--name", name, "--label", ownerLabel + "=" + ownerValue, "--label", boxLabel + "=" + s.BoxID, "--label", specLabel + "=" + key, "--cpus", strconv.FormatFloat(s.CPU, 'f', -1, 64), "--memory", strconv.FormatInt(s.MemoryMiB, 10) + "m", "--user", "0:0", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "FOWNER", "--cap-add", "DAC_OVERRIDE", "--cap-add", "SETUID", "--cap-add", "SETGID", "--security-opt", "no-new-privileges", "--publish", fmt.Sprintf("127.0.0.1::%d", guestapi.Port), "--entrypoint", guestapi.Binary, img.ID, "serve", "--config-base64", encoded}
+	args := []string{"create", "--name", name, "--label", ownerLabel + "=" + ownerValue, "--label", boxLabel + "=" + s.BoxID, "--label", specLabel + "=" + key}
+	if s.CPU > 0 {
+		args = append(args, "--cpus", strconv.FormatFloat(s.CPU, 'f', -1, 64))
+	}
+	if s.MemoryMiB > 0 {
+		args = append(args, "--memory", strconv.FormatInt(s.MemoryMiB, 10)+"m")
+	}
+	args = append(args, "--user", "0:0", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "FOWNER", "--cap-add", "DAC_OVERRIDE", "--cap-add", "SETUID", "--cap-add", "SETGID", "--security-opt", "no-new-privileges", "--publish", fmt.Sprintf("127.0.0.1::%d", guestapi.Port), "--entrypoint", guestapi.Binary, img.ID, "serve", "--config-base64", encoded)
 	if _, err = p.run(ctx, args); err != nil {
 		// A concurrent retry may have won creation. Inspect and accept only exact ownership.
 		if c, e := p.container(ctx, name); e == nil && verify(c, s.BoxID, key) == nil && c.Image == img.ID {

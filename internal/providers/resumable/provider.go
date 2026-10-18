@@ -83,8 +83,12 @@ func buildWanted(spec boxprovider.Spec) (*api.ResumablePod, error) {
 		(spec.DebugReadOnlyHostPath != "" || !path.IsAbs(host) || path.Clean(host) != host || host == "/" || len(host) > 4096 || strings.ContainsAny(host, "\x00\r\n")) {
 		return nil, errors.New("debug read-write host path must be a clean absolute directory path other than /")
 	}
-	if math.IsNaN(spec.CPU) || math.IsInf(spec.CPU, 0) || spec.CPU <= 0 || spec.CPU > 1024 || spec.MemoryMiB <= 0 || spec.MemoryMiB > 1<<40 {
-		return nil, errors.New("positive bounded CPU and memory are required")
+	if math.IsNaN(spec.CPU) || math.IsInf(spec.CPU, 0) || spec.CPU < 0 || spec.MemoryMiB < 0 {
+		return nil, errors.New("resource limits must be finite and nonnegative")
+	}
+	// Guard unit conversion overflow, without imposing a resource allocation policy.
+	if math.Ceil(spec.CPU*1000) >= float64(math.MaxInt64) || spec.MemoryMiB > math.MaxInt64/(1024*1024) {
+		return nil, errors.New("resource limits overflow Kubernetes quantity units")
 	}
 	config, err := json.Marshal(spec.Config)
 	if err != nil {
@@ -94,22 +98,26 @@ func buildWanted(spec boxprovider.Spec) (*api.ResumablePod, error) {
 	if spec.Staged {
 		argv = append(argv, "--staged")
 	}
-	cpu := resource.NewMilliQuantity(int64(math.Ceil(spec.CPU*1000)), resource.DecimalSI)
-	memory := resource.NewQuantity(spec.MemoryMiB*1024*1024, resource.BinarySI)
-	resources := core.ResourceList{core.ResourceCPU: *cpu, core.ResourceMemory: *memory}
+	var limits core.ResourceList
+	if spec.CPU > 0 || spec.MemoryMiB > 0 {
+		limits = make(core.ResourceList)
+		if spec.CPU > 0 {
+			limits[core.ResourceCPU] = *resource.NewMilliQuantity(int64(math.Ceil(spec.CPU*1000)), resource.DecimalSI)
+		}
+		if spec.MemoryMiB > 0 {
+			limits[core.ResourceMemory] = *resource.NewQuantity(spec.MemoryMiB*1024*1024, resource.BinarySI)
+		}
+	}
 	zero := int64(0)
 	no := false
 	container := core.Container{
 		Name: "cellbox", Image: spec.Image, ImagePullPolicy: core.PullIfNotPresent,
 		Command: []string{guestapi.Binary}, Args: argv,
 		Ports:     []core.ContainerPort{{Name: "guest", ContainerPort: guestapi.Port, Protocol: core.ProtocolTCP}},
-		Resources: core.ResourceRequirements{Requests: core.ResourceList{core.ResourceCPU: resource.MustParse("0"), core.ResourceMemory: resource.MustParse("0")}},
+		Resources: core.ResourceRequirements{Requests: core.ResourceList{core.ResourceCPU: resource.MustParse("0"), core.ResourceMemory: resource.MustParse("0")}, Limits: limits},
 		SecurityContext: &core.SecurityContext{RunAsUser: &zero, RunAsNonRoot: &no, Privileged: &no, AllowPrivilegeEscalation: &no,
 			Capabilities: &core.Capabilities{Drop: []core.Capability{"ALL"}, Add: []core.Capability{"CHOWN", "SETUID", "SETGID", "FOWNER", "DAC_OVERRIDE"}}},
 		ReadinessProbe: &core.Probe{ProbeHandler: core.ProbeHandler{TCPSocket: &core.TCPSocketAction{Port: intstr.FromInt32(guestapi.Port)}}, PeriodSeconds: 1},
-	}
-	if !spec.UnlimitedResources {
-		container.Resources.Limits = resources
 	}
 	wanted := &api.ResumablePod{
 		TypeMeta:   meta.TypeMeta{APIVersion: api.GroupVersion.String(), Kind: api.Kind},
