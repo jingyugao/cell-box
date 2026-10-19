@@ -31,3 +31,20 @@ func TestSharedStorageFileAllowsDisabledStorageAndRejectsPartialConfig(t *testin
 		})
 	}
 }
+
+func TestEnabledVolumeBackupsLoadSharedStorageBeforeRuntimeValidation(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.json")
+	storage := filepath.Join(dir, "object-storage.json")
+	if err := os.WriteFile(config, []byte(`{"profiles":[],"volumeBackups":{"enabled":true}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(storage, []byte(`{"bucket":"test-backups"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := run([]string{"--config", config, "--object-storage-config", storage, "--warm-pool-size", "33"})
+	if err == nil || !strings.Contains(err.Error(), "warm pool size must be between 0 and 32") {
+		t.Fatalf("run error=%v, want warm pool runtime validation", err)
+	}
+}

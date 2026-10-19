@@ -1,11 +1,65 @@
 package homevolume
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestWithVolumeHoldsOnlyItsOwnerLockAndValidatesIdentity(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "cellbox")
+	for _, uid := range []string{"volume-a", "volume-b"} {
+		if _, err := Prepare(base, uid, "node", VolumeSpecHash, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx := context.Background()
+	called := false
+	err := WithVolume(ctx, base, "volume-a", "node", func(path string) error {
+		called = true
+		if _, err := os.Stat(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := WithVolume(ctx, base, "volume-a", "node", func(string) error { return nil }); !errors.Is(err, ErrBusy) {
+			t.Fatalf("same-volume nested access error = %v, want ErrBusy", err)
+		}
+		return WithVolume(ctx, base, "volume-b", "node", func(string) error { return nil })
+	})
+	if err != nil || !called {
+		t.Fatalf("WithVolume callback=%t error=%v", called, err)
+	}
+	if err := WithVolume(ctx, base, "volume-a", "wrong-node", func(string) error { return nil }); !errors.Is(err, ErrStaleVolume) {
+		t.Fatalf("wrong node error = %v, want ErrStaleVolume", err)
+	}
+	if err := WithVolume(ctx, base, "volume-a", "node", nil); err == nil {
+		t.Fatal("nil callback accepted")
+	}
+}
+
+func TestWithVolumeRejectsSymlinkedDataRoot(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "cellbox")
+	if _, err := Prepare(base, "volume-a", "node", VolumeSpecHash, true); err != nil {
+		t.Fatal(err)
+	}
+	_, _, data, err := paths(base, "volume-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup := data + ".saved"
+	if err := os.Rename(data, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(backup, data); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	err = WithVolume(context.Background(), base, "volume-a", "node", func(string) error { called = true; return nil })
+	if !errors.Is(err, ErrStaleVolume) || called {
+		t.Fatalf("symlinked volume error=%v callback=%t", err, called)
+	}
+}
 
 func TestIndependentVolumeSyncAndRemove(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cellbox")

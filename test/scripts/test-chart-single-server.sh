@@ -20,6 +20,25 @@ expect_failure() {
     exit 1
   fi
 }
+assert_backup_config() {
+  local file=$1 expected_enabled=$2
+  local encoded
+  encoded=$(awk '
+    /^  name: cellbox-api-config$/ { in_config_secret=1; next }
+    in_config_secret && /^  config\.json: / {
+      sub(/^  config\.json: "/, "")
+      sub(/"$/, "")
+      print
+      exit
+    }
+    in_config_secret && /^---$/ { in_config_secret=0 }
+  ' "$file")
+  [[ -n $encoded ]] || { echo "cellbox-api-config Secret/config.json was not rendered" >&2; return 1; }
+  printf '%s' "$encoded" | base64 --decode | jq -e --argjson enabled "$expected_enabled" \
+    '.volumeBackups.enabled == $enabled and .volumeBackups.binary == "restic" and .volumeBackups.keepLast == 3 and (.volumeBackups | has("passwordEnv") | not)' \
+    >/dev/null
+  ! grep -qE 'CELLBOX_BACKUP_PASSWORD|cellbox-volume-backups|checksum/backup-password' "$file"
+}
 
 helm lint "$root/charts/cellbox" "${common[@]}"
 helm template cellbox "$root/charts/cellbox" --namespace cellbox "${common[@]}" \
@@ -47,6 +66,12 @@ grep -q 'path: "/var/lib/cellbox-data"' "$tmp/rendered.yaml"
 helm template cellbox "$root/charts/cellbox" --namespace cellbox "${common[@]}" \
   --set storage.existingClaim=cellbox-data > "$tmp/claim.yaml"
 grep -q 'claimName: "cellbox-data"' "$tmp/claim.yaml"
+
+# Backups are disabled by default and have no password Secret, env, or checksum.
+assert_backup_config "$tmp/rendered.yaml" false
+helm template cellbox "$root/charts/cellbox" --namespace cellbox "${common[@]}" \
+  --set api.config.volumeBackups.enabled=true > "$tmp/backups-enabled.yaml"
+assert_backup_config "$tmp/backups-enabled.yaml" true
 
 cat > "$tmp/profile-mismatch.yaml" <<'YAML'
 api:

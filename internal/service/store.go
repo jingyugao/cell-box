@@ -311,12 +311,25 @@ func (s *Store) InterruptOperations(ctx context.Context) error {
             WHERE kind='operations' AND json_extract(record,'$.operation.status') IN ('queued','running')`, now); err != nil {
 			return err
 		}
-		if err := t.exec(`UPDATE runtime_records SET record=json_set(record,'$.volume.operationId','',
-            '$.volume.resourceVersion',json_extract(record,'$.volume.resourceVersion')+1,
-            '$.volume.phase','failed',
-            '$.volume.error',json('{"code":"UNKNOWN_OUTCOME","message":"Service restarted before completion; inspect the volume before deleting or retrying"}'))
-            WHERE kind='volumes' AND json_extract(record,'$.volume.phase') IN ('creating','deleting')`); err != nil {
+		volumes, err := listRecords[volumeRecord](t.ctx, t.tx, "volumes", `AND (json_extract(record,'$.volume.phase') IN ('creating','deleting','backing-up')
+              OR coalesce(json_extract(record,'$.volume.operationId'),'')!='')`)
+		if err != nil {
 			return err
+		}
+		for _, volume := range volumes {
+			volume.Volume.OperationID = ""
+			volume.Volume.Version++
+			if volume.Volume.Phase == "creating" || volume.Volume.Phase == "deleting" {
+				volume.Volume.Phase = "failed"
+				volume.Volume.Error = &APIError{Code: "UNKNOWN_OUTCOME", Message: "Service restarted before completion; inspect the volume before deleting or retrying"}
+			} else {
+				// Backup sources and restore repository reservations never write
+				// this filesystem. Keep their original availability on restart.
+				restoreBackupSourceState(&volume)
+			}
+			if err := t.PutVolume(volume); err != nil {
+				return err
+			}
 		}
 		return t.exec(`UPDATE runtime_records SET record=json_set(record,'$.box.operationId','',
             '$.box.resourceVersion',json_extract(record,'$.box.resourceVersion')+1,

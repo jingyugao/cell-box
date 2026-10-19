@@ -42,13 +42,14 @@ var validImage = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}
 type Provider struct {
 	Client client.Client
 	// Local connects HTTP to the embedded runtime and its durable local journal.
-	Local                 *runtimecontrol.Client
-	CacheImageLocal       func(context.Context, string, string, string) error
-	CreateVolumeLocal     func(context.Context, boxprovider.VolumeSpec) error
-	DeleteVolumeLocal     func(context.Context, boxprovider.VolumeSpec) error
-	ConfirmExecutionLocal func(context.Context, *api.ResumablePod, *core.Pod) (*api.Execution, error)
-	warmMu                sync.RWMutex
-	warmSnapshot          warmtemplates.Snapshot
+	Local                  *runtimecontrol.Client
+	CacheImageLocal        func(context.Context, string, string, string) error
+	CreateVolumeLocal      func(context.Context, boxprovider.VolumeSpec) error
+	DeleteVolumeLocal      func(context.Context, boxprovider.VolumeSpec) error
+	WithStoppedVolumeLocal func(context.Context, boxprovider.VolumeSpec, func(string) error) error
+	ConfirmExecutionLocal  func(context.Context, *api.ResumablePod, *core.Pod) (*api.Execution, error)
+	warmMu                 sync.RWMutex
+	warmSnapshot           warmtemplates.Snapshot
 }
 
 func New(c client.Client) *Provider { return &Provider{Client: c} }

@@ -59,8 +59,13 @@ api:
   configSecret: cellbox-api-config
   # Set false to use the existing configSecret.
   manageSecrets: true
-  # Overrides for the API JSON configuration; defaults start with no profiles.
-  config: {}
+  # Volume backups use restic empty-password mode and are disabled by default.
+  # Set enabled: true explicitly under api.config.volumeBackups to opt in.
+  config:
+    volumeBackups:
+      enabled: false
+      binary: restic
+      keepLast: 3
 buildkit:
   enabled: false
   extraEnv: []

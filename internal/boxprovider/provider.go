@@ -16,6 +16,7 @@ var ErrUnsupported = errors.New("unsupported runtime operation")
 var ErrStaleExecution = errors.New("runtime execution changed")
 var ErrStaleTransition = errors.New("runtime lifecycle transition changed")
 var ErrNotReady = errors.New("current runtime is not ready")
+var ErrStaleVolume = errors.New("persistent volume identity changed")
 
 type Spec struct {
 	Inventory              json.RawMessage
@@ -48,6 +49,12 @@ type VolumeSpec struct {
 type VolumeProvider interface {
 	CreateVolume(context.Context, VolumeSpec) error
 	DeleteVolume(context.Context, VolumeSpec) error
+}
+
+// StoppedVolumeProvider gives exclusive access to an independent volume only
+// after every Box that references it has stopped and detached.
+type StoppedVolumeProvider interface {
+	WithStoppedVolume(context.Context, VolumeSpec, func(string) error) error
 }
 
 type Handle struct {
