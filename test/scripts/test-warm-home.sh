@@ -6,15 +6,22 @@ cd "$repo_root"
 runsc_bin="${RUNSC_BIN:-}"
 platform="${WARM_HOME_PLATFORM:-}"
 overlay_mode="${WARM_HOME_OVERLAY2:-root:memory}"
+page_loading="${WARM_HOME_PAGE_LOADING:-eager}"
+prefetch_bin="${CHECKPOINT_PREFETCH_BIN:-}"
+restore_ready_timeout="${WARM_HOME_RESTORE_READY_TIMEOUT:-120}"
 log_file="${WARM_HOME_LOG:-/tmp/cellbox-warm-home-$(date +%Y%m%d-%H%M%S).log}"
 exec > >(tee -a "$log_file") 2>&1
 [[ -n "$runsc_bin" ]] || { echo 'RUNSC_BIN must name the runsc binary to test' >&2; exit 2; }
 [[ -n "$platform" ]] || { echo 'WARM_HOME_PLATFORM must explicitly be kvm or systrap' >&2; exit 2; }
 [[ "$platform" == kvm || "$platform" == systrap ]] || { echo 'WARM_HOME_PLATFORM must be kvm or systrap' >&2; exit 2; }
+[[ "$page_loading" == eager || "$page_loading" == lazy ]] || { echo 'WARM_HOME_PAGE_LOADING must be eager or lazy' >&2; exit 2; }
+[[ "$restore_ready_timeout" =~ ^[1-9][0-9]*$ ]] || { echo 'WARM_HOME_RESTORE_READY_TIMEOUT must be a positive number of seconds' >&2; exit 2; }
 [[ -x "$runsc_bin" ]] || { echo "RUNSC_BIN is not executable: $runsc_bin" >&2; exit 2; }
+if [[ -n "$prefetch_bin" ]]; then [[ -x "$prefetch_bin" ]] || { echo "CHECKPOINT_PREFETCH_BIN is not executable: $prefetch_bin" >&2; exit 2; }; fi
 command -v go >/dev/null || { echo 'go is required' >&2; exit 2; }
 command -v jq >/dev/null || { echo 'jq is required' >&2; exit 2; }
 command -v strings >/dev/null || { echo 'strings is required' >&2; exit 2; }
+command -v timeout >/dev/null || { echo 'timeout is required' >&2; exit 2; }
 sudo -n true || { echo 'sudo must already be authorized (run sudo -v interactively)' >&2; exit 2; }
 
 test_root="$(mktemp -d /tmp/cellbox-warm-home.XXXXXX)"
@@ -33,8 +40,13 @@ id_for() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
 host_jq() { sudo -n cat -- "$1" | jq -r "$2"; }
 
 cleanup() {
-  local status=$? cleanup_failed=0 pid id
+  local status=$? cleanup_failed=0 pid id pid_file
   trap - EXIT
+  for pid_file in "$test_root"/prefetch-*.pid; do
+    [[ -f "$pid_file" ]] || continue
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    if [[ "$pid" =~ ^[0-9]+$ ]]; then sudo -n kill -TERM "$pid" >/dev/null 2>&1 || true; fi
+  done
   for pid in "${background_pids[@]}"; do
     kill "$pid" >/dev/null 2>&1 || true
     wait "$pid" >/dev/null 2>&1 || true
@@ -86,9 +98,72 @@ printf 'artifacts=%s\n' "$test_root"
 printf 'log=%s\n' "$log_file"
 
 run_adapter() {
+  local -a global_flags=()
+  if [[ "$page_loading" == lazy ]]; then global_flags+=(--restore-page-loading=lazy); fi
   sudo -n "$adapter_bin" runsc --base="$state" --runsc="$runsc_bin" -- \
     --root "$runtime_root" --platform="$platform" --network=none --ignore-cgroups=true \
-    --overlay2="$overlay_mode" --restore-spec-validation=enforce "$@"
+    --overlay2="$overlay_mode" --restore-spec-validation=enforce "${global_flags[@]}" "$@"
+}
+
+capture_hotset() {
+  local owner="$1" snapshot="$2" checkpoint_path="$3" manifest checkpoint_id wrong_log
+  [[ -n "$prefetch_bin" ]] || return 0
+  checkpoint_id="$owner:$snapshot"
+  manifest="$state/workloads/$owner/$snapshot.hotset.json"
+  sudo -n "$prefetch_bin" -mode capture -checkpoint-dir "$checkpoint_path" \
+    -checkpoint-id "$checkpoint_id" -manifest "$manifest"
+  hotset_paths["$owner/$snapshot"]="$manifest"
+
+  # Exercise wrong-ID rejection and use the node's sealed fingerprint record
+  # to prove the checkpoint directory remains unchanged without rereading
+  # pages.img and perturbing the cache footprint.
+  verify_checkpoint "$owner" "$snapshot"
+  wrong_log="$test_root/wrong-id-$owner-$snapshot.log"
+  if sudo -n "$prefetch_bin" -mode prefetch -checkpoint-dir "$checkpoint_path" \
+    -checkpoint-id "wrong:$owner:$snapshot" -manifest "$manifest" >"$wrong_log" 2>&1; then
+    fail "hotset prefetch accepted the wrong checkpoint ID for $owner/$snapshot"
+  fi
+  grep -q 'checkpoint ID does not match' "$wrong_log" || fail "wrong-ID prefetch failed for an unexpected reason; see $wrong_log"
+  verify_checkpoint "$owner" "$snapshot"
+  printf 'PASS hotset-capture owner=%s snapshot=%s checkpoint_id=%s ranges_manifest=%s wrong_id_rejected=1 checkpoint_fingerprint_unchanged=1\n' \
+    "$owner" "$snapshot" "$checkpoint_id" "$manifest"
+}
+
+wait_for_restore() {
+  local id="$1" mode="$2" wait_flag
+  if [[ "$mode" == lazy ]]; then
+    wait_flag=--restore-ready
+  else
+    wait_flag=--restore
+  fi
+  timeout --signal=TERM --kill-after=5s "${restore_ready_timeout}s" sudo -n "$runsc_bin" \
+    --root "$runtime_root" --platform="$platform" --network=none --ignore-cgroups=true \
+    --overlay2="$overlay_mode" wait "$wait_flag" "$id"
+}
+
+wait_prefetch() {
+  local pid="$1" owner="$2" cycle="$3" log="$4" status_file="$5" status recorded_status bg_index
+  if wait "$pid"; then status=0; else status=$?; fi
+  for bg_index in "${!background_pids[@]}"; do
+    if [[ "${background_pids[$bg_index]}" == "$pid" ]]; then unset 'background_pids[bg_index]'; fi
+  done
+  [[ -f "$status_file" ]] || fail "prefetch did not record an exit status for $owner cycle $cycle; see $log"
+  recorded_status="$(cat "$status_file")"
+  [[ "$status" == 0 && "$recorded_status" == 0 ]] || fail "prefetch failed for $owner cycle $cycle (wait=$status recorded=$recorded_status); see $log"
+  echo "PASS prefetch owner=$owner cycle=$cycle exit_status=$recorded_status log=$log"
+}
+
+verify_checkpoint() {
+  local owner="$1" snapshot="$2"
+  sudo -n "$adapter_bin" verify-checkpoint --base="$state" --owner="$owner" \
+    --snapshot="$snapshot" --runsc="$runsc_bin" --spec="$spec_hash" >/dev/null
+}
+
+retire_checkpoint() {
+  local owner="$1" snapshot="$2" checkpoint_path="$3"
+  sudo -n "$adapter_bin" retire --base="$state" --owner="$owner" --snapshot="$snapshot"
+  sudo -n test ! -e "$checkpoint_path" || fail "retire left checkpoint directory $checkpoint_path"
+  printf 'PASS retired-checkpoint owner=%s snapshot=%s directory_removed=1\n' "$owner" "$snapshot"
 }
 
 make_bundle() {
@@ -166,6 +241,7 @@ delete_pair() {
 
 declare -a owners=(owner-a owner-b)
 declare -a home_paths snapshots old_root_ids old_child_ids old_pod_uids old_tokens old_guest_pids old_counters old_open_sizes old_deleted_sizes
+declare -A hotset_paths
 
 for index in 0 1; do
   owner="${owners[$index]}"
@@ -202,6 +278,7 @@ for index in 0 1; do
   run_adapter checkpoint --image-path="$checkpoint_path" --compression=none "$root_id"
   sudo -n "$adapter_bin" checkpoint --base="$state" --owner="$owner" --uid="$initial_uid" \
     --snapshot="$snapshot" --runsc="$runsc_bin" --spec="$spec_hash" >/dev/null
+  capture_hotset "$owner" "$snapshot" "$checkpoint_path"
   delete_pair "$child_id" "$root_id"
 done
 
@@ -232,6 +309,27 @@ for cycle in 1 2; do
     child_id="$(id_for "warm-child-$owner-cycle-$cycle")"
     snapshot="${snapshots[$index]}"
     restore_started_ns="$(date +%s%N)"
+    prefetch_pid=""
+    if [[ -n "$prefetch_bin" ]]; then
+      manifest="${hotset_paths["$owner/$snapshot"]}"
+      prefetch_log="$test_root/prefetch-$owner-$cycle.log"
+      prefetch_status_file="$test_root/prefetch-$owner-$cycle.status"
+      prefetch_pid_file="$test_root/prefetch-$owner-$cycle.pid"
+      (
+        set +e
+        sudo -n "$prefetch_bin" -mode prefetch -checkpoint-dir "$state/workloads/$owner/$snapshot" \
+          -checkpoint-id "$owner:$snapshot" -manifest "$manifest" >"$prefetch_log" 2>&1 &
+        prefetch_command_pid=$!
+        printf '%s\n' "$prefetch_command_pid" > "$prefetch_pid_file"
+        wait "$prefetch_command_pid"
+        prefetch_status=$?
+        rm -f -- "$prefetch_pid_file"
+        printf '%s\n' "$prefetch_status" > "$prefetch_status_file"
+        exit "$prefetch_status"
+      ) &
+      prefetch_pid=$!
+      background_pids+=("$prefetch_pid")
+    fi
     run_adapter start "$root_id" > "$test_root/start-$owner-$cycle.log" 2>&1 &
     starter_pid=$!
     background_pids+=("$starter_pid")
@@ -244,6 +342,16 @@ for cycle in 1 2; do
 
     child_bundle="$(make_bundle "$child_id" child "$uid" "$name" "$root_id")"
     create_child "$child_id" "$child_bundle"
+    if ! wait_for_restore "$root_id" "$page_loading" >"$test_root/restore-wait-$owner-$cycle.log" 2>&1; then
+      cat "$test_root/restore-wait-$owner-$cycle.log" >&2
+      fail "restore readiness wait failed for $owner cycle $cycle ($page_loading)"
+    fi
+    if [[ -n "$prefetch_pid" ]]; then
+      wait_prefetch "$prefetch_pid" "$owner" "$cycle" "$prefetch_log" "$prefetch_status_file"
+    fi
+    verify_checkpoint "$owner" "$snapshot"
+    checkpoint_path="$state/workloads/$owner/$snapshot"
+    retire_checkpoint "$owner" "$snapshot" "$checkpoint_path"
     home_path="${home_paths[$index]}"
     deadline=$((SECONDS + 120))
     advanced=0
@@ -289,6 +397,7 @@ for cycle in 1 2; do
       run_adapter checkpoint --image-path="$checkpoint_path" --compression=none "$root_id"
       sudo -n "$adapter_bin" checkpoint --base="$state" --owner="$owner" --uid="$uid" \
         --snapshot="$next_snapshot" --runsc="$runsc_bin" --spec="$spec_hash" >/dev/null
+      capture_hotset "$owner" "$next_snapshot" "$checkpoint_path"
       snapshots[$index]="$next_snapshot"
       old_counters[$index]="$(host_jq "$beat" .counter)"
       old_open_sizes[$index]="$(host_jq "$beat" .fd.size)"
@@ -299,4 +408,5 @@ for cycle in 1 2; do
   unset warm_uids warm_names warm_root_ids warm_root_pids warm_root_bundles
 done
 
-printf 'PASS: two independent local HOME trees restored through two warm-root cycles with production Adapter.Rewrite, real homevolume tickets/state, continuous memory/fds/cwd/mmap, and root peer-path denial\n'
+printf 'PASS: two independent local HOME trees restored through two warm-root cycles with production Adapter.Rewrite, page_loading=%s, real homevolume tickets/state, continuous memory/fds/cwd/mmap, and root peer-path denial; hotset collection records cache footprint only, not performance benefit\n' \
+  "$page_loading"

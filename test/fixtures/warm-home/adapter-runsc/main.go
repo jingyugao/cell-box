@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/adapter"
 	"cellbox.local/cellbox/internal/homevolume"
 	"cellbox.local/cellbox/internal/node"
@@ -37,6 +38,10 @@ func main() {
 		registerWarm(os.Args[2:])
 	case "claim-warm":
 		claimWarm(os.Args[2:])
+	case "retire":
+		retire(os.Args[2:])
+	case "verify-checkpoint":
+		verifyCheckpoint(os.Args[2:])
 	default:
 		fatal("unknown command: " + os.Args[1])
 	}
@@ -157,6 +162,35 @@ func claimWarm(args []string) {
 	check(node.AtomicJSON(filepath.Join(*base, "tickets", *uid+".json"), t))
 	lease.Phase, lease.Ticket = "claimed", t
 	check(node.AtomicJSON(leasePath, lease))
+}
+
+func verifyCheckpoint(args []string) {
+	flags := flag.NewFlagSet("verify-checkpoint", flag.ExitOnError)
+	base := flags.String("base", "", "isolated Cellbox state directory")
+	owner := flags.String("owner", "", "owner identifier")
+	snapshot := flags.String("snapshot", "", "node-local snapshot identifier")
+	runsc := flags.String("runsc", "", "runsc executable")
+	specHash := flags.String("spec", "warm-home-test-spec", "sandbox spec identity")
+	_ = flags.Parse(args)
+	path, err := node.SnapshotPath(*base, *owner, *snapshot)
+	check(err)
+	_, err = node.VerifyPrepared(path, *owner, *specHash, *runsc)
+	check(err)
+}
+
+// retire exercises the same invalidation and garbage collection that run after
+// Cellbox observes a restored process. A lazy reader must survive unlinking its
+// source checkpoint and remain able to fault in pages and checkpoint again.
+func retire(args []string) {
+	flags := flag.NewFlagSet("retire", flag.ExitOnError)
+	base := flags.String("base", "", "isolated Cellbox state directory")
+	owner := flags.String("owner", "", "owner identifier")
+	snapshot := flags.String("snapshot", "", "node-local snapshot identifier")
+	_ = flags.Parse(args)
+	backend := &node.Backend{Base: *base}
+	w := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{UID: types.UID(*owner)}, Status: api.Status{Snapshot: *snapshot}}
+	check(backend.InvalidateSnapshot(context.Background(), w))
+	check(backend.CollectGarbage(context.Background()))
 }
 
 func printJSON(v any) {

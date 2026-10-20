@@ -169,6 +169,14 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 		if !reflect.DeepEqual(live, t) {
 			return nil, fmt.Errorf("authorization changed")
 		}
+		var pageLoading string
+		if t.Snapshot != "" {
+			policy, err := node.LoadRestorePolicy(a.Base)
+			if err != nil {
+				return nil, err
+			}
+			pageLoading = policy.PageLoading
+		}
 		started := request + ".started"
 		f, err := os.OpenFile(started, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 		if err != nil {
@@ -202,7 +210,11 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 			}
 			// Resume execution as soon as kernel state is restored. Memory pages
 			// load in the background; callers must check application readiness.
-			return append(append([]string{}, args[:idx]...), "restore", "--background", "--detach", "--image-path="+path, id), nil
+			prefix := append([]string{}, args[:idx]...)
+			if pageLoading != "" {
+				prefix = append(prefix, "--restore-page-loading="+pageLoading)
+			}
+			return append(prefix, "restore", "--background", "--detach", "--image-path="+path, id), nil
 		}
 		if err = a.claimHome(t); err != nil {
 			return nil, err
@@ -302,8 +314,19 @@ func verifyVolumeExecution(base string, t node.Ticket) error {
 	}
 	return nil
 }
+func configuredRuntime() Adapter {
+	base, runsc := node.DefaultBase, node.DefaultRunsc
+	if configured := os.Getenv("CELLBOX_NODE_BASE"); configured != "" {
+		base = configured
+	}
+	if configured := os.Getenv("CELLBOX_RUNSC"); configured != "" {
+		runsc = configured
+	}
+	return Adapter{Base: base, Runsc: runsc}
+}
+
 func Main() {
-	a := Adapter{Base: node.DefaultBase, Runsc: node.DefaultRunsc}
+	a := configuredRuntime()
 	args, err := a.Rewrite(os.Args[1:])
 	if err == nil {
 		args, err = a.DiagnosticArgs(args)

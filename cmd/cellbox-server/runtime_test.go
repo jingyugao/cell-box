@@ -6,8 +6,25 @@ import (
 	"testing"
 	"time"
 
+	api "cellbox.local/cellbox/api/v1alpha1"
+	"cellbox.local/cellbox/internal/node"
 	"cellbox.local/cellbox/internal/service"
 )
+
+func TestNodeOptionsRuntimeDefaultsAndOverrides(t *testing.T) {
+	defaults := nodeOptions{}
+	if defaults.runtimeClass() != api.RuntimeClass || defaults.runtimeHandler() != api.RuntimeClass || defaults.nodeBase() != node.DefaultBase || defaults.runsc() != node.DefaultRunsc || defaults.shim() != node.DefaultShim {
+		t.Fatalf("unexpected defaults: class=%q handler=%q base=%q runsc=%q shim=%q", defaults.runtimeClass(), defaults.runtimeHandler(), defaults.nodeBase(), defaults.runsc(), defaults.shim())
+	}
+	custom := nodeOptions{RuntimeClass: "runsc-cellbox-dev", RuntimeHandler: "gvisor-bench-pause", NodeBase: "/var/lib/cellbox-dev", Runsc: "/opt/cellbox-dev/runsc", Shim: "/usr/local/bin/gvisor-cellbox-dev/4320a3de3afb/containerd-shim-runsc-v1"}
+	if custom.runtimeClass() != "runsc-cellbox-dev" || custom.runtimeHandler() != "gvisor-bench-pause" || custom.nodeBase() != "/var/lib/cellbox-dev" || custom.runsc() != "/opt/cellbox-dev/runsc" || custom.shim() != custom.Shim {
+		t.Fatalf("custom runtime settings were not preserved: %+v", custom)
+	}
+	custom.RuntimeHandler = ""
+	if custom.runtimeHandler() != custom.RuntimeClass {
+		t.Fatalf("empty CRI handler should default to RuntimeClass: got %q", custom.runtimeHandler())
+	}
+}
 
 func TestServerRejectsProfilesAssignedToAnotherRuntime(t *testing.T) {
 	options := nodeOptions{Node: "node-a", Namespace: "cell-box", Socket: "/run/containerd/containerd.sock", WarmPoolSize: 2}
@@ -21,6 +38,9 @@ func TestServerRejectsProfilesAssignedToAnotherRuntime(t *testing.T) {
 		{Namespace: options.Namespace, Socket: options.Socket},
 		{Node: options.Node, Namespace: options.Namespace},
 		{Node: options.Node, Namespace: options.Namespace, Socket: options.Socket, WarmPoolSize: 33},
+		{Node: options.Node, Namespace: options.Namespace, Socket: options.Socket, NodeBase: "/"},
+		{Node: options.Node, Namespace: options.Namespace, Socket: options.Socket, Runsc: "bin/runsc"},
+		{Node: options.Node, Namespace: options.Namespace, Socket: options.Socket, Shim: "/usr/local/bin/../containerd-shim-runsc-v1"},
 	} {
 		if err := wrong.validate(config); err == nil {
 			t.Fatalf("accepted wrong local runtime: %+v", wrong)

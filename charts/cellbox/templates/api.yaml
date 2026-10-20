@@ -4,6 +4,13 @@
 {{- $storageHostPath := get $storage "hostPath" | default "/var/lib/cellbox-data" | toString | trim }}
 {{- $storageClaim := get $storage "existingClaim" | default "" | toString | trim }}
 {{- $dataDir := get (.Values.api.config | default dict) "dataDir" | default "/var/lib/cellbox-data" | toString | trim }}
+{{- $nodeBase := get (.Values.controller | default dict) "nodeBase" | default "/var/lib/cellbox" | toString | trim }}
+{{- $runsc := get (.Values.controller | default dict) "runsc" | default "/usr/local/bin/runsc" | toString | trim }}
+{{- $shim := get (.Values.controller | default dict) "shim" | default "/usr/local/bin/containerd-shim-runsc-v1" | toString | trim }}
+{{- $runtimeClass := .Values.runtimeClass | default dict }}
+{{- $runtimeClassName := get $runtimeClass "name" | default "runsc-recoverable" | toString | trim }}
+{{- $runtimeHandler := get $runtimeClass "handler" | toString | trim }}
+{{- if eq $runtimeHandler "" }}{{- $runtimeHandler = $runtimeClassName }}{{- end }}
 {{- $serverNode := .Values.server.nodeName | default "" | toString | trim }}
 {{- if eq $serverNode "" }}{{- fail "server.nodeName is required; the single server must be pinned to its runtime node" }}{{- end }}
 {{- if ne $apiNamespace .Release.Namespace }}{{- fail "api.namespace must match the release namespace for the single-server runtime" }}{{- end }}
@@ -11,6 +18,9 @@
   {{- if and (hasKey $selector "kubernetes.io/hostname") (ne (get $selector "kubernetes.io/hostname" | toString) $serverNode) }}{{- fail (printf "%s kubernetes.io/hostname conflicts with server.nodeName" $selectorName) }}{{- end }}
 {{- end }}
 {{- if ne $dataDir "/var/lib/cellbox-data" }}{{- fail "api.config.dataDir must be /var/lib/cellbox-data to use the configured persistent storage" }}{{- end }}
+{{- if or (not (hasPrefix "/" $nodeBase)) (eq $nodeBase "/") (hasSuffix "/" $nodeBase) (contains "//" $nodeBase) (regexMatch "(^|/)\\.{1,2}(/|$)" $nodeBase) }}{{- fail "controller.nodeBase must be a clean absolute path other than /" }}{{- end }}
+{{- if or (not (hasPrefix "/" $runsc)) (eq $runsc "/") (hasSuffix "/" $runsc) (contains "//" $runsc) (regexMatch "(^|/)\\.{1,2}(/|$)" $runsc) }}{{- fail "controller.runsc must be a clean absolute file path" }}{{- end }}
+{{- if or (not (hasPrefix "/" $shim)) (eq $shim "/") (hasSuffix "/" $shim) (contains "//" $shim) (regexMatch "(^|/)\\.{1,2}(/|$)" $shim) }}{{- fail "controller.shim must be a clean absolute file path" }}{{- end }}
 {{- if ne (int .Values.api.replicas) 1 }}{{- fail "api.replicas must be 1; the API has a single active Lease owner" }}{{- end }}
 {{- if eq $storageClaim "" }}
   {{- if or (not (hasPrefix "/" $storageHostPath)) (eq $storageHostPath "/") (hasSuffix "/" $storageHostPath) (contains "//" $storageHostPath) (regexMatch "(^|/)\\.{1,2}(/|$)" $storageHostPath) }}{{- fail "storage.hostPath must be a clean absolute path other than /" }}{{- end }}
@@ -99,6 +109,11 @@ spec:
             - --node=$(NODE_NAME)
             - --namespace={{ .Release.Namespace }}
             - --warm-pool-size={{ if hasKey .Values.controller "warmPoolSize" }}{{ .Values.controller.warmPoolSize }}{{ else }}2{{ end }}
+            - --runtime-class={{ $runtimeClassName }}
+            - --runtime-handler={{ $runtimeHandler }}
+            - --node-base={{ $nodeBase }}
+            - --runsc={{ $runsc }}
+            - --shim={{ $shim }}
             - --host-mount-namespace
             - --cri-socket={{ .Values.controller.criSocket }}
             {{- if .Values.buildkit.enabled }}
@@ -174,11 +189,11 @@ spec:
             - name: runsc-root
               mountPath: /run/containerd/runsc/k8s.io
             - name: snapshot-store
-              mountPath: /var/lib/cellbox
-            - name: host-binaries
-              # Checkpoint hashes /usr/local/bin/runsc before nsenter runs it
-              # at the same path in the host mount namespace.
-              mountPath: /usr/local/bin
+              mountPath: {{ $nodeBase | quote }}
+            - name: runsc-binary
+              # Checkpoint hashes the selected runsc binary before nsenter runs
+              # the same host path in the host mount namespace.
+              mountPath: {{ $runsc | quote }}
               readOnly: true
             {{- if .Values.buildkit.enabled }}
             - name: buildkit-socket
@@ -261,12 +276,12 @@ spec:
             type: DirectoryOrCreate
         - name: snapshot-store
           hostPath:
-            path: /var/lib/cellbox
+            path: {{ $nodeBase | quote }}
             type: DirectoryOrCreate
-        - name: host-binaries
+        - name: runsc-binary
           hostPath:
-            path: /usr/local/bin
-            type: DirectoryOrCreate
+            path: {{ $runsc | quote }}
+            type: File
         - name: temp
           emptyDir:
             sizeLimit: {{ ternary "1Gi" "64Mi" .Values.buildkit.enabled }}

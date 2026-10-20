@@ -76,6 +76,10 @@ func (b *Backend) InvalidateSnapshot(ctx context.Context, w *api.ResumablePod) (
 	if !ValidID(owner) || !ValidID(snapshot) {
 		return fmt.Errorf("invalid snapshot invalidation identity")
 	}
+	// Stop optional warming before the consumed source files can be removed.
+	if err := b.Prefetch.Cancel(owner, snapshot); err != nil {
+		return err
+	}
 	base := filepath.Join(b.Base, "garbage", owner, snapshot)
 	for _, suffix := range []string{".json", ".done"} {
 		if _, err := os.Stat(base + suffix); err == nil {
@@ -156,10 +160,16 @@ func (b *Backend) CollectGarbage(ctx context.Context) error {
 				if err != nil {
 					return err
 				}
+				if err := b.Prefetch.Cancel(job.Owner, job.Snapshot); err != nil {
+					return err
+				}
 				if err = os.RemoveAll(cache); err != nil {
 					return err
 				}
 				if err = os.Remove(cache + ".verified.json"); err != nil && !os.IsNotExist(err) {
+					return err
+				}
+				if err = os.Remove(cache + ".hotset.json"); err != nil && !os.IsNotExist(err) {
 					return err
 				}
 				if err = os.Rename(path, strings.TrimSuffix(path, ".json")+".done"); err != nil {
