@@ -19,6 +19,7 @@ import (
 
 const DefaultBase = homevolume.DefaultBase
 const DefaultRunsc = "/usr/local/bin/runsc"
+const DefaultShim = "/usr/local/bin/containerd-shim-runsc-v1"
 const DefaultRuntimeHandler = api.RuntimeClass
 const DefaultRoot = "/run/containerd/runsc/k8s.io"
 

@@ -28,6 +28,7 @@ import (
 
 type Backend struct {
 	Base, Runsc, Root string
+	Shim              string
 	RuntimeHandler    string
 	Socket            string
 	// HostMountNamespace runs runsc in the node's mount/root namespace when the
@@ -48,6 +49,13 @@ func (b *Backend) runtimeHandler() string {
 		return b.RuntimeHandler
 	}
 	return DefaultRuntimeHandler
+}
+
+func (b *Backend) shim() string {
+	if b.Shim != "" {
+		return b.Shim
+	}
+	return DefaultShim
 }
 
 func New(socket string) (*Backend, error) {

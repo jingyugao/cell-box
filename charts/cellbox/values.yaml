@@ -46,6 +46,7 @@ controller:
   criSocket: /run/containerd/containerd.sock
   nodeBase: /var/lib/cellbox
   runsc: /usr/local/bin/runsc
+  shim: /usr/local/bin/containerd-shim-runsc-v1
   # Provision gVisor, the wrapper, and runtime configuration manually on each node.
   nodeSelector:
     kubernetes.io/os: linux

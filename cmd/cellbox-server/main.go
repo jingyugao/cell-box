@@ -54,6 +54,7 @@ func run(args []string) error {
 	flags.StringVar(&runtime.RuntimeHandler, "runtime-handler", "", "CRI runtime handler; defaults to --runtime-class")
 	flags.StringVar(&runtime.NodeBase, "node-base", node.DefaultBase, "node-local Cellbox runtime data directory")
 	flags.StringVar(&runtime.Runsc, "runsc", node.DefaultRunsc, "runsc binary used by the node runtime")
+	flags.StringVar(&runtime.Shim, "shim", node.DefaultShim, "containerd runsc shim executable to authorize for reaping")
 	flags.BoolVar(&runtime.HostMountNamespace, "host-mount-namespace", false, "run runsc in the host mount namespace (requires privileged hostPID Pod)")
 	flags.IntVar(&runtime.WarmPoolSize, "warm-pool-size", 2, "maximum idle warm Pods on this node (0 disables)")
 	dockerBinary := flags.String("docker", "docker", "Docker CLI executable")

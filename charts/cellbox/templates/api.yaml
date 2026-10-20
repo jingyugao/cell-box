@@ -6,6 +6,7 @@
 {{- $dataDir := get (.Values.api.config | default dict) "dataDir" | default "/var/lib/cellbox-data" | toString | trim }}
 {{- $nodeBase := get (.Values.controller | default dict) "nodeBase" | default "/var/lib/cellbox" | toString | trim }}
 {{- $runsc := get (.Values.controller | default dict) "runsc" | default "/usr/local/bin/runsc" | toString | trim }}
+{{- $shim := get (.Values.controller | default dict) "shim" | default "/usr/local/bin/containerd-shim-runsc-v1" | toString | trim }}
 {{- $runtimeClass := .Values.runtimeClass | default dict }}
 {{- $runtimeClassName := get $runtimeClass "name" | default "runsc-recoverable" | toString | trim }}
 {{- $runtimeHandler := get $runtimeClass "handler" | toString | trim }}
@@ -19,6 +20,7 @@
 {{- if ne $dataDir "/var/lib/cellbox-data" }}{{- fail "api.config.dataDir must be /var/lib/cellbox-data to use the configured persistent storage" }}{{- end }}
 {{- if or (not (hasPrefix "/" $nodeBase)) (eq $nodeBase "/") (hasSuffix "/" $nodeBase) (contains "//" $nodeBase) (regexMatch "(^|/)\\.{1,2}(/|$)" $nodeBase) }}{{- fail "controller.nodeBase must be a clean absolute path other than /" }}{{- end }}
 {{- if or (not (hasPrefix "/" $runsc)) (eq $runsc "/") (hasSuffix "/" $runsc) (contains "//" $runsc) (regexMatch "(^|/)\\.{1,2}(/|$)" $runsc) }}{{- fail "controller.runsc must be a clean absolute file path" }}{{- end }}
+{{- if or (not (hasPrefix "/" $shim)) (eq $shim "/") (hasSuffix "/" $shim) (contains "//" $shim) (regexMatch "(^|/)\\.{1,2}(/|$)" $shim) }}{{- fail "controller.shim must be a clean absolute file path" }}{{- end }}
 {{- if ne (int .Values.api.replicas) 1 }}{{- fail "api.replicas must be 1; the API has a single active Lease owner" }}{{- end }}
 {{- if eq $storageClaim "" }}
   {{- if or (not (hasPrefix "/" $storageHostPath)) (eq $storageHostPath "/") (hasSuffix "/" $storageHostPath) (contains "//" $storageHostPath) (regexMatch "(^|/)\\.{1,2}(/|$)" $storageHostPath) }}{{- fail "storage.hostPath must be a clean absolute path other than /" }}{{- end }}
@@ -111,6 +113,7 @@ spec:
             - --runtime-handler={{ $runtimeHandler }}
             - --node-base={{ $nodeBase }}
             - --runsc={{ $runsc }}
+            - --shim={{ $shim }}
             - --host-mount-namespace
             - --cri-socket={{ .Values.controller.criSocket }}
             {{- if .Values.buildkit.enabled }}

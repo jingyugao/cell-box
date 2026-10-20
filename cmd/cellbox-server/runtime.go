@@ -33,7 +33,7 @@ type nodeOptions struct {
 	Node, Namespace, Socket string
 	RuntimeClass            string
 	RuntimeHandler          string
-	NodeBase, Runsc         string
+	NodeBase, Runsc, Shim   string
 	HostMountNamespace      bool
 	WarmPoolSize            int
 }
@@ -66,8 +66,15 @@ func (o nodeOptions) runsc() string {
 	return node.DefaultRunsc
 }
 
+func (o nodeOptions) shim() string {
+	if o.Shim != "" {
+		return o.Shim
+	}
+	return node.DefaultShim
+}
+
 func (o nodeOptions) validate(config service.Config) error {
-	for _, entry := range []struct{ name, path string }{{"node-base", o.nodeBase()}, {"runsc", o.runsc()}} {
+	for _, entry := range []struct{ name, path string }{{"node-base", o.nodeBase()}, {"runsc", o.runsc()}, {"shim", o.shim()}} {
 		if !filepath.IsAbs(entry.path) || filepath.Clean(entry.path) != entry.path || entry.path == "/" || strings.ContainsAny(entry.path, "\x00\r\n") {
 			return fmt.Errorf("--%s must be a clean absolute path other than /", entry.name)
 		}
@@ -128,6 +135,7 @@ func newRuntime(kube *rest.Config, options nodeOptions, readDesired func(context
 	}()
 	backend.Base = options.nodeBase()
 	backend.Runsc = options.runsc()
+	backend.Shim = options.shim()
 	backend.RuntimeHandler = options.runtimeHandler()
 	backend.HostMountNamespace = options.HostMountNamespace
 	backend.Prefetch = node.NewPrefetchManager(backend.Base, backend.HostMountNamespace)
