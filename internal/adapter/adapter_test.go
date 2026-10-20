@@ -11,6 +11,19 @@ import (
 	"testing"
 )
 
+func TestConfiguredRuntimeUsesRootEnvironmentOverrides(t *testing.T) {
+	t.Setenv("CELLBOX_NODE_BASE", "")
+	t.Setenv("CELLBOX_RUNSC", "")
+	if got := configuredRuntime(); got.Base != node.DefaultBase || got.Runsc != node.DefaultRunsc {
+		t.Fatalf("default runtime = %+v", got)
+	}
+	t.Setenv("CELLBOX_NODE_BASE", "/var/lib/cellbox-dev")
+	t.Setenv("CELLBOX_RUNSC", "/opt/cellbox-dev/runsc")
+	if got := configuredRuntime(); got.Base != "/var/lib/cellbox-dev" || got.Runsc != "/opt/cellbox-dev/runsc" {
+		t.Fatalf("environment runtime = %+v", got)
+	}
+}
+
 func TestAuthorizationAndSingleExecution(t *testing.T) {
 	base := t.TempDir()
 	a := Adapter{Base: base, Runsc: "/unused"}

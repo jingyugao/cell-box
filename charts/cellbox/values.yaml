@@ -18,6 +18,9 @@ crd:
   create: true
 runtimeClass:
   create: true
+  name: runsc-recoverable
+  # Empty uses runtimeClass.name as the CRI handler.
+  handler: ""
 # One durable local directory for SQLite metadata, build logs, and archive download validation temps.
 # It is mounted on the single node selected by server.nodeName.
 storage:
@@ -41,6 +44,8 @@ controller:
   extraEnv: []
   criDirectory: /run/containerd
   criSocket: /run/containerd/containerd.sock
+  nodeBase: /var/lib/cellbox
+  runsc: /usr/local/bin/runsc
   # Provision gVisor, the wrapper, and runtime configuration manually on each node.
   nodeSelector:
     kubernetes.io/os: linux

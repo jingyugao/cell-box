@@ -31,9 +31,25 @@ import (
 
 type Reconciler struct {
 	client.Client
-	Runtime  runtime.Backend
-	NodeName string
-	WarmPool *WarmPool
+	Runtime      runtime.Backend
+	NodeName     string
+	NodeBase     string
+	RuntimeClass string
+	WarmPool     *WarmPool
+}
+
+func (r *Reconciler) nodeBase() string {
+	if r.NodeBase != "" {
+		return r.NodeBase
+	}
+	return homevolume.DefaultBase
+}
+
+func (r *Reconciler) runtimeClass() string {
+	if r.RuntimeClass != "" {
+		return r.RuntimeClass
+	}
+	return api.RuntimeClass
 }
 
 type inventoryRuntime interface {
@@ -149,10 +165,14 @@ func mountVolumeName(mount api.VolumeMount, index int) string {
 	return fmt.Sprintf("cellbox-volume-%d", index)
 }
 
-func hostVolumes(w *api.ResumablePod) []core.Volume {
+func hostVolumes(w *api.ResumablePod, nodeBases ...string) []core.Volume {
+	nodeBase := homevolume.DefaultBase
+	if len(nodeBases) != 0 && nodeBases[0] != "" {
+		nodeBase = nodeBases[0]
+	}
 	volumes := debugHostVolumes(w)
 	for i, mount := range workloadMounts(w) {
-		home, _ := homevolume.Path(homevolume.DefaultBase, mount.UID) // validate checks each volume UID first.
+		home, _ := homevolume.Path(nodeBase, mount.UID) // validate checks each volume UID first.
 		directory := core.HostPathDirectory
 		volumes = append(volumes, core.Volume{Name: mountVolumeName(mount, i), VolumeSource: core.VolumeSource{HostPath: &core.HostPathVolumeSource{Path: home, Type: &directory}}})
 	}
@@ -172,7 +192,7 @@ func hostMounts(w *api.ResumablePod) []core.VolumeMount {
 	}
 	return mounts
 }
-func admittedDebugMount(w *api.ResumablePod, p *core.Pod) bool {
+func admittedDebugMount(w *api.ResumablePod, p *core.Pod, nodeBases ...string) bool {
 	if len(p.Spec.Containers) != 1 {
 		return false
 	}
@@ -185,7 +205,7 @@ func admittedDebugMount(w *api.ResumablePod, p *core.Pod) bool {
 		template.Spec.HomeVolumeUID = ""
 		template.Spec.Mounts = nil
 	}
-	wantVolumes, wantMounts := hostVolumes(template), hostMounts(template)
+	wantVolumes, wantMounts := hostVolumes(template, nodeBases...), hostMounts(template)
 	if len(p.Spec.Volumes) != len(wantVolumes) || len(p.Spec.Containers[0].VolumeMounts) != len(wantMounts) {
 		return false
 	}
@@ -194,14 +214,18 @@ func admittedDebugMount(w *api.ResumablePod, p *core.Pod) bool {
 	}
 	return reflect.DeepEqual(p.Spec.Volumes, wantVolumes) && reflect.DeepEqual(p.Spec.Containers[0].VolumeMounts, wantMounts)
 }
-func validate(w *api.ResumablePod) error {
+func validate(w *api.ResumablePod, nodeBases ...string) error {
+	nodeBase := homevolume.DefaultBase
+	if len(nodeBases) != 0 && nodeBases[0] != "" {
+		nodeBase = nodeBases[0]
+	}
 	c := w.Spec.Container
 	if w.Spec.PersistentHome {
 		owner := string(w.UID)
 		if w.Spec.HomeVolumeUID != "" {
 			owner = w.Spec.HomeVolumeUID
 		}
-		if _, err := homevolume.Path(homevolume.DefaultBase, owner); err != nil {
+		if _, err := homevolume.Path(nodeBase, owner); err != nil {
 			return err
 		}
 	} else if w.Spec.HomeVolumeUID != "" {
@@ -212,7 +236,7 @@ func validate(w *api.ResumablePod) error {
 			return fmt.Errorf("mounts must not be empty when specified")
 		}
 		for i, mount := range w.Spec.Mounts {
-			if _, err := homevolume.Path(homevolume.DefaultBase, mount.UID); err != nil {
+			if _, err := homevolume.Path(nodeBase, mount.UID); err != nil {
 				return fmt.Errorf("mount %d UID: %w", i, err)
 			}
 			if !path.IsAbs(mount.MountPath) || path.Clean(mount.MountPath) != mount.MountPath || mount.MountPath == "/" || len(mount.MountPath) > 4096 || strings.ContainsAny(mount.MountPath, "\x00\r\n") {
@@ -620,7 +644,7 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (traceResu
 		}
 		return r.phase(ctx, w, "Failed", w.Status.Message)
 	}
-	if validationErr := validate(w); validationErr != nil {
+	if validationErr := validate(w, r.nodeBase()); validationErr != nil {
 		if w.Status.Phase == "Failed" {
 			return again, nil
 		}
@@ -673,7 +697,7 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (traceResu
 			if w.Status.PodUID != "" {
 				return fail(fmt.Errorf("Pod disappeared during startup; refusing replacement"))
 			}
-			p = executionPod(w, w.Status.PodName)
+			p = executionPod(w, w.Status.PodName, r.runtimeClass(), r.nodeBase())
 			if err = controllerutil.SetControllerReference(w, p, r.Scheme()); err != nil {
 				return again, err
 			}
@@ -692,7 +716,7 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (traceResu
 		if p.DeletionTimestamp != nil {
 			return fail(fmt.Errorf("Pod deleted during startup"))
 		}
-		if !admittedDebugMount(w, p) || len(p.Spec.InitContainers) > 0 || len(p.Spec.EphemeralContainers) > 0 || (p.Spec.NodeName != "" && p.Spec.NodeName != r.NodeName) || p.Spec.RuntimeClassName == nil || *p.Spec.RuntimeClassName != api.RuntimeClass || p.Spec.HostNetwork || p.Spec.HostPID || p.Spec.HostIPC || p.Spec.RestartPolicy != core.RestartPolicyNever || p.Spec.AutomountServiceAccountToken == nil || *p.Spec.AutomountServiceAccountToken {
+		if !admittedDebugMount(w, p, r.nodeBase()) || len(p.Spec.InitContainers) > 0 || len(p.Spec.EphemeralContainers) > 0 || (p.Spec.NodeName != "" && p.Spec.NodeName != r.NodeName) || p.Spec.RuntimeClassName == nil || *p.Spec.RuntimeClassName != r.runtimeClass() || p.Spec.HostNetwork || p.Spec.HostPID || p.Spec.HostIPC || p.Spec.RestartPolicy != core.RestartPolicyNever || p.Spec.AutomountServiceAccountToken == nil || *p.Spec.AutomountServiceAccountToken {
 			return fail(fmt.Errorf("admitted Pod violates container, debug mount or node constraints"))
 		}
 		if len(p.Spec.SchedulingGates) > 0 {

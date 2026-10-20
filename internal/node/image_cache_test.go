@@ -43,6 +43,10 @@ func TestCacheImageUsesRuntimeStoreAndPropagatesPullFailure(t *testing.T) {
 	if images.handler != api.RuntimeClass {
 		t.Fatal("image cached for a different runtime")
 	}
+	b.RuntimeHandler = "gvisor-bench-pause"
+	if err := b.CacheImage(context.Background(), "prepared@sha256:other"); err != nil || images.handler != b.RuntimeHandler {
+		t.Fatalf("image cached with wrong runtime handler %q: %v", images.handler, err)
+	}
 	images.err = errors.New("registry unavailable")
 	if err := b.CacheImage(context.Background(), "prepared@sha256:digest"); !errors.Is(err, images.err) {
 		t.Fatalf("pull failure hidden: %v", err)

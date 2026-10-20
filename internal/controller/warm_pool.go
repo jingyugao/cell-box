@@ -12,6 +12,7 @@ import (
 
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/boxprovider"
+	"cellbox.local/cellbox/internal/homevolume"
 	"cellbox.local/cellbox/internal/runtimecontrol"
 	"cellbox.local/cellbox/internal/warmtemplates"
 	core "k8s.io/api/core/v1"
@@ -78,26 +79,32 @@ func (p *WarmPool) Start(ctx context.Context) error {
 	}
 }
 
-func executionPod(w *api.ResumablePod, name string) *core.Pod {
+func executionPod(w *api.ResumablePod, name string, settings ...string) *core.Pod {
 	no := false
 	grace := int64(3)
-	runtime := api.RuntimeClass
+	runtimeClass, nodeBase := api.RuntimeClass, homevolume.DefaultBase
+	if len(settings) > 0 && settings[0] != "" {
+		runtimeClass = settings[0]
+	}
+	if len(settings) > 1 && settings[1] != "" {
+		nodeBase = settings[1]
+	}
 	// Resolve external CLI hostnames before cluster search suffixes. A suffix
 	// answered by upstream fake-IP DNS can otherwise route Go TLS to the wrong host.
 	ndots := "1"
 	container := *w.Spec.Container.DeepCopy()
 	container.VolumeMounts = hostMounts(w)
-	return &core.Pod{ObjectMeta: meta.ObjectMeta{Name: name, Namespace: w.Namespace, Labels: map[string]string{api.OwnerLabel: string(w.UID)}}, Spec: core.PodSpec{DNSConfig: &core.PodDNSConfig{Options: []core.PodDNSConfigOption{{Name: "ndots", Value: &ndots}}}, Containers: []core.Container{container}, Volumes: hostVolumes(w), RuntimeClassName: &runtime, RestartPolicy: core.RestartPolicyNever, AutomountServiceAccountToken: &no, EnableServiceLinks: &no, Hostname: "recoverable", TerminationGracePeriodSeconds: &grace, NodeSelector: map[string]string{"kubernetes.io/hostname": w.Spec.NodeName}, SchedulingGates: []core.PodSchedulingGate{{Name: api.Gate}}}}
+	return &core.Pod{ObjectMeta: meta.ObjectMeta{Name: name, Namespace: w.Namespace, Labels: map[string]string{api.OwnerLabel: string(w.UID)}}, Spec: core.PodSpec{DNSConfig: &core.PodDNSConfig{Options: []core.PodDNSConfigOption{{Name: "ndots", Value: &ndots}}}, Containers: []core.Container{container}, Volumes: hostVolumes(w, nodeBase), RuntimeClassName: &runtimeClass, RestartPolicy: core.RestartPolicyNever, AutomountServiceAccountToken: &no, EnableServiceLinks: &no, Hostname: "recoverable", TerminationGracePeriodSeconds: &grace, NodeSelector: map[string]string{"kubernetes.io/hostname": w.Spec.NodeName}, SchedulingGates: []core.PodSchedulingGate{{Name: api.Gate}}}}
 }
 
-func warmExecutionPod(w *api.ResumablePod, name string) *core.Pod {
+func warmExecutionPod(w *api.ResumablePod, name string, settings ...string) *core.Pod {
 	template := w.DeepCopy()
 	// Only the root sandbox is precreated. Its eventual child Gofer receives
 	// the claimed Box's HOME from the adapter, never from this template Box.
 	template.Spec.PersistentHome = false
 	template.Spec.HomeVolumeUID = ""
 	template.Spec.Mounts = nil
-	return executionPod(template, name)
+	return executionPod(template, name, settings...)
 }
 
 func (p *WarmPool) pods(ctx context.Context, options ...client.ListOption) ([]core.Pod, error) {
@@ -267,7 +274,7 @@ func (p *WarmPool) reconcilePools(ctx context.Context, configured []warmtemplate
 			continue
 		}
 		w := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{Name: configuredTemplate.ID, Namespace: p.Namespace, UID: types.UID("00000000-0000-4000-8000-000000000001")}, Spec: configuredTemplate.Spec}
-		if err := validate(w); err != nil {
+		if err := validate(w, p.Reconciler.nodeBase()); err != nil {
 			return fmt.Errorf("invalid warm template %q: %w", configuredTemplate.ID, err)
 		}
 		hash := fingerprint(w)
@@ -378,7 +385,7 @@ func (p *WarmPool) reconcilePools(ctx context.Context, configured []warmtemplate
 		if restoring {
 			return nil
 		}
-		pod := warmExecutionPod(templates[hash], "")
+		pod := warmExecutionPod(templates[hash], "", r.runtimeClass(), r.nodeBase())
 		pod.GenerateName = "cb-warm-"
 		pod.Labels = map[string]string{warmLabel: "true", api.ServingLabel: "false"}
 		pod.Annotations = map[string]string{warmSpec: hash}
@@ -403,7 +410,7 @@ func (p *WarmPool) publishSnapshot(ctx context.Context, configured []warmtemplat
 			continue
 		}
 		w := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{Name: template.ID, Namespace: p.Namespace, UID: types.UID("00000000-0000-4000-8000-000000000001")}, Spec: template.Spec}
-		if err := validate(w); err != nil {
+		if err := validate(w, p.Reconciler.nodeBase()); err != nil {
 			return fmt.Errorf("invalid warm template %q: %w", template.ID, err)
 		}
 		hash := fingerprint(w)
@@ -583,7 +590,7 @@ func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (result *co
 		if owner != nil && !owned(w, pod) {
 			continue
 		}
-		if pod.Annotations[warmSpec] != warmHash || pod.DeletionTimestamp != nil || !admittedDebugMount(w, pod) {
+		if pod.Annotations[warmSpec] != warmHash || pod.DeletionTimestamp != nil || !admittedDebugMount(w, pod, r.nodeBase()) || pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != r.runtimeClass() {
 			continue
 		}
 		if owned(w, pod) {

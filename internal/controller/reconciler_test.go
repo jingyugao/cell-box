@@ -4,6 +4,7 @@ package controller
 
 import (
 	api "cellbox.local/cellbox/api/v1alpha1"
+	"cellbox.local/cellbox/internal/homevolume"
 	lifecycle "cellbox.local/cellbox/internal/runtime"
 	"context"
 	"encoding/json"
@@ -259,6 +260,36 @@ func TestPullPolicyRequiresImmutableImage(t *testing.T) {
 	w.Status.SpecHash = fingerprint(w)
 	if err := validate(w); err == nil {
 		t.Fatal("unsupported pull policy accepted")
+	}
+}
+
+func TestExecutionPodUsesConfiguredRuntimeClassAndNodeBase(t *testing.T) {
+	const nodeBase = "/var/lib/cellbox-dev"
+	const runtimeClass = "runsc-cellbox-dev"
+	w := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{Name: "counter", Namespace: "test", UID: "12345678-aaaa"}, Spec: api.Spec{DesiredState: "Running", PersistentHome: true, Container: core.Container{Name: "server", Image: "image:local", ImagePullPolicy: core.PullNever}}}
+	p := executionPod(w, "execution", runtimeClass, nodeBase)
+	if p.Spec.RuntimeClassName == nil || *p.Spec.RuntimeClassName != runtimeClass {
+		t.Fatalf("execution Pod RuntimeClass = %v, want %q", p.Spec.RuntimeClassName, runtimeClass)
+	}
+	wantHome, err := homevolume.Path(nodeBase, string(w.UID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, volume := range p.Spec.Volumes {
+		if volume.Name == "agent-home" && volume.HostPath != nil && volume.HostPath.Path == wantHome {
+			found = true
+		}
+	}
+	if !found || !admittedDebugMount(w, p, nodeBase) {
+		t.Fatalf("custom node base was not used for the Pod volume: %+v", p.Spec.Volumes)
+	}
+	if err := validate(w, nodeBase); err != nil {
+		t.Fatalf("valid workload rejected with custom base: %v", err)
+	}
+	r := &Reconciler{RuntimeClass: runtimeClass}
+	if r.runtimeClass() != runtimeClass || (&Reconciler{}).runtimeClass() != api.RuntimeClass {
+		t.Fatal("Reconciler RuntimeClass default/override mismatch")
 	}
 }
 func step(t *testing.T, r *Reconciler, w *api.ResumablePod) {

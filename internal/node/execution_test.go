@@ -26,8 +26,9 @@ func (c *executionCRI) PodSandboxStatus(context.Context, *cri.PodSandboxStatusRe
 func TestWarmExecutionRequiresStartedBusinessContainer(t *testing.T) {
 	p := &core.Pod{ObjectMeta: meta.ObjectMeta{Name: "warm", Namespace: "boxes", UID: "uid"}}
 	w := &api.ResumablePod{Spec: api.Spec{Container: core.Container{Name: "guest"}}}
-	c := &executionCRI{sandbox: &cri.PodSandboxStatus{Id: "sandbox", Metadata: &cri.PodSandboxMetadata{Name: p.Name, Namespace: p.Namespace, Uid: string(p.UID)}, RuntimeHandler: api.RuntimeClass, State: cri.PodSandboxState_SANDBOX_READY, Network: &cri.PodSandboxNetworkStatus{Ip: "10.42.0.2"}}}
-	b := &Backend{Runtime: c}
+	const runtimeHandler = "gvisor-bench-pause"
+	c := &executionCRI{sandbox: &cri.PodSandboxStatus{Id: "sandbox", Metadata: &cri.PodSandboxMetadata{Name: p.Name, Namespace: p.Namespace, Uid: string(p.UID)}, RuntimeHandler: runtimeHandler, State: cri.PodSandboxState_SANDBOX_READY, Network: &cri.PodSandboxNetworkStatus{Ip: "10.42.0.2"}}}
+	b := &Backend{Runtime: c, RuntimeHandler: runtimeHandler}
 	check := func(want bool) {
 		t.Helper()
 		e, err := b.warmExecution(context.Background(), w, p, "sandbox")
@@ -48,5 +49,10 @@ func TestWarmExecutionRequiresStartedBusinessContainer(t *testing.T) {
 	c.sandbox.Metadata.Uid = "other"
 	if _, err := b.warmExecution(context.Background(), w, p, "sandbox"); err == nil {
 		t.Fatal("another sandbox accepted")
+	}
+	c.sandbox.Metadata.Uid = string(p.UID)
+	c.sandbox.RuntimeHandler = api.RuntimeClass
+	if _, err := b.warmExecution(context.Background(), w, p, "sandbox"); err == nil {
+		t.Fatal("sandbox running under another CRI handler accepted")
 	}
 }

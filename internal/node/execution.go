@@ -106,7 +106,7 @@ func (b *Backend) warmExecution(ctx context.Context, w *api.ResumablePod, p *cor
 		return nil, err
 	}
 	s := sandbox.Status
-	if s == nil || s.Id != sid || s.Metadata == nil || s.Metadata.Uid != string(p.UID) || s.Metadata.Name != p.Name || s.Metadata.Namespace != p.Namespace || s.Metadata.Attempt != 0 || s.RuntimeHandler != api.RuntimeClass {
+	if s == nil || s.Id != sid || s.Metadata == nil || s.Metadata.Uid != string(p.UID) || s.Metadata.Name != p.Name || s.Metadata.Namespace != p.Namespace || s.Metadata.Attempt != 0 || s.RuntimeHandler != b.runtimeHandler() {
 		return nil, fmt.Errorf("warm sandbox identity changed")
 	}
 	if s.State != cri.PodSandboxState_SANDBOX_READY || s.Network == nil || net.ParseIP(s.Network.Ip) == nil {

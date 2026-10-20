@@ -6,8 +6,25 @@ import (
 	"testing"
 	"time"
 
+	api "cellbox.local/cellbox/api/v1alpha1"
+	"cellbox.local/cellbox/internal/node"
 	"cellbox.local/cellbox/internal/service"
 )
+
+func TestNodeOptionsRuntimeDefaultsAndOverrides(t *testing.T) {
+	defaults := nodeOptions{}
+	if defaults.runtimeClass() != api.RuntimeClass || defaults.runtimeHandler() != api.RuntimeClass || defaults.nodeBase() != node.DefaultBase || defaults.runsc() != node.DefaultRunsc {
+		t.Fatalf("unexpected defaults: class=%q handler=%q base=%q runsc=%q", defaults.runtimeClass(), defaults.runtimeHandler(), defaults.nodeBase(), defaults.runsc())
+	}
+	custom := nodeOptions{RuntimeClass: "runsc-cellbox-dev", RuntimeHandler: "gvisor-bench-pause", NodeBase: "/var/lib/cellbox-dev", Runsc: "/opt/cellbox-dev/runsc"}
+	if custom.runtimeClass() != "runsc-cellbox-dev" || custom.runtimeHandler() != "gvisor-bench-pause" || custom.nodeBase() != "/var/lib/cellbox-dev" || custom.runsc() != "/opt/cellbox-dev/runsc" {
+		t.Fatalf("custom runtime settings were not preserved: %+v", custom)
+	}
+	custom.RuntimeHandler = ""
+	if custom.runtimeHandler() != custom.RuntimeClass {
+		t.Fatalf("empty CRI handler should default to RuntimeClass: got %q", custom.runtimeHandler())
+	}
+}
 
 func TestServerRejectsProfilesAssignedToAnotherRuntime(t *testing.T) {
 	options := nodeOptions{Node: "node-a", Namespace: "cell-box", Socket: "/run/containerd/containerd.sock", WarmPoolSize: 2}
@@ -21,6 +38,8 @@ func TestServerRejectsProfilesAssignedToAnotherRuntime(t *testing.T) {
 		{Namespace: options.Namespace, Socket: options.Socket},
 		{Node: options.Node, Namespace: options.Namespace},
 		{Node: options.Node, Namespace: options.Namespace, Socket: options.Socket, WarmPoolSize: 33},
+		{Node: options.Node, Namespace: options.Namespace, Socket: options.Socket, NodeBase: "/"},
+		{Node: options.Node, Namespace: options.Namespace, Socket: options.Socket, Runsc: "bin/runsc"},
 	} {
 		if err := wrong.validate(config); err == nil {
 			t.Fatalf("accepted wrong local runtime: %+v", wrong)

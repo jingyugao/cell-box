@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,6 +28,7 @@ import (
 
 type Backend struct {
 	Base, Runsc, Root string
+	RuntimeHandler    string
 	Socket            string
 	// HostMountNamespace runs runsc in the node's mount/root namespace when the
 	// controller itself is running in a hostPID privileged DaemonSet Pod.
@@ -38,6 +40,14 @@ type Backend struct {
 	// assigned node under Base; Checkpoints stores only their inventory records.
 	Objects     objectstorage.Objects
 	Checkpoints inventory.CheckpointStore
+	Prefetch    *PrefetchManager
+}
+
+func (b *Backend) runtimeHandler() string {
+	if b.RuntimeHandler != "" {
+		return b.RuntimeHandler
+	}
+	return DefaultRuntimeHandler
 }
 
 func New(socket string) (*Backend, error) {
@@ -49,10 +59,11 @@ func New(socket string) (*Backend, error) {
 }
 
 func (b *Backend) Close() error {
+	result := b.Prefetch.Close()
 	if b.connection != nil {
-		return b.connection.Close()
+		result = errors.Join(result, b.connection.Close())
 	}
-	return nil
+	return result
 }
 func (b *Backend) command(ctx context.Context, args ...string) error {
 	commandName := "unknown"
@@ -105,7 +116,7 @@ func (b *Backend) sandboxes(ctx context.Context, p *core.Pod) ([]*cri.PodSandbox
 	var out []*cri.PodSandbox
 	for _, s := range res.Items {
 		m := s.Metadata
-		if m == nil || m.Uid != string(p.UID) || m.Namespace != p.Namespace || m.Name != p.Name || s.RuntimeHandler != api.RuntimeClass {
+		if m == nil || m.Uid != string(p.UID) || m.Namespace != p.Namespace || m.Name != p.Name || s.RuntimeHandler != b.runtimeHandler() {
 			return nil, fmt.Errorf("CRI sandbox identity/runtime mismatch")
 		}
 		out = append(out, s)
@@ -245,6 +256,9 @@ func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.P
 	if _, err = VerifyCached(path, string(r.UID), r.Status.SpecHash, b.Runsc); err != nil {
 		return err
 	}
+	if _, err := b.Prefetch.Capture(ctx, string(r.UID), r.Status.Snapshot); err != nil {
+		log.Printf("checkpoint prefetch capture %s/%s: %v", r.UID, r.Status.Snapshot, err)
+	}
 	return nil
 }
 
@@ -322,6 +336,14 @@ func (b *Backend) prepareSnapshot(ctx context.Context, r *api.ResumablePod) erro
 		if _, err = b.verifySnapshotImage(ctx, r, path); err != nil {
 			return err
 		}
+		if _, err := LoadRestorePolicy(b.Base); err != nil {
+			return err
+		}
+		// This task has its own deadline and runs alongside the normal restore.
+		// Its failure is recorded and falls back to demand paging.
+		if err := b.Prefetch.Start(string(r.UID), r.Status.Snapshot); err != nil {
+			log.Printf("checkpoint prefetch start %s/%s: %v", r.UID, r.Status.Snapshot, err)
+		}
 	}
 	return nil
 }
@@ -398,6 +420,11 @@ func (b *Backend) Cleanup(ctx context.Context, p *core.Pod) error {
 			return err
 		}
 		if t.PodUID == string(p.UID) && t.PodName == p.Name && t.Namespace == p.Namespace {
+			if t.Snapshot != "" {
+				if err := b.Prefetch.Cancel(t.OwnerUID, t.Snapshot); err != nil {
+					return err
+				}
+			}
 			id := strings.TrimSuffix(entry.Name(), ".json")
 			if len(id) != 64 || !ValidID(id) {
 				return fmt.Errorf("invalid request sandbox ID")
@@ -444,6 +471,11 @@ func (b *Backend) Cleanup(ctx context.Context, p *core.Pod) error {
 func (b *Backend) Forget(ctx context.Context, r *api.ResumablePod) error {
 	if !ValidID(string(r.UID)) {
 		return fmt.Errorf("invalid owner UID")
+	}
+	if r.Status.Snapshot != "" {
+		if err := b.Prefetch.Cancel(string(r.UID), r.Status.Snapshot); err != nil {
+			return err
+		}
 	}
 	deleting := r.DeletionTimestamp != nil
 	if b.Checkpoints != nil {
