@@ -29,6 +29,16 @@ type RestorePolicy struct {
 
 func (p RestorePolicy) noRoot() bool { return p.SandboxMode == "no-root" }
 
+// PageLoadingFor preserves the runtime default when a legacy root checkpoint
+// is restored under the new no-root policy. Explicit root policies still apply
+// their selected page-loading mode.
+func (p RestorePolicy) PageLoadingFor(noRoot bool) string {
+	if !noRoot && p.noRoot() {
+		return ""
+	}
+	return p.PageLoading
+}
+
 // DefaultRestorePolicy is the policy for new executions. Existing checkpoints
 // retain the sandbox mode sealed in their manifest. Legacy installations can
 // explicitly select root/eager while retaining their matching gVisor binary.

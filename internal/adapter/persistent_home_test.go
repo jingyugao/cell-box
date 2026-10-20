@@ -65,7 +65,7 @@ func TestPersistentHomeIsConsumedBeforeRestoreStarts(t *testing.T) {
 		t.Fatal(err)
 	}
 	args, err := a.Rewrite([]string{"--root=/run/test", "start", sid})
-	want := []string{"--root=/run/test", "--restore-page-loading=lazy", "restore", "--background", "--detach", "--image-path=" + snapshot, sid}
+	want := []string{"--root=/run/test", "restore", "--background", "--detach", "--image-path=" + snapshot, sid}
 	if err != nil || !reflect.DeepEqual(args, want) {
 		t.Fatalf("restore rewrite: %v %v", args, err)
 	}
