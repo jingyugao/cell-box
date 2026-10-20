@@ -90,6 +90,15 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 			return nil, fmt.Errorf("persistent volume attachment: %w", err)
 		}
 		if t.Snapshot != "" {
+			// Only root creation precedes execution's claim of a suspended
+			// HOME. Child creation/start must verify the active Pod's claim.
+			for _, mount := range uniqueTicketMounts(ticketMounts(t)) {
+				if mount.Legacy {
+					if err := homevolume.ValidateCheckpoint(a.Base, mount.UID, mount.HomeID, t.Snapshot); err != nil {
+						return nil, fmt.Errorf("volume %s checkpoint: %w", mount.UID, err)
+					}
+				}
+			}
 			path, err := node.SnapshotPath(a.Base, t.OwnerUID, t.Snapshot)
 			if err != nil {
 				return nil, err
@@ -263,11 +272,6 @@ func (a Adapter) verifyVolumeIdentities(t node.Ticket) error {
 		}
 		if identity.ID != mount.HomeID {
 			return fmt.Errorf("volume %s identity mismatch", mount.UID)
-		}
-		if t.Snapshot != "" && mount.Legacy {
-			if err = homevolume.ValidateCheckpoint(a.Base, mount.UID, mount.HomeID, t.Snapshot); err != nil {
-				return fmt.Errorf("volume %s checkpoint: %w", mount.UID, err)
-			}
 		}
 	}
 	return nil

@@ -69,6 +69,24 @@ func TestPersistentHomeIsConsumedBeforeRestoreStarts(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(args, want) {
 		t.Fatalf("restore rewrite: %v %v", args, err)
 	}
+	// Root restore consumes the suspended HOME/checkpoint pair. Its business
+	// container must now validate the active Pod's claim rather than requiring
+	// the HOME to still be suspended at the old checkpoint.
+	childBundle := filepath.Join(base, "restored-child")
+	if err := node.AtomicJSON(filepath.Join(childBundle, "config.json"), map[string]any{"mounts": []any{}}); err != nil {
+		t.Fatal(err)
+	}
+	childID := strings.Repeat("c", 64)
+	annotations := map[string]string{
+		"io.kubernetes.cri.sandbox-id": sid, "io.kubernetes.cri.sandbox-uid": "new-pod",
+		"io.kubernetes.cri.sandbox-name": "new-pod", "io.kubernetes.cri.sandbox-namespace": "test",
+	}
+	if err := a.childCreate(childID, annotations, childBundle); err != nil {
+		t.Fatalf("restored child create: %v", err)
+	}
+	if err := a.childStart(childID); err != nil {
+		t.Fatalf("restored child start: %v", err)
+	}
 	if err = homevolume.ValidateCheckpoint(base, "owner", home.ID, "snapshot"); err == nil {
 		t.Fatal("snapshot still eligible after authorizing restored code")
 	}
