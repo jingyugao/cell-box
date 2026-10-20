@@ -208,7 +208,9 @@ func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.P
 	if err = AtomicJSON(filepath.Join(pending, "intent.json"), map[string]string{"podUID": string(p.UID), "sandboxID": live[0].Id}); err != nil {
 		return err
 	}
-	if err = b.command(ctx, "checkpoint", "--image-path="+pending, live[0].Id); err != nil {
+	// Separate page files allow background and demand-only restore to read
+	// individual pages without first decompressing the entire checkpoint.
+	if err = b.command(ctx, "checkpoint", "--compression=none", "--image-path="+pending, live[0].Id); err != nil {
 		return err
 	}
 	checkpointMounts := uniqueVolumeMounts(mounts)
