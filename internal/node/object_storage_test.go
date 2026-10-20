@@ -149,7 +149,7 @@ func (m *memoryObjects) DeletePrefix(_ context.Context, prefix string) error {
 	return nil
 }
 
-func testCheckpoint(t *testing.T, base, owner, snapshot, spec, imageID, runsc string) string {
+func testCheckpoint(t *testing.T, base, owner, snapshot, spec, imageID, runsc string, noRoot ...bool) string {
 	t.Helper()
 	path, err := SnapshotPath(base, owner, snapshot)
 	if err != nil {
@@ -165,7 +165,7 @@ func testCheckpoint(t *testing.T, base, owner, snapshot, spec, imageID, runsc st
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = Seal(path, Manifest{OwnerUID: owner, SpecHash: spec, ImageID: imageID, RunscHash: hash}); err != nil {
+	if err = Seal(path, Manifest{OwnerUID: owner, SpecHash: spec, ImageID: imageID, RunscHash: hash, NoRoot: len(noRoot) > 0 && noRoot[0]}); err != nil {
 		t.Fatal(err)
 	}
 	return path

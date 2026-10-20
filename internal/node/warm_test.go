@@ -46,7 +46,7 @@ func TestWarmPersistentHomeAuthorization(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := Seal(path, Manifest{OwnerUID: owner, SpecHash: "spec", ImageID: "image-id", RunscHash: hash, HomeID: h.ID}); err != nil {
+		if err := Seal(path, Manifest{OwnerUID: owner, SpecHash: "spec", ImageID: "image-id", RunscHash: hash, HomeID: h.ID, NoRoot: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -163,7 +163,7 @@ func TestWarmClaimRaceAndExpiry(t *testing.T) {
 	}
 	b := &Backend{Base: base, Runsc: bin, Images: imageClient{id: "image-id"}}
 	for _, owner := range []string{"a", "b"} {
-		path := testCheckpoint(t, base, owner, "snapshot", "spec", "image-id", bin)
+		path := testCheckpoint(t, base, owner, "snapshot", "spec", "image-id", bin, true)
 		if _, err := VerifyCached(path, owner, "spec", bin); err != nil {
 			t.Fatal(err)
 		}

@@ -268,7 +268,7 @@ func TestTemplateFamilyAndRevisionAPIContract(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Error(err)
 			}
-			if body.Name != "python" || body.Description != "python env" || body.DefaultWarmSlots != 2 {
+			if body.Name != "python" || body.Description != "python env" || body.DefaultWarmSlots == nil || *body.DefaultWarmSlots != 2 {
 				t.Errorf("create template body = %+v", body)
 			}
 			w.WriteHeader(http.StatusCreated)
@@ -319,7 +319,8 @@ func TestTemplateFamilyAndRevisionAPIContract(t *testing.T) {
 	defer server.Close()
 	client := testClient(t, server, "")
 
-	template, err := client.CreateTemplate(context.Background(), CreateTemplateOptions{Name: "python", Description: "python env", DefaultWarmSlots: 2})
+	warmSlots := 2
+	template, err := client.CreateTemplate(context.Background(), CreateTemplateOptions{Name: "python", Description: "python env", DefaultWarmSlots: &warmSlots})
 	if err != nil || template.ID != "tpl-1" || template.StableRevisionID != "rev-1" {
 		t.Fatalf("CreateTemplate = %+v, %v", template, err)
 	}
@@ -358,6 +359,44 @@ func TestTemplateFamilyAndRevisionAPIContract(t *testing.T) {
 	}
 }
 
+func TestCreateTemplateWarmSlotsOmittedAndExplicitZero(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/templates" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		switch requests.Add(1) {
+		case 1:
+			if _, ok := body["defaultWarmSlots"]; ok {
+				t.Errorf("omitted warm slots were serialized: %s", body["defaultWarmSlots"])
+			}
+		case 2:
+			var got int
+			if err := json.Unmarshal(body["defaultWarmSlots"], &got); err != nil || got != 0 {
+				t.Errorf("explicit zero defaultWarmSlots = %s, err=%v", body["defaultWarmSlots"], err)
+			}
+		default:
+			t.Errorf("unexpected request count")
+		}
+		writeJSONTest(w, Template{ID: "tpl-1", Name: "python", DefaultWarmSlots: 1})
+	}))
+	defer server.Close()
+	client := testClient(t, server, "")
+	if _, err := client.CreateTemplate(context.Background(), CreateTemplateOptions{Name: "python"}); err != nil {
+		t.Fatal(err)
+	}
+	zero := 0
+	if _, err := client.CreateTemplate(context.Background(), CreateTemplateOptions{Name: "python", DefaultWarmSlots: &zero}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCreateRequiresTemplateIDAndWarmSlotsCannotBeNegative(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests.Add(1); http.NotFound(w, r) }))
@@ -366,7 +405,8 @@ func TestCreateRequiresTemplateIDAndWarmSlotsCannotBeNegative(t *testing.T) {
 	if _, err := client.CreateAsync(context.Background(), CreateOptions{OwnerKey: "owner"}); err == nil {
 		t.Fatal("CreateAsync accepted missing template ID")
 	}
-	if _, err := client.CreateTemplate(context.Background(), CreateTemplateOptions{Name: "python", DefaultWarmSlots: -1}); err == nil {
+	negativeWarmSlots := -1
+	if _, err := client.CreateTemplate(context.Background(), CreateTemplateOptions{Name: "python", DefaultWarmSlots: &negativeWarmSlots}); err == nil {
 		t.Fatal("CreateTemplate accepted negative warm slots")
 	}
 	if _, err := client.BuildRevision(context.Background(), "tpl", CreateRevisionOptions{UserVersion: "1.0", BaseImage: "base", ProfileID: "p", WarmSlots: func() *int { x := -1; return &x }()}); err == nil {

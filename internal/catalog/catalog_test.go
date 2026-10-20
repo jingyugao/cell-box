@@ -280,6 +280,54 @@ func TestCatalogBuildRequestsCreateIndependentRevisionsTenantIsolationAndSQLiteR
 	}
 }
 
+func TestCreateTemplateWarmSlotsDefaultAndLegacyZero(t *testing.T) {
+	m := openTestManager(t, t.TempDir(), &fakeBuilder{})
+	s, c := testHTTP(t, m)
+
+	res, raw := requestJSON(t, c, http.MethodPost, s.URL+"/v1/templates", "a", map[string]any{"name": "default-warm"})
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("create default template status=%d body=%s", res.StatusCode, raw)
+	}
+	defaultTemplate := response[Template](t, raw)
+	if defaultTemplate.DefaultWarmSlots != 1 {
+		t.Fatalf("omitted defaultWarmSlots = %d, want 1", defaultTemplate.DefaultWarmSlots)
+	}
+
+	res, raw = requestJSON(t, c, http.MethodPost, s.URL+"/v1/templates", "a", map[string]any{"name": "disabled-warm", "defaultWarmSlots": 0})
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("create disabled template status=%d body=%s", res.StatusCode, raw)
+	}
+	zeroTemplate := response[Template](t, raw)
+	if zeroTemplate.DefaultWarmSlots != 0 {
+		t.Fatalf("explicit defaultWarmSlots = %d, want 0", zeroTemplate.DefaultWarmSlots)
+	}
+
+	// Simulate a record written by an older version. Reading it must not apply
+	// the new-create default or silently change its explicit zero.
+	legacy := zeroTemplate
+	legacy.DefaultWarmSlots = 0
+	if _, err := m.db.ExecContext(context.Background(), "UPDATE templates SET record=? WHERE id=?", encode(legacy), legacy.ID); err != nil {
+		t.Fatal(err)
+	}
+	res, raw = requestJSON(t, c, http.MethodGet, s.URL+"/v1/templates/"+legacy.ID, "a", nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("read legacy template status=%d body=%s", res.StatusCode, raw)
+	}
+	if got := response[Template](t, raw).DefaultWarmSlots; got != 0 {
+		t.Fatalf("legacy stored defaultWarmSlots = %d, want 0", got)
+	}
+}
+
+func TestCreateTemplateRejectsNegativeDefaultWarmSlots(t *testing.T) {
+	m := openTestManager(t, t.TempDir(), &fakeBuilder{})
+	s, c := testHTTP(t, m)
+	negative := -1
+	res, _ := requestJSON(t, c, http.MethodPost, s.URL+"/v1/templates", "a", map[string]any{"name": "invalid-warm", "defaultWarmSlots": negative})
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("negative defaultWarmSlots status=%d, want %d", res.StatusCode, http.StatusBadRequest)
+	}
+}
+
 func TestCatalogConcurrentBuildRequestsAreIndependentAndStableGenerationCAS(t *testing.T) {
 	builder := &fakeBuilder{}
 	m := openTestManager(t, t.TempDir(), builder)

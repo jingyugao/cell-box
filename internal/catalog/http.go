@@ -137,12 +137,16 @@ func (m *Manager) createTemplate(r *http.Request) (any, int, error) {
 	var in struct {
 		Name             string `json:"name"`
 		Description      string `json:"description"`
-		DefaultWarmSlots int    `json:"defaultWarmSlots"`
+		DefaultWarmSlots *int   `json:"defaultWarmSlots"`
 	}
 	if err := decode(r, &in); err != nil {
 		return nil, 0, err
 	}
-	if !namePattern.MatchString(in.Name) || len(in.Description) > 8192 || !slots(in.DefaultWarmSlots) {
+	warmSlots := 1
+	if in.DefaultWarmSlots != nil {
+		warmSlots = *in.DefaultWarmSlots
+	}
+	if !namePattern.MatchString(in.Name) || len(in.Description) > 8192 || !slots(warmSlots) {
 		return nil, 0, failure("INVALID_REQUEST", "Invalid name, description or defaultWarmSlots")
 	}
 	m.mu.Lock()
@@ -156,7 +160,7 @@ func (m *Manager) createTemplate(r *http.Request) (any, int, error) {
 		return nil, 0, failure("CONFLICT", "Template name already exists")
 	}
 	now := time.Now().UTC()
-	t := Template{ID: newID("tpl-"), Name: in.Name, Description: in.Description, DefaultWarmSlots: in.DefaultWarmSlots, Generation: 1, CreatedAt: now, UpdatedAt: now}
+	t := Template{ID: newID("tpl-"), Name: in.Name, Description: in.Description, DefaultWarmSlots: warmSlots, Generation: 1, CreatedAt: now, UpdatedAt: now}
 	_, err := m.db.ExecContext(r.Context(), "INSERT INTO templates(id,client_id,name,record) VALUES(?,?,?,?)", t.ID, client, t.Name, encode(t))
 	return t, 201, err
 }
