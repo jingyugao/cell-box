@@ -210,6 +210,14 @@ func cloneError(err error) *APIError {
 	}
 	return &APIError{Code: "RUNTIME_ERROR", Message: "Runtime operation failed; inspect Cellbox and provider health"}
 }
+
+func runtimeReadinessError(message string) *APIError {
+	if strings.TrimSpace(message) == "" {
+		message = "Runtime entered failed state"
+	}
+	return &APIError{Code: "READINESS_FAILED", Message: message}
+}
+
 func profileCapabilities(p Profile) Capabilities {
 	k8s := p.Provider == "resumable-k8s-pod"
 	c := Capabilities{Exec: true, Files: true, HTTP: true, WebSocket: true, InternalServices: true, Suspend: "none", Archives: "none"}
@@ -483,6 +491,9 @@ func projectRuntimeObservation(ctx context.Context, current *boxRecord, ob boxpr
 	}
 	previousError := current.Box.Error
 	phase := ob.Phase
+	if phase == "failed" && strings.TrimSpace(ob.Message) != "" {
+		current.Box.Error = runtimeReadinessError(ob.Message)
+	}
 	if current.Box.Phase == "resuming" && phase == "running" && !ob.GuestReady {
 		phase = "resuming"
 	}
@@ -686,7 +697,10 @@ func (s *Service) waitStateTransition(ctx context.Context, id, want string, chec
 			}
 		}
 		if err == nil && box.Phase == "failed" {
-			return box, apiError("READINESS_FAILED", "Runtime entered failed state")
+			if box.Error != nil {
+				return box, box.Error
+			}
+			return box, runtimeReadinessError("")
 		}
 		interval := 250 * time.Millisecond
 		if changes != nil {

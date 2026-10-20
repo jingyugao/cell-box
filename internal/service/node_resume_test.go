@@ -132,7 +132,7 @@ func TestFailedResumeConsumesRuntimeObservationAndSettlesBox(t *testing.T) {
 		fakeCoreProvider: f.provider,
 		stream:           make(chan boxprovider.Observation, 4),
 		initial:          boxprovider.Observation{Phase: "suspended", Generation: 1},
-		result:           &boxprovider.Observation{Phase: "failed", Generation: 2, ExecutionID: "failed-execution"},
+		result:           &boxprovider.Observation{Phase: "failed", Generation: 2, ExecutionID: "failed-execution", Message: "image not present locally: prepared@sha256:digest"},
 	}
 	b := newResumeTestBox(t, f, "failed-resume", p)
 	op, err := f.service.actionContextWithGeneration(context.Background(), b.ClientID, b.Box.ID, "resume", ptrUint64(1))
@@ -143,12 +143,21 @@ func TestFailedResumeConsumesRuntimeObservationAndSettlesBox(t *testing.T) {
 	if err != nil || finished.Status != "failed" || finished.Error == nil || finished.Error.Code != "READINESS_FAILED" {
 		t.Fatalf("failed runtime resume = %+v, %v", finished, err)
 	}
+	if finished.Error.Message != p.result.Message {
+		t.Fatalf("runtime failure detail lost: %+v", finished.Error)
+	}
 	current, err := f.service.rawBox(b.Box.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if current.Box.Phase != "failed" || current.Box.OperationID != "" {
 		t.Fatalf("consumed failed observation left Box unsettled: %+v", current.Box)
+	}
+	if current.Box.Error == nil || current.Box.Error.Message != p.result.Message {
+		t.Fatalf("Box lost runtime failure detail: %+v", current.Box.Error)
+	}
+	if p.requests.Load() != 1 {
+		t.Fatalf("failed resume was replayed %d times", p.requests.Load())
 	}
 }
 

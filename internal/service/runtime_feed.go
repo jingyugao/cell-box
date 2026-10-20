@@ -152,7 +152,7 @@ func (s *Service) waitNodeResume(ctx context.Context, b boxRecord, transitionID 
 		}
 		if observed && observation.TransitionID == transitionID && observation.ObservedTransitionID == transitionID {
 			if observation.Phase == "failed" || observation.Phase == "deleted" {
-				return boxprovider.Observation{}, apiError("READINESS_FAILED", "Runtime entered failed state")
+				return boxprovider.Observation{}, runtimeReadinessError(observation.Message)
 			}
 			if observation.Phase == "running" && observation.GuestReady && observation.ExecutionID != "" {
 				return observation, nil
