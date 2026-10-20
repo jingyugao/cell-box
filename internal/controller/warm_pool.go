@@ -619,6 +619,17 @@ func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (result *co
 			}
 			continue
 		}
+		if compatible, ok := r.Runtime.(interface {
+			WarmCompatible(context.Context, *api.ResumablePod, *core.Pod) (bool, error)
+		}); ok {
+			matches, err := compatible.WarmCompatible(ctx, w, pod)
+			if err != nil {
+				return nil, err
+			}
+			if !matches {
+				continue
+			}
+		}
 		if !owned(w, pod) {
 			if localMode {
 				_, err := local.ClaimWarm(ctx, w, pod)

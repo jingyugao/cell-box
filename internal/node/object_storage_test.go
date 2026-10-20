@@ -387,7 +387,7 @@ func TestPrepareMissingLocalCheckpointNeverDownloadsRemoteCopy(t *testing.T) {
 	base := t.TempDir()
 	objects := &memoryObjects{objects: map[string][]byte{"checkpoints/owner/snapshot.tar": []byte("legacy remote snapshot")}}
 	b := &Backend{Base: base, Objects: objects}
-	if err := b.prepareSnapshot(context.Background(), testWorkload("owner", "snapshot", "spec", "image")); err == nil {
+	if _, err := b.prepareSnapshot(context.Background(), testWorkload("owner", "snapshot", "spec", "image")); err == nil {
 		t.Fatal("missing local checkpoint accepted")
 	}
 	if objects.getCalls != 0 || objects.putCalls != 0 {

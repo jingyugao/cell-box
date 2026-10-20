@@ -23,13 +23,15 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fatal("expected runsc, prepare, ticket, or checkpoint command")
+		fatal("expected runsc, prepare, set-policy, ticket, or checkpoint command")
 	}
 	switch os.Args[1] {
 	case "runsc":
 		run()
 	case "prepare":
 		prepare(os.Args[2:])
+	case "set-policy":
+		setPolicy(os.Args[2:])
 	case "ticket":
 		ticket(os.Args[2:])
 	case "checkpoint":
@@ -60,6 +62,9 @@ func run() {
 	if err != nil {
 		fatal(err.Error())
 	}
+	if len(args) == 0 {
+		return
+	}
 	if err := syscall.Exec(*runsc, append([]string{*runsc}, args...), os.Environ()); err != nil {
 		fatal("exec runsc: " + err.Error())
 	}
@@ -77,6 +82,30 @@ func prepare(args []string) {
 	printJSON(identity)
 }
 
+// setPolicy writes the same root-owned node-local policy that production warm
+// registration and restore read. The script invokes this helper through sudo.
+func setPolicy(args []string) {
+	flags := flag.NewFlagSet("set-policy", flag.ExitOnError)
+	base := flags.String("base", "", "isolated Cellbox state directory")
+	sandboxMode := flags.String("sandbox-mode", "root", "root or no-root")
+	pageLoading := flags.String("page-loading", "eager", "eager or lazy")
+	_ = flags.Parse(args)
+	if *base == "" {
+		fatal("set-policy requires --base")
+	}
+	if *sandboxMode != "root" && *sandboxMode != "no-root" {
+		fatal("--sandbox-mode must be root or no-root")
+	}
+	if *pageLoading != "eager" && *pageLoading != "lazy" {
+		fatal("--page-loading must be eager or lazy")
+	}
+	check(os.MkdirAll(*base, 0700))
+	check(os.Chmod(*base, 0700))
+	path := filepath.Join(*base, "restore.json")
+	check(node.AtomicJSON(path, node.RestorePolicy{SandboxMode: *sandboxMode, PageLoading: *pageLoading}))
+	check(os.Chmod(path, 0600))
+}
+
 func ticket(args []string) {
 	flags := flag.NewFlagSet("ticket", flag.ExitOnError)
 	base := flags.String("base", "", "isolated Cellbox state directory")
@@ -86,11 +115,12 @@ func ticket(args []string) {
 	namespace := flags.String("namespace", "warm-home-test", "Pod namespace")
 	snapshot := flags.String("snapshot", "", "node-local snapshot identifier")
 	specHash := flags.String("spec", "warm-home-test-spec", "sandbox spec identity")
+	noRoot := flags.Bool("no-root", false, "checkpoint was created from a no-root sandbox")
 	_ = flags.Parse(args)
 	identity, err := homevolume.Verify(*base, *owner, "", *specHash, "")
 	check(err)
 	t := node.Ticket{HomeID: identity.ID, OwnerUID: *owner, PodUID: *uid,
-		Namespace: *namespace, PodName: *name, Snapshot: *snapshot, SpecHash: *specHash}
+		Namespace: *namespace, PodName: *name, Snapshot: *snapshot, SpecHash: *specHash, NoRoot: *noRoot}
 	check(node.AtomicJSON(filepath.Join(*base, "tickets", *uid+".json"), t))
 	printJSON(t)
 }
@@ -103,6 +133,7 @@ func checkpoint(args []string) {
 	snapshot := flags.String("snapshot", "", "checkpoint identifier")
 	runsc := flags.String("runsc", "", "runsc executable used to create the checkpoint")
 	specHash := flags.String("spec", "warm-home-test-spec", "sandbox spec identity")
+	noRoot := flags.Bool("no-root", false, "checkpoint was created from a no-root sandbox")
 	_ = flags.Parse(args)
 	identity, err := homevolume.Verify(*base, *owner, "", *specHash, "")
 	check(err)
@@ -111,7 +142,7 @@ func checkpoint(args []string) {
 	check(err)
 	runscHash, err := node.Digest(*runsc)
 	check(err)
-	check(node.Seal(path, node.Manifest{OwnerUID: *owner, SpecHash: *specHash, RunscHash: runscHash, HomeID: identity.ID}))
+	check(node.Seal(path, node.Manifest{OwnerUID: *owner, SpecHash: *specHash, RunscHash: runscHash, HomeID: identity.ID, NoRoot: *noRoot}))
 	_, err = node.VerifyCached(path, *owner, *specHash, *runsc)
 	check(err)
 	fmt.Println(path)
@@ -158,7 +189,7 @@ func claimWarm(args []string) {
 	identity, err := homevolume.Verify(*base, *owner, "", *specHash, "")
 	check(err)
 	t := node.Ticket{HomeID: identity.ID, OwnerUID: *owner, PodUID: *uid,
-		Namespace: *namespace, PodName: *name, Snapshot: *snapshot, SpecHash: *specHash}
+		Namespace: *namespace, PodName: *name, Snapshot: *snapshot, SpecHash: *specHash, NoRoot: lease.NoRoot}
 	check(node.AtomicJSON(filepath.Join(*base, "tickets", *uid+".json"), t))
 	lease.Phase, lease.Ticket = "claimed", t
 	check(node.AtomicJSON(leasePath, lease))

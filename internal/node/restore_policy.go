@@ -20,10 +20,13 @@ const restorePolicyFile = "restore.json"
 // PrefetchBinary may be set without Prefetch to enable checkpoint hotset capture
 // for later evaluation.
 type RestorePolicy struct {
+	SandboxMode    string `json:"sandboxMode,omitempty"`
 	PageLoading    string `json:"pageLoading,omitempty"`
 	Prefetch       bool   `json:"prefetch,omitempty"`
 	PrefetchBinary string `json:"prefetchBinary,omitempty"`
 }
+
+func (p RestorePolicy) noRoot() bool { return p.SandboxMode == "no-root" }
 
 // LoadRestorePolicy reads Base/restore.json. A missing policy preserves the
 // runtime's current defaults. A present policy must be an immutable-to-users,
@@ -103,7 +106,7 @@ func LoadRestorePolicy(base string) (RestorePolicy, error) {
 	}
 	for field := range fields {
 		switch field {
-		case "pageLoading", "prefetch", "prefetchBinary":
+		case "sandboxMode", "pageLoading", "prefetch", "prefetchBinary":
 		default:
 			return RestorePolicy{}, fmt.Errorf("restore policy has unknown field %q", field)
 		}
@@ -119,6 +122,11 @@ func LoadRestorePolicy(base string) (RestorePolicy, error) {
 }
 
 func validateRestorePolicy(policy RestorePolicy) error {
+	switch policy.SandboxMode {
+	case "", "root", "no-root":
+	default:
+		return fmt.Errorf("unknown restore sandbox mode %q", policy.SandboxMode)
+	}
 	switch policy.PageLoading {
 	case "", "eager", "lazy":
 	default:

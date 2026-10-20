@@ -7,14 +7,18 @@ runsc_bin="${RUNSC_BIN:-}"
 platform="${WARM_HOME_PLATFORM:-}"
 overlay_mode="${WARM_HOME_OVERLAY2:-root:memory}"
 page_loading="${WARM_HOME_PAGE_LOADING:-eager}"
+sandbox_mode="${WARM_HOME_SANDBOX_MODE:-root}"
 prefetch_bin="${CHECKPOINT_PREFETCH_BIN:-}"
 restore_ready_timeout="${WARM_HOME_RESTORE_READY_TIMEOUT:-120}"
+no_root_args=()
+if [[ "$sandbox_mode" == no-root ]]; then no_root_args=(--no-root); fi
 log_file="${WARM_HOME_LOG:-/tmp/cellbox-warm-home-$(date +%Y%m%d-%H%M%S).log}"
 exec > >(tee -a "$log_file") 2>&1
 [[ -n "$runsc_bin" ]] || { echo 'RUNSC_BIN must name the runsc binary to test' >&2; exit 2; }
 [[ -n "$platform" ]] || { echo 'WARM_HOME_PLATFORM must explicitly be kvm or systrap' >&2; exit 2; }
 [[ "$platform" == kvm || "$platform" == systrap ]] || { echo 'WARM_HOME_PLATFORM must be kvm or systrap' >&2; exit 2; }
 [[ "$page_loading" == eager || "$page_loading" == lazy ]] || { echo 'WARM_HOME_PAGE_LOADING must be eager or lazy' >&2; exit 2; }
+[[ "$sandbox_mode" == root || "$sandbox_mode" == no-root ]] || { echo 'WARM_HOME_SANDBOX_MODE must be root or no-root' >&2; exit 2; }
 [[ "$restore_ready_timeout" =~ ^[1-9][0-9]*$ ]] || { echo 'WARM_HOME_RESTORE_READY_TIMEOUT must be a positive number of seconds' >&2; exit 2; }
 [[ -x "$runsc_bin" ]] || { echo "RUNSC_BIN is not executable: $runsc_bin" >&2; exit 2; }
 if [[ -n "$prefetch_bin" ]]; then [[ -x "$prefetch_bin" ]] || { echo "CHECKPOINT_PREFETCH_BIN is not executable: $prefetch_bin" >&2; exit 2; }; fi
@@ -93,16 +97,14 @@ go build -o "$adapter_bin" ./test/fixtures/warm-home/adapter-runsc
 install -m 0755 "$probe_bin" "$rootfs/probe"
 
 printf 'runsc=%s\n' "$("$runsc_bin" --version | tr '\n' ' ')"
-printf 'platform=%s overlay2=%s\n' "$platform" "$overlay_mode"
+printf 'platform=%s overlay2=%s sandbox_mode=%s page_loading=%s\n' "$platform" "$overlay_mode" "$sandbox_mode" "$page_loading"
 printf 'artifacts=%s\n' "$test_root"
 printf 'log=%s\n' "$log_file"
 
 run_adapter() {
-  local -a global_flags=()
-  if [[ "$page_loading" == lazy ]]; then global_flags+=(--restore-page-loading=lazy); fi
   sudo -n "$adapter_bin" runsc --base="$state" --runsc="$runsc_bin" -- \
     --root "$runtime_root" --platform="$platform" --network=none --ignore-cgroups=true \
-    --overlay2="$overlay_mode" --restore-spec-validation=enforce "${global_flags[@]}" "$@"
+    --overlay2="$overlay_mode" --restore-spec-validation=enforce "$@"
 }
 
 capture_hotset() {
@@ -243,6 +245,12 @@ declare -a owners=(owner-a owner-b)
 declare -a home_paths snapshots old_root_ids old_child_ids old_pod_uids old_tokens old_guest_pids old_counters old_open_sizes old_deleted_sizes
 declare -A hotset_paths
 
+# Use the same root-owned policy that the production Adapter reads for warm
+# registration and restore argument selection. The test state directory is
+# isolated under test_root and created by this root-run helper.
+sudo -n "$adapter_bin" set-policy --base="$state" --sandbox-mode="$sandbox_mode" \
+  --page-loading="$page_loading" >/dev/null
+
 for index in 0 1; do
   owner="${owners[$index]}"
   initial_uid="$(id_for "initial-$owner")"
@@ -255,7 +263,8 @@ for index in 0 1; do
   printf 'HOME-%s\n' "$owner" | sudo -n tee "$home_path/identity" >/dev/null
   sudo -n chmod 0600 "$home_path/identity"
   sudo -n "$adapter_bin" ticket --base="$state" --owner="$owner" --uid="$initial_uid" \
-    --name="$pod_name" --namespace="$namespace" --spec="$spec_hash" >/dev/null
+    --name="$pod_name" --namespace="$namespace" --spec="$spec_hash" \
+    "${no_root_args[@]}" >/dev/null
   root_bundle="$(make_bundle "$root_id" sandbox "$initial_uid" "$pod_name")"
   add_ticket_annotation "$root_bundle" "$initial_uid"
   create_root "$root_id" "$root_bundle"
@@ -277,7 +286,8 @@ for index in 0 1; do
   sudo -n mkdir -p "$checkpoint_path"
   run_adapter checkpoint --image-path="$checkpoint_path" --compression=none "$root_id"
   sudo -n "$adapter_bin" checkpoint --base="$state" --owner="$owner" --uid="$initial_uid" \
-    --snapshot="$snapshot" --runsc="$runsc_bin" --spec="$spec_hash" >/dev/null
+    --snapshot="$snapshot" --runsc="$runsc_bin" --spec="$spec_hash" \
+    "${no_root_args[@]}" >/dev/null
   capture_hotset "$owner" "$snapshot" "$checkpoint_path"
   delete_pair "$child_id" "$root_id"
 done
@@ -396,7 +406,8 @@ for cycle in 1 2; do
       sudo -n mkdir -p "$checkpoint_path"
       run_adapter checkpoint --image-path="$checkpoint_path" --compression=none "$root_id"
       sudo -n "$adapter_bin" checkpoint --base="$state" --owner="$owner" --uid="$uid" \
-        --snapshot="$next_snapshot" --runsc="$runsc_bin" --spec="$spec_hash" >/dev/null
+        --snapshot="$next_snapshot" --runsc="$runsc_bin" --spec="$spec_hash" \
+        "${no_root_args[@]}" >/dev/null
       capture_hotset "$owner" "$next_snapshot" "$checkpoint_path"
       snapshots[$index]="$next_snapshot"
       old_counters[$index]="$(host_jq "$beat" .counter)"
@@ -408,5 +419,5 @@ for cycle in 1 2; do
   unset warm_uids warm_names warm_root_ids warm_root_pids warm_root_bundles
 done
 
-printf 'PASS: two independent local HOME trees restored through two warm-root cycles with production Adapter.Rewrite, page_loading=%s, real homevolume tickets/state, continuous memory/fds/cwd/mmap, and root peer-path denial; hotset collection records cache footprint only, not performance benefit\n' \
-  "$page_loading"
+printf 'PASS: two independent local HOME trees restored through two warm-%s cycles with production Adapter.Rewrite, page_loading=%s, real homevolume tickets/state, continuous memory/fds/cwd/mmap, and root peer-path denial; hotset collection records cache footprint only, not performance benefit\n' \
+  "$sandbox_mode" "$page_loading"
