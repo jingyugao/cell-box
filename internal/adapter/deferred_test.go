@@ -79,7 +79,7 @@ func TestNoRootDeferredCheckpointIsBoundByChild(t *testing.T) {
 		t.Fatalf("sandbox policy or extensions lost: %v", spec)
 	}
 	args, err = a.Rewrite([]string{"--root=/run/test", "start", sid})
-	if err != nil || !reflect.DeepEqual(args, []string{"--root=/run/test", "restore", "--background", "--detach", sid}) {
+	if err != nil || !reflect.DeepEqual(args, []string{"--root=/run/test", "--restore-page-loading=lazy", "restore", "--background", "--detach", sid}) {
 		t.Fatalf("root must prepare without a checkpoint: %v, %v", args, err)
 	}
 	if err := node.ConsumeSnapshot(a.Base, ticket.OwnerUID, ticket.Snapshot); err == nil {
@@ -90,7 +90,7 @@ func TestNoRootDeferredCheckpointIsBoundByChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	args, err = a.Rewrite([]string{"--root=/run/test", "start", childID})
-	want := []string{"--root=/run/test", "restore", "--background", "--detach", "--image-path=" + path, childID}
+	want := []string{"--root=/run/test", "--restore-page-loading=lazy", "restore", "--background", "--detach", "--image-path=" + path, childID}
 	if err != nil || !reflect.DeepEqual(args, want) {
 		t.Fatalf("child must supply checkpoint: %v, %v", args, err)
 	}

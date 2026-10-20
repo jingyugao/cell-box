@@ -33,7 +33,7 @@ func writeSandboxModePolicy(t *testing.T, base, mode string) {
 
 func TestRestorePolicySandboxModeValidationAndDefault(t *testing.T) {
 	if err := validateRestorePolicy(RestorePolicy{}); err != nil {
-		t.Fatalf("missing sandbox mode should default to root: %v", err)
+		t.Fatalf("empty sandbox mode should remain a valid explicit override: %v", err)
 	}
 	for _, mode := range []string{"", "root", "no-root"} {
 		if err := validateRestorePolicy(RestorePolicy{SandboxMode: mode}); err != nil {
@@ -44,8 +44,8 @@ func TestRestorePolicySandboxModeValidationAndDefault(t *testing.T) {
 		t.Fatal("unknown sandbox mode accepted")
 	}
 	policy, err := LoadRestorePolicy(filepath.Join(t.TempDir(), "missing"))
-	if err != nil || policy.noRoot() {
-		t.Fatalf("missing policy should use root mode: policy=%+v err=%v", policy, err)
+	if err != nil || !policy.noRoot() || policy.PageLoading != "lazy" || policy.Prefetch {
+		t.Fatalf("missing policy should use no-root/lazy without prefetch: policy=%+v err=%v", policy, err)
 	}
 }
 
@@ -112,6 +112,49 @@ func TestPrepareColdStartUsesNoRootPolicy(t *testing.T) {
 	}
 }
 
+func TestPrepareColdStartUsesNoRootWithoutPolicy(t *testing.T) {
+	base := t.TempDir()
+	b := &Backend{Base: base}
+	w := testWorkload("owner", "", "spec", "image")
+	p := &core.Pod{ObjectMeta: meta.ObjectMeta{UID: "pod", Name: "pod", Namespace: "test"}}
+	if err := b.Prepare(context.Background(), w, p); err != nil {
+		t.Fatal(err)
+	}
+	var ticket Ticket
+	if err := ReadJSON(filepath.Join(base, "tickets", "pod.json"), &ticket); err != nil {
+		t.Fatal(err)
+	}
+	if !ticket.NoRoot {
+		t.Fatal("default cold start did not use a no-root sandbox")
+	}
+}
+
+func TestRestorePolicyDefaultAndLegacyOverrides(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires a root-owned policy file")
+	}
+	for _, test := range []struct {
+		name, contents string
+		want           RestorePolicy
+	}{
+		{"empty object", `{}`, DefaultRestorePolicy()},
+		{"prefetch disabled", `{"prefetch":false}`, DefaultRestorePolicy()},
+		{"legacy root and eager", `{"sandboxMode":"root","pageLoading":"eager"}`, RestorePolicy{SandboxMode: "root", PageLoading: "eager"}},
+		{"explicit runtime defaults", `{"sandboxMode":"","pageLoading":""}`, RestorePolicy{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			if err := os.WriteFile(filepath.Join(base, restorePolicyFile), []byte(test.contents), 0600); err != nil {
+				t.Fatal(err)
+			}
+			policy, err := LoadRestorePolicy(base)
+			if err != nil || policy != test.want {
+				t.Fatalf("policy=%+v, err=%v; want %+v", policy, err, test.want)
+			}
+		})
+	}
+}
+
 func TestExistingRootCheckpointStaysRootUnderNoRootPolicy(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("restore policy integration requires a root-owned policy file")
@@ -152,10 +195,14 @@ func TestCheckpointModeComesFromLiveRequest(t *testing.T) {
 	if err := os.Remove(filepath.Join(base, "requests", sid+".json")); err != nil {
 		t.Fatal(err)
 	}
-	if noRoot, err := checkpointSandboxMode(base, sid, r, p); err != nil || noRoot {
-		t.Fatalf("legacy root request fallback = %t, err=%v", noRoot, err)
+	if _, err := checkpointSandboxMode(base, sid, r, p); err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("missing request under the default no-root policy was accepted: %v", err)
 	}
 	if os.Geteuid() == 0 {
+		writeSandboxModePolicy(t, base, "root")
+		if noRoot, err := checkpointSandboxMode(base, sid, r, p); err != nil || noRoot {
+			t.Fatalf("explicit legacy root request fallback = %t, err=%v", noRoot, err)
+		}
 		writeSandboxModePolicy(t, base, "no-root")
 		if err := AtomicJSON(filepath.Join(base, "requests", sid+".json"), Ticket{OwnerUID: "owner", PodUID: "pod", PodName: "pod", Namespace: "test", SpecHash: "spec"}); err != nil {
 			t.Fatal(err)
@@ -255,7 +302,7 @@ func TestWarmStateModeChangeRetiresOnlyIdleLease(t *testing.T) {
 			if _, err := warmUpdate(base, "warm-pod", false, func(l *WarmLease) error { l.Phase = phase; return nil }); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := warmUpdate(base, "warm-pod", false, func(l *WarmLease) error { l.NoRoot = true; return nil }); err != nil {
+			if _, err := warmUpdate(base, "warm-pod", false, func(l *WarmLease) error { l.NoRoot = false; return nil }); err != nil {
 				t.Fatal(err)
 			}
 			got, _, err := b.WarmState(context.Background(), p)

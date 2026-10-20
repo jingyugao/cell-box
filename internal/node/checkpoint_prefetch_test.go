@@ -15,11 +15,12 @@ import (
 
 func TestLoadRestorePolicyMissingAndValidation(t *testing.T) {
 	policy, err := LoadRestorePolicy(filepath.Join(t.TempDir(), "missing"))
-	if err != nil || policy != (RestorePolicy{}) {
-		t.Fatalf("missing policy = %+v, %v; want zero policy", policy, err)
+	want := RestorePolicy{SandboxMode: "no-root", PageLoading: "lazy"}
+	if err != nil || policy != want {
+		t.Fatalf("missing policy = %+v, %v; want %+v", policy, err, want)
 	}
-	if policy, err := LoadRestorePolicy(""); err != nil || policy != (RestorePolicy{}) {
-		t.Fatalf("empty base policy = %+v, %v; want zero policy", policy, err)
+	if policy, err := LoadRestorePolicy(""); err != nil || policy != want {
+		t.Fatalf("empty base policy = %+v, %v; want %+v", policy, err, want)
 	}
 
 	tests := []struct {
@@ -92,7 +93,7 @@ func TestLoadRestorePolicyReadsRootOwnedOptIn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := RestorePolicy{PageLoading: "lazy", Prefetch: true, PrefetchBinary: "/usr/local/bin/checkpointprefetch"}
+	want := RestorePolicy{SandboxMode: "no-root", PageLoading: "lazy", Prefetch: true, PrefetchBinary: "/usr/local/bin/checkpointprefetch"}
 	if policy != want {
 		t.Fatalf("LoadRestorePolicy() = %+v, want %+v", policy, want)
 	}

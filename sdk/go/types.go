@@ -150,7 +150,7 @@ type Template struct {
 type CreateTemplateOptions struct {
 	Name             string `json:"name"`
 	Description      string `json:"description,omitempty"`
-	DefaultWarmSlots int    `json:"defaultWarmSlots,omitempty"`
+	DefaultWarmSlots *int   `json:"defaultWarmSlots,omitempty"`
 }
 
 type UpdateTemplateOptions struct {

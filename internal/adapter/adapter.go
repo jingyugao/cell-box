@@ -193,7 +193,7 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 			if err != nil {
 				return nil, err
 			}
-			pageLoading = policy.PageLoading
+			pageLoading = policy.PageLoadingFor(t.NoRoot)
 		}
 		started := request + ".started"
 		f, err := os.OpenFile(started, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
