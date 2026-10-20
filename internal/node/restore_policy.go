@@ -16,25 +16,46 @@ import (
 const restorePolicyFile = "restore.json"
 
 // RestorePolicy is the root-owned, node-local policy for checkpoint restore.
-// An empty PageLoading value preserves the runsc default. Prefetch is opt-in;
+// Missing settings use no-root sandboxes and lazy page loading. An explicitly
+// empty PageLoading value preserves the runsc default. Prefetch is opt-in;
 // PrefetchBinary may be set without Prefetch to enable checkpoint hotset capture
 // for later evaluation.
 type RestorePolicy struct {
+	SandboxMode    string `json:"sandboxMode,omitempty"`
 	PageLoading    string `json:"pageLoading,omitempty"`
 	Prefetch       bool   `json:"prefetch,omitempty"`
 	PrefetchBinary string `json:"prefetchBinary,omitempty"`
 }
 
-// LoadRestorePolicy reads Base/restore.json. A missing policy preserves the
-// runtime's current defaults. A present policy must be an immutable-to-users,
+func (p RestorePolicy) noRoot() bool { return p.SandboxMode == "no-root" }
+
+// PageLoadingFor preserves the runtime default when a legacy root checkpoint
+// is restored under the new no-root policy. Explicit root policies still apply
+// their selected page-loading mode.
+func (p RestorePolicy) PageLoadingFor(noRoot bool) string {
+	if !noRoot && p.noRoot() {
+		return ""
+	}
+	return p.PageLoading
+}
+
+// DefaultRestorePolicy is the policy for new executions. Existing checkpoints
+// retain the sandbox mode sealed in their manifest. Legacy installations can
+// explicitly select root/eager while retaining their matching gVisor binary.
+func DefaultRestorePolicy() RestorePolicy {
+	return RestorePolicy{SandboxMode: "no-root", PageLoading: "lazy"}
+}
+
+// LoadRestorePolicy reads Base/restore.json. Missing files and omitted settings
+// use DefaultRestorePolicy. A present policy must be an immutable-to-users,
 // root-owned regular file below a root-owned, non-writable-by-group/other Base.
 func LoadRestorePolicy(base string) (RestorePolicy, error) {
 	if base == "" {
-		return RestorePolicy{}, nil
+		return DefaultRestorePolicy(), nil
 	}
 	baseInfo, err := os.Lstat(base)
 	if errors.Is(err, os.ErrNotExist) {
-		return RestorePolicy{}, nil
+		return DefaultRestorePolicy(), nil
 	}
 	if err != nil {
 		return RestorePolicy{}, fmt.Errorf("stat restore policy base: %w", err)
@@ -45,7 +66,7 @@ func LoadRestorePolicy(base string) (RestorePolicy, error) {
 	path := filepath.Join(base, restorePolicyFile)
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return RestorePolicy{}, nil
+		return DefaultRestorePolicy(), nil
 	}
 	if err != nil {
 		return RestorePolicy{}, fmt.Errorf("stat restore policy: %w", err)
@@ -103,12 +124,12 @@ func LoadRestorePolicy(base string) (RestorePolicy, error) {
 	}
 	for field := range fields {
 		switch field {
-		case "pageLoading", "prefetch", "prefetchBinary":
+		case "sandboxMode", "pageLoading", "prefetch", "prefetchBinary":
 		default:
 			return RestorePolicy{}, fmt.Errorf("restore policy has unknown field %q", field)
 		}
 	}
-	var policy RestorePolicy
+	policy := DefaultRestorePolicy()
 	if err := json.Unmarshal(contents, &policy); err != nil {
 		return RestorePolicy{}, fmt.Errorf("decode restore policy fields: %w", err)
 	}
@@ -119,6 +140,11 @@ func LoadRestorePolicy(base string) (RestorePolicy, error) {
 }
 
 func validateRestorePolicy(policy RestorePolicy) error {
+	switch policy.SandboxMode {
+	case "", "root", "no-root":
+	default:
+		return fmt.Errorf("unknown restore sandbox mode %q", policy.SandboxMode)
+	}
 	switch policy.PageLoading {
 	case "", "eager", "lazy":
 	default:

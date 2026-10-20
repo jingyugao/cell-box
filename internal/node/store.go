@@ -30,6 +30,7 @@ func ValidID(s string) bool { return safeID.MatchString(s) }
 type Manifest struct {
 	HomeID    string                     `json:"persistentHomeID,omitempty"`
 	Mounts    []VolumeMountAuthorization `json:"mounts,omitempty"`
+	NoRoot    bool                       `json:"noRoot,omitempty"`
 	OwnerUID  string                     `json:"ownerUID"`
 	SpecHash  string                     `json:"specHash"`
 	ImageID   string                     `json:"imageID"`
@@ -51,6 +52,7 @@ type Ticket struct {
 	HomeID        string                     `json:"persistentHomeID,omitempty"`
 	HomeVolumeUID string                     `json:"homeVolumeUID,omitempty"`
 	Mounts        []VolumeMountAuthorization `json:"mounts,omitempty"`
+	NoRoot        bool                       `json:"noRoot,omitempty"`
 	OwnerUID      string                     `json:"ownerUID"`
 	NodeName      string                     `json:"nodeName,omitempty"`
 	PodUID        string                     `json:"podUID"`

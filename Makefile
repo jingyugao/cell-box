@@ -35,6 +35,7 @@ build:
 	mkdir -p "$$out/test/e2e"
 	cp test/e2e/full.py test/e2e/Dockerfile "$$out/test/e2e/"
 	cp config/sample.json "$$out/config/"
+	cp config/restore.json "$$out/config/"
 	cp api/openapi.yaml "$$out/api/"
 	cp LICENSE VERSION README.md "$$out/"
 	if [[ -d doc ]]; then cp -r doc "$$out/"; fi

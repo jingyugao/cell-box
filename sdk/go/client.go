@@ -173,7 +173,7 @@ func (c *Client) CreateTemplate(ctx context.Context, opts CreateTemplateOptions)
 	if strings.TrimSpace(opts.Name) == "" {
 		return nil, fmt.Errorf("cellbox: template name is required")
 	}
-	if opts.DefaultWarmSlots < 0 || opts.DefaultWarmSlots > 1024 {
+	if opts.DefaultWarmSlots != nil && (*opts.DefaultWarmSlots < 0 || *opts.DefaultWarmSlots > 1024) {
 		return nil, fmt.Errorf("cellbox: default warm slots must be 0..1024")
 	}
 	var template Template

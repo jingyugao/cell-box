@@ -52,7 +52,7 @@ func TestSnapshotCleanupSurvivesRestartAndPreservesNextCheckpoint(t *testing.T) 
 	if !b.snapshotConsumed("owner", "checkpoint-1") {
 		t.Fatal("cleanup lost replay fence")
 	}
-	if err := b.prepareSnapshot(ctx, w); err == nil {
+	if _, err := b.prepareSnapshot(ctx, w); err == nil {
 		t.Fatal("consumed snapshot accepted for another execution")
 	}
 	// An interrupted invalidation must not be collected until the DB deletion is retried.

@@ -24,6 +24,7 @@ import (
 // are never rearmed; the pool replaces the entire Pod.
 type WarmLease struct {
 	UID, Name, Namespace, SpecHash, SID, Phase string
+	NoRoot                                     bool
 	Deadline                                   time.Time
 	Ticket                                     Ticket
 }
@@ -64,14 +65,18 @@ func warmUpdateContext(_ context.Context, base, uid string, create bool, fn func
 }
 
 func (b *Backend) RegisterWarm(ctx context.Context, p *core.Pod, hash string) error {
-	_, err := warmUpdateContext(ctx, b.Base, string(p.UID), true, func(l *WarmLease) error {
+	policy, err := LoadRestorePolicy(b.Base)
+	if err != nil {
+		return err
+	}
+	_, err = warmUpdateContext(ctx, b.Base, string(p.UID), true, func(l *WarmLease) error {
 		if l.UID != "" {
-			if l.UID == string(p.UID) && l.Name == p.Name && l.Namespace == p.Namespace && l.SpecHash == hash {
+			if l.UID == string(p.UID) && l.Name == p.Name && l.Namespace == p.Namespace && l.SpecHash == hash && l.NoRoot == policy.noRoot() {
 				return nil
 			}
 			return fmt.Errorf("warm Pod identity changed")
 		}
-		*l = WarmLease{UID: string(p.UID), Name: p.Name, Namespace: p.Namespace, SpecHash: hash, Phase: "registered"}
+		*l = WarmLease{UID: string(p.UID), Name: p.Name, Namespace: p.Namespace, SpecHash: hash, NoRoot: policy.noRoot(), Phase: "registered"}
 		return nil
 	})
 	return err
@@ -93,7 +98,7 @@ func BindWarm(base, uid, name, namespace, sid string) (WarmLease, error) {
 		}
 		l.SID = sid
 		l.Phase = "created"
-		return AtomicJSON(filepath.Join(base, "requests", sid+".json"), Ticket{PodUID: uid, PodName: name, Namespace: namespace})
+		return AtomicJSON(filepath.Join(base, "requests", sid+".json"), Ticket{PodUID: uid, PodName: name, Namespace: namespace, NoRoot: l.NoRoot})
 	})
 }
 
@@ -155,7 +160,7 @@ func (b *Backend) ActivateWarm(ctx context.Context, w *api.ResumablePod, p *core
 		if err != nil {
 			return true, err
 		}
-		t := warmTicket(w, p, mounts)
+		t := warmTicket(w, p, mounts, l.NoRoot)
 		if !reflect.DeepEqual(l.Ticket, t) {
 			return true, fmt.Errorf("warm slot assigned to another execution")
 		}
@@ -170,14 +175,21 @@ func (b *Backend) ActivateWarm(ctx context.Context, w *api.ResumablePod, p *core
 	if l.SpecHash != api.SpecFingerprint(warmSpec) || w.Status.Snapshot == "" {
 		return true, fmt.Errorf("incompatible warm restore")
 	}
+	manifest, _, err := b.loadSnapshotManifest(w)
+	if err != nil {
+		return true, err
+	}
+	if manifest == nil || l.NoRoot != manifest.NoRoot {
+		return true, fmt.Errorf("warm sandbox mode differs from checkpoint")
+	}
+	if err := b.finishSnapshotPreparation(ctx, w, manifest); err != nil {
+		return true, err
+	}
 	mounts, err := b.prepareVolumeMounts(w, w.Status.Cycle == 1 && w.Status.Snapshot == "")
 	if err != nil {
 		return true, err
 	}
-	t := warmTicket(w, p, mounts)
-	if err = b.prepareSnapshot(ctx, w); err != nil {
-		return true, err
-	}
+	t := warmTicket(w, p, mounts, l.NoRoot)
 	_, err = warmUpdateContext(ctx, b.Base, string(p.UID), false, func(l *WarmLease) error {
 		if l.Phase != "waiting" || !time.Now().Before(l.Deadline) {
 			return backend.ErrWarmExpired
@@ -192,8 +204,8 @@ func (b *Backend) ActivateWarm(ctx context.Context, w *api.ResumablePod, p *core
 	return true, err
 }
 
-func warmTicket(w *api.ResumablePod, p *core.Pod, mounts []VolumeMountAuthorization) Ticket {
-	t := Ticket{OwnerUID: string(w.UID), NodeName: w.Spec.NodeName, HomeVolumeUID: w.Spec.HomeVolumeUID, PodUID: string(p.UID), Namespace: p.Namespace, PodName: p.Name, Snapshot: w.Status.Snapshot, SpecHash: w.Status.SpecHash}
+func warmTicket(w *api.ResumablePod, p *core.Pod, mounts []VolumeMountAuthorization, noRoot bool) Ticket {
+	t := Ticket{OwnerUID: string(w.UID), NodeName: w.Spec.NodeName, HomeVolumeUID: w.Spec.HomeVolumeUID, NoRoot: noRoot, PodUID: string(p.UID), Namespace: p.Namespace, PodName: p.Name, Snapshot: w.Status.Snapshot, SpecHash: w.Status.SpecHash}
 	if w.Spec.Mounts != nil {
 		t.Mounts = mounts
 	} else if len(mounts) > 0 {
@@ -254,8 +266,41 @@ func (b *Backend) removeChildren(uid string) error {
 }
 
 func (b *Backend) WarmState(ctx context.Context, p *core.Pod) (string, time.Time, error) {
-	l, err := b.WarmStatus(ctx, p)
+	l, err := warmUpdateContext(ctx, b.Base, string(p.UID), false, func(l *WarmLease) error {
+		if l.Name != p.Name || l.Namespace != p.Namespace {
+			return fmt.Errorf("warm Pod identity mismatch")
+		}
+		if l.Phase == "registered" || l.Phase == "created" || l.Phase == "waiting" {
+			policy, err := LoadRestorePolicy(b.Base)
+			if err != nil {
+				return err
+			}
+			if l.NoRoot != policy.noRoot() {
+				l.Phase = "retired"
+			}
+		}
+		return nil
+	})
 	return l.Phase, l.Deadline, err
+}
+
+// WarmCompatible checks sandbox mode before the caller claims an idle lease.
+func (b *Backend) WarmCompatible(ctx context.Context, w *api.ResumablePod, p *core.Pod) (bool, error) {
+	l, err := b.WarmStatus(ctx, p)
+	if err != nil {
+		return false, err
+	}
+	if l.Phase != "waiting" || w.Status.Snapshot == "" {
+		return false, nil
+	}
+	manifest, _, err := b.loadSnapshotManifest(w)
+	if err != nil {
+		return false, err
+	}
+	if manifest == nil || l.NoRoot != manifest.NoRoot {
+		return false, nil
+	}
+	return l.NoRoot == manifest.NoRoot, nil
 }
 
 // TryRetireWarm atomically retires an idle warm lease. A claimed or restoring

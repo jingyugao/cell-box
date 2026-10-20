@@ -217,6 +217,10 @@ func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.P
 	if !runningImageMatches(actual, image) {
 		return fmt.Errorf("running image %s differs from local image %s", actual, image.Id)
 	}
+	noRoot, err := checkpointSandboxMode(b.Base, live[0].Id, r, p)
+	if err != nil {
+		return err
+	}
 	binaryHash, err := Digest(b.Runsc)
 	if err != nil {
 		return err
@@ -246,7 +250,7 @@ func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.P
 			return fmt.Errorf("checkpoint volume %s: %w", mount.UID, err)
 		}
 	}
-	manifest := Manifest{OwnerUID: string(r.UID), SpecHash: r.Status.SpecHash, ImageID: image.Id, RunscHash: binaryHash}
+	manifest := Manifest{OwnerUID: string(r.UID), SpecHash: r.Status.SpecHash, ImageID: image.Id, RunscHash: binaryHash, NoRoot: noRoot}
 	if r.Spec.Mounts != nil {
 		manifest.Mounts = mounts
 	} else if len(mounts) > 0 {
@@ -270,22 +274,39 @@ func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.P
 	return nil
 }
 
-func (b *Backend) verifySnapshotImage(ctx context.Context, r *api.ResumablePod, path string) (*Manifest, error) {
+func (b *Backend) loadSnapshotManifest(r *api.ResumablePod) (*Manifest, string, error) {
+	if r.Status.Snapshot == "" {
+		return nil, "", nil
+	}
+	if b.snapshotConsumed(string(r.UID), r.Status.Snapshot) {
+		return nil, "", fmt.Errorf("checkpoint was consumed by a previous execution")
+	}
+	path, err := SnapshotPath(b.Base, string(r.UID), r.Status.Snapshot)
+	if err != nil {
+		return nil, "", err
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil, "", fmt.Errorf("node-local checkpoint unavailable: %w", err)
+	}
 	m, err := VerifyCached(path, string(r.UID), r.Status.SpecHash, b.Runsc)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	if err = b.verifySnapshotHome(r, m); err != nil {
-		return nil, err
+	return m, path, nil
+}
+
+func (b *Backend) verifySnapshotImageManifest(ctx context.Context, r *api.ResumablePod, m *Manifest) error {
+	if err := b.verifySnapshotHome(r, m); err != nil {
+		return err
 	}
 	id, err := b.imageID(ctx, r.Spec.Container.Image)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if id != m.ImageID {
-		return nil, fmt.Errorf("image changed since checkpoint")
+		return fmt.Errorf("image changed since checkpoint")
 	}
-	return m, nil
+	return nil
 }
 
 func (b *Backend) verifySnapshotHome(r *api.ResumablePod, m *Manifest) error {
@@ -329,48 +350,83 @@ func (b *Backend) verifySnapshotHome(r *api.ResumablePod, m *Manifest) error {
 	return nil
 }
 
-func (b *Backend) prepareSnapshot(ctx context.Context, r *api.ResumablePod) error {
-	if r.Status.Snapshot != "" {
-		if b.snapshotConsumed(string(r.UID), r.Status.Snapshot) {
-			return fmt.Errorf("checkpoint was consumed by a previous execution")
-		}
-		path, err := SnapshotPath(b.Base, string(r.UID), r.Status.Snapshot)
-		if err != nil {
-			return err
-		}
-		if _, err = os.Stat(path); err != nil {
-			return fmt.Errorf("node-local checkpoint unavailable: %w", err)
-		}
-		if _, err = b.verifySnapshotImage(ctx, r, path); err != nil {
-			return err
-		}
-		if _, err := LoadRestorePolicy(b.Base); err != nil {
-			return err
-		}
-		// This task has its own deadline and runs alongside the normal restore.
-		// Its failure is recorded and falls back to demand paging.
-		if err := b.Prefetch.Start(string(r.UID), r.Status.Snapshot); err != nil {
-			log.Printf("checkpoint prefetch start %s/%s: %v", r.UID, r.Status.Snapshot, err)
-		}
+func (b *Backend) prepareSnapshot(ctx context.Context, r *api.ResumablePod) (*Manifest, error) {
+	manifest, _, err := b.loadSnapshotManifest(r)
+	if err != nil || manifest == nil {
+		return manifest, err
+	}
+	if err = b.finishSnapshotPreparation(ctx, r, manifest); err != nil {
+		return nil, err
+	}
+	return manifest, nil
+}
+
+func (b *Backend) finishSnapshotPreparation(ctx context.Context, r *api.ResumablePod, manifest *Manifest) error {
+	if err := b.verifySnapshotImageManifest(ctx, r, manifest); err != nil {
+		return err
+	}
+	if _, err := LoadRestorePolicy(b.Base); err != nil {
+		return err
+	}
+	// This task has its own deadline and runs alongside the normal restore.
+	// Its failure is recorded and falls back to demand paging.
+	if err := b.Prefetch.Start(string(r.UID), r.Status.Snapshot); err != nil {
+		log.Printf("checkpoint prefetch start %s/%s: %v", r.UID, r.Status.Snapshot, err)
 	}
 	return nil
 }
 
 func (b *Backend) Prepare(ctx context.Context, r *api.ResumablePod, p *core.Pod) (resultErr error) {
+	manifest, err := b.prepareSnapshot(ctx, r)
+	if err != nil {
+		return err
+	}
+	noRoot := false
+	if manifest != nil {
+		noRoot = manifest.NoRoot
+	} else {
+		policy, err := LoadRestorePolicy(b.Base)
+		if err != nil {
+			return err
+		}
+		noRoot = policy.noRoot()
+	}
 	mounts, err := b.prepareVolumeMounts(r, r.Status.Cycle == 1 && r.Status.Snapshot == "")
 	if err != nil {
 		return err
 	}
-	if err := b.prepareSnapshot(ctx, r); err != nil {
-		return err
-	}
-	ticket := Ticket{OwnerUID: string(r.UID), NodeName: r.Spec.NodeName, HomeVolumeUID: r.Spec.HomeVolumeUID, PodUID: string(p.UID), Namespace: p.Namespace, PodName: p.Name, Snapshot: r.Status.Snapshot, SpecHash: r.Status.SpecHash}
+	ticket := Ticket{OwnerUID: string(r.UID), NodeName: r.Spec.NodeName, HomeVolumeUID: r.Spec.HomeVolumeUID, NoRoot: noRoot, PodUID: string(p.UID), Namespace: p.Namespace, PodName: p.Name, Snapshot: r.Status.Snapshot, SpecHash: r.Status.SpecHash}
 	if r.Spec.Mounts != nil {
 		ticket.Mounts = mounts
 	} else if len(mounts) > 0 {
 		ticket.HomeID = mounts[0].HomeID
 	}
 	return AtomicJSON(filepath.Join(b.Base, "tickets", string(p.UID)+".json"), ticket)
+}
+
+func checkpointSandboxMode(base, sid string, r *api.ResumablePod, p *core.Pod) (bool, error) {
+	if len(sid) != 64 || !ValidID(sid) || p == nil {
+		return false, fmt.Errorf("invalid live sandbox identity")
+	}
+	var ticket Ticket
+	if err := ReadJSON(filepath.Join(base, "requests", sid+".json"), &ticket); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("read live sandbox request: %w", err)
+		}
+		policy, policyErr := LoadRestorePolicy(base)
+		if policyErr != nil {
+			return false, policyErr
+		}
+		if policy.noRoot() {
+			return false, fmt.Errorf("live sandbox request missing under no-root policy")
+		}
+		// Older root-mode executions may predate request ticket persistence.
+		return false, nil
+	}
+	if ticket.PodUID != string(p.UID) || ticket.PodName != p.Name || ticket.Namespace != p.Namespace || ticket.OwnerUID != string(r.UID) || ticket.SpecHash != r.Status.SpecHash {
+		return false, fmt.Errorf("live sandbox request identity mismatch")
+	}
+	return ticket.NoRoot, nil
 }
 
 func homeOwner(r *api.ResumablePod) string {
@@ -462,7 +518,7 @@ func (b *Backend) Cleanup(ctx context.Context, p *core.Pod) error {
 		if err != nil {
 			return err
 		}
-		for _, suffix := range []string{".json", ".json.started", ".json.child"} {
+		for _, suffix := range []string{".json", ".json.started", ".json.child", ".json.prepared"} {
 			if err = os.Remove(filepath.Join(b.Base, "requests", id+suffix)); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return err
 			}

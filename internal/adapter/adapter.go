@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Package adapter translates an authorized sandbox Start to native runsc Restore.
+// Package adapter translates authorized OCI requests to native runsc restore.
 // It deliberately preserves runsc's inherited file descriptors using syscall.Exec.
 package adapter
 
@@ -35,6 +35,9 @@ func argValue(args []string, key string) string {
 	}
 	return ""
 }
+
+// Rewrite returns the native invocation. An empty invocation means an already
+// prepared no-root warm sandbox completed Start while waiting for its assignment.
 func (a Adapter) Rewrite(args []string) ([]string, error) {
 	idx := -1
 	for i, s := range args {
@@ -69,8 +72,11 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 		podUID := spec.Annotations["io.kubernetes.cri.sandbox-uid"]
 		if node.ValidID(podUID) {
 			if _, err := os.Stat(filepath.Join(a.Base, "warm", podUID+".json")); err == nil {
-				_, err = node.BindWarm(a.Base, podUID, spec.Annotations["io.kubernetes.cri.sandbox-name"], spec.Annotations["io.kubernetes.cri.sandbox-namespace"], id)
-				return args, err
+				lease, err := node.BindWarm(a.Base, podUID, spec.Annotations["io.kubernetes.cri.sandbox-name"], spec.Annotations["io.kubernetes.cri.sandbox-namespace"], id)
+				if err != nil {
+					return nil, err
+				}
+				return a.sandboxCreate(args, idx, bundle, lease.NoRoot)
 			} else if !os.IsNotExist(err) {
 				return nil, err
 			}
@@ -140,20 +146,32 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 		if err = node.AtomicJSON(request, t); err != nil {
 			return nil, err
 		}
+		return a.sandboxCreate(args, idx, bundle, t.NoRoot)
 	case "start":
 		// Requests exist only for sandbox IDs, never for business container IDs.
 		var t node.Ticket
 		err := node.ReadJSON(request, &t)
 		if os.IsNotExist(err) {
-			return args, a.childStart(id)
+			return a.rewriteChildStart(args, idx, id)
 		}
 		if err != nil {
 			return nil, err
 		}
+		prepared := false
 		if _, warmErr := os.Stat(filepath.Join(a.Base, "warm", t.PodUID+".json")); warmErr == nil {
+			noRoot := t.NoRoot
+			if noRoot {
+				if err := a.prepareWarmNoRoot(args[:idx], id, request); err != nil {
+					return nil, err
+				}
+				prepared = true
+			}
 			t, err = node.WaitWarm(a.Base, t.PodUID, id)
 			if err != nil {
 				return nil, err
+			}
+			if t.NoRoot != noRoot {
+				return nil, fmt.Errorf("warm sandbox mode changed during assignment")
 			}
 			if err = node.AtomicJSON(request, t); err != nil {
 				return nil, err
@@ -175,7 +193,7 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 			if err != nil {
 				return nil, err
 			}
-			pageLoading = policy.PageLoading
+			pageLoading = policy.PageLoadingFor(t.NoRoot)
 		}
 		started := request + ".started"
 		f, err := os.OpenFile(started, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
@@ -213,6 +231,14 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 			prefix := append([]string{}, args[:idx]...)
 			if pageLoading != "" {
 				prefix = append(prefix, "--restore-page-loading="+pageLoading)
+			}
+			if t.NoRoot {
+				if prepared {
+					// The root was prepared before the request. Only the child
+					// supplies checkpoint files, through its own inherited FDs.
+					return nil, nil
+				}
+				return append(prefix, "restore", "--background", "--detach", id), nil
 			}
 			return append(prefix, "restore", "--background", "--detach", "--image-path="+path, id), nil
 		}
@@ -290,6 +316,9 @@ func (a Adapter) verifyVolumeIdentities(t node.Ticket) error {
 }
 
 func verifyTicketManifest(t node.Ticket, manifest *node.Manifest) error {
+	if t.NoRoot != manifest.NoRoot {
+		return fmt.Errorf("checkpoint sandbox mode mismatch")
+	}
 	if t.Mounts != nil {
 		if manifest.HomeID != "" || !reflect.DeepEqual(manifest.Mounts, t.Mounts) {
 			return fmt.Errorf("checkpoint volume mount identity mismatch")
@@ -328,6 +357,9 @@ func configuredRuntime() Adapter {
 func Main() {
 	a := configuredRuntime()
 	args, err := a.Rewrite(os.Args[1:])
+	if err == nil && len(args) == 0 {
+		return
+	}
 	if err == nil {
 		args, err = a.DiagnosticArgs(args)
 	}
