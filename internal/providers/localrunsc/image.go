@@ -54,6 +54,50 @@ func (p *Provider) configure(ctx context.Context, r record) error {
 		}
 	}
 	bundle := filepath.Join(p.dir(r.Handle.Name), "bundle")
+	// umoci and runsc honor the service umask when creating the filesystem
+	// root and missing mount paths. Guest UIDs must be able to traverse them.
+	root, err := os.OpenRoot(filepath.Join(bundle, "rootfs"))
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	for _, dir := range []string{".", "opt", "opt/cellbox", "opt/cellbox/bin"} {
+		if err := root.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
+		info, err := root.Lstat(dir)
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("guest agent parent must be a directory: %s", dir)
+		}
+		if err := root.Chown(dir, 0, 0); err != nil {
+			return err
+		}
+		if err := root.Chmod(dir, 0755); err != nil {
+			return err
+		}
+	}
+	const mountTarget = "opt/cellbox/bin/cellbox-container-agent"
+	if info, err := root.Lstat(mountTarget); err == nil && !info.Mode().IsRegular() {
+		return errors.New("guest agent mount target must be a regular file")
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	target, err := root.OpenFile(mountTarget, os.O_CREATE|os.O_RDONLY, 0755)
+	if err != nil {
+		return err
+	}
+	if err := target.Close(); err != nil {
+		return err
+	}
+	if err := root.Chown(mountTarget, 0, 0); err != nil {
+		return err
+	}
+	if err := root.Chmod(mountTarget, 0755); err != nil {
+		return err
+	}
 	b, err := os.ReadFile(filepath.Join(bundle, "config.json"))
 	if err != nil {
 		return err
@@ -106,18 +150,28 @@ func (p *Provider) configure(ctx context.Context, r record) error {
 		map[string]any{"destination": guestapi.Binary, "type": "bind", "source": p.guestBinary, "options": []string{"bind", "ro", "nosuid", "nodev"}},
 	}
 	// Bind a host-controlled resolver file instead of following paths from an image.
-	resolver, err := os.ReadFile("/etc/resolv.conf")
-	if err != nil {
-		return err
-	}
 	var resolvers []string
-	for _, line := range strings.Split(string(resolver), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 2 && fields[0] == "nameserver" {
-			ip := net.ParseIP(fields[1])
-			if ip != nil && ip.To4() != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
-				resolvers = append(resolvers, "nameserver "+ip.String())
+	// systemd-resolved's loopback stub is unreachable in a sandbox. Use
+	// its uplink file before falling back to public resolvers.
+	for _, file := range []string{"/etc/resolv.conf", "/run/systemd/resolve/resolv.conf"} {
+		resolver, err := os.ReadFile(file)
+		if os.IsNotExist(err) && file != "/etc/resolv.conf" {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		for _, line := range strings.Split(string(resolver), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 && fields[0] == "nameserver" {
+				ip := net.ParseIP(fields[1])
+				if ip != nil && ip.To4() != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
+					resolvers = append(resolvers, "nameserver "+ip.String())
+				}
 			}
+		}
+		if len(resolvers) > 0 {
+			break
 		}
 	}
 	if len(resolvers) == 0 {
@@ -125,6 +179,9 @@ func (p *Provider) configure(ctx context.Context, r record) error {
 	}
 	resolverPath := filepath.Join(p.dir(r.Handle.Name), "resolv.conf")
 	if err := os.WriteFile(resolverPath, []byte(strings.Join(resolvers, "\n")+"\n"), 0644); err != nil {
+		return err
+	}
+	if err := os.Chmod(resolverPath, 0644); err != nil {
 		return err
 	}
 	mounts = append(mounts, map[string]any{"destination": "/etc/resolv.conf", "type": "bind", "source": resolverPath, "options": []string{"bind", "ro", "nosuid", "nodev", "noexec"}})

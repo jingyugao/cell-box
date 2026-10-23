@@ -365,7 +365,11 @@ func (p *Provider) Destroy(ctx context.Context, h boxprovider.Handle) error {
 	if err != nil {
 		return err
 	}
-	return p.cleanup(ctx, r)
+	err = p.cleanup(ctx, r)
+	if err != nil {
+		slog.Error("local sandbox cleanup failed", "box", h.Name, "error", err)
+	}
+	return err
 }
 
 func (p *Provider) cleanup(ctx context.Context, r record) error {

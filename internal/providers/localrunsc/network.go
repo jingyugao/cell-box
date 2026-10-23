@@ -299,7 +299,22 @@ func (n network) remove(ctx context.Context) error {
 			for _, link := range links {
 				if link.Name == n.Name {
 					if _, err := command(ctx, "ip", "link", "del", n.Name); err != nil {
-						errs = append(errs, fmt.Errorf("delete host veth %s: %w", n.Name, err))
+						// Dropping the namespace can asynchronously remove its veth
+						// between the listing and deletion. Confirm absence before
+						// treating that race as successful cleanup.
+						after, checkErr := command(ctx, "ip", "-j", "link", "show")
+						var remaining []struct {
+							Name string `json:"ifname"`
+						}
+						gone := checkErr == nil && json.Unmarshal(after, &remaining) == nil
+						for _, link := range remaining {
+							if link.Name == n.Name {
+								gone = false
+							}
+						}
+						if !gone {
+							errs = append(errs, fmt.Errorf("delete host veth %s: %w", n.Name, err))
+						}
 					}
 					break
 				}
