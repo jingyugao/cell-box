@@ -251,6 +251,7 @@ func (s *Service) registerVolumes(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, v.Volume)
 	})
+	mux.HandleFunc("GET /v1/volumes/{id}/files", s.volumeFiles)
 	mux.HandleFunc("DELETE /v1/volumes/{id}", func(w http.ResponseWriter, r *http.Request) {
 		op, err := s.deleteVolume(clientID(r), r.PathValue("id"))
 		if err != nil {

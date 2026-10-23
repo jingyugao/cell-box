@@ -301,6 +301,9 @@ func volumeBackupError(err error) error {
 	if errors.Is(err, volumebackup.ErrInvalid) {
 		return apiError("INVALID_REQUEST", "Invalid volume backup request")
 	}
+	if errors.Is(err, volumebackup.ErrOutputTooBig) {
+		return apiError("INVALID_REQUEST", "Backup file exceeds the 16 MiB REST transfer limit")
+	}
 	if errors.Is(err, boxprovider.ErrNotReady) {
 		return apiError("BUSY", "Volume still has a runtime or storage operation in progress")
 	}
@@ -354,6 +357,7 @@ func (s *Service) registerVolumeBackups(mux *http.ServeMux) {
 		}
 		fail(w, apiError("NOT_FOUND", "Volume backup not found"))
 	})
+	mux.HandleFunc("GET /v1/volumes/{id}/backups/{backupId}/files", s.backupFile)
 	mux.HandleFunc("POST /v1/volumes:restore", func(w http.ResponseWriter, r *http.Request) {
 		var input restoreVolumeRequest
 		if err := decode(w, r, &input); err != nil {

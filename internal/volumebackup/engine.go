@@ -38,6 +38,7 @@ const (
 	completeTag       = "cellbox-complete"
 	pendingTag        = "cellbox-pending"
 	outputLimit       = 8 << 20
+	fileOutputLimit   = 16 << 20
 	stderrLimit       = 8 << 10
 	commandMaxRuntime = 24 * time.Hour
 )
@@ -244,6 +245,91 @@ func (e *Engine) Restore(ctx context.Context, clientID, volumeID, snapshotID, ta
 	return err
 }
 
+// ReadFile prints one regular file from a completed snapshot. Restic receives a
+// single relative path and the output remains bounded before it reaches HTTP.
+func (e *Engine) ReadFile(ctx context.Context, clientID, volumeID, snapshotID, rel string) ([]byte, error) {
+	if err := e.ready(clientID, volumeID); err != nil {
+		return nil, err
+	}
+	if !snapshotIDPattern.MatchString(snapshotID) || !safeSnapshotPath(rel) {
+		return nil, fmt.Errorf("%w: full snapshot ID and clean relative path are required", ErrInvalid)
+	}
+	items, err := e.listSnapshots(ctx, clientID, volumeID)
+	if err != nil {
+		return nil, err
+	}
+	completed := false
+	for _, item := range items {
+		if strings.EqualFold(item.ID, snapshotID) && contains(item.Tags, completeTag) {
+			completed = true
+			break
+		}
+	}
+	if !completed {
+		return nil, ErrNotFound
+	}
+	listingPath := "/" + rel
+	listing, err := e.run(ctx, "", append(e.baseArgs(clientID, volumeID), "--json", "ls", snapshotID, listingPath)...)
+	if err != nil {
+		if commandExitCode(err) == 10 {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	found := false
+	decoder := json.NewDecoder(bytes.NewReader(listing))
+	for {
+		var node struct {
+			MessageType string `json:"message_type"`
+			Path        string `json:"path"`
+			Type        string `json:"type"`
+			Size        uint64 `json:"size"`
+		}
+		if err := decoder.Decode(&node); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, fmt.Errorf("%w: invalid snapshot file listing", ErrCommand)
+		}
+		if node.MessageType == "node" && snapshotPathMatches(node.Path, rel) {
+			if node.Type != "file" {
+				return nil, fmt.Errorf("%w: snapshot path is not a regular file", ErrInvalid)
+			}
+			if node.Size > fileOutputLimit {
+				return nil, ErrOutputTooBig
+			}
+			found = true
+		}
+	}
+	if !found {
+		return nil, ErrNotFound
+	}
+	args := append(e.baseArgs(clientID, volumeID), "dump", "--", snapshotID, rel)
+	contents, err := e.runWithOutputLimit(ctx, "", fileOutputLimit, args...)
+	if commandExitCode(err) == 10 {
+		return nil, ErrNotFound
+	}
+	return contents, err
+}
+
+func snapshotPathMatches(candidate, rel string) bool {
+	candidate = strings.TrimPrefix(path.Clean(candidate), "/")
+	rel = strings.TrimPrefix(path.Clean(rel), "/")
+	return candidate == rel
+}
+
+func safeSnapshotPath(rel string) bool {
+	if rel == "" || strings.HasPrefix(rel, "/") || strings.ContainsRune(rel, 0) || len(rel) > 4096 {
+		return false
+	}
+	for _, part := range strings.Split(rel, "/") {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return path.Clean(rel) == rel
+}
+
 func (e *Engine) ready(clientID, volumeID string) error {
 	if clientID == "" || volumeID == "" {
 		return fmt.Errorf("%w: client and volume IDs are required", ErrInvalid)
@@ -281,6 +367,10 @@ func (e *Engine) repository(clientID, volumeID string) string {
 }
 
 func (e *Engine) run(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	return e.runWithOutputLimit(ctx, dir, outputLimit, args...)
+}
+
+func (e *Engine) runWithOutputLimit(ctx context.Context, dir string, limit int, args ...string) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -291,7 +381,7 @@ func (e *Engine) run(ctx context.Context, dir string, args ...string) ([]byte, e
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Stdin = nil
 	cmd.Env = e.commandEnv()
-	stdout := &boundedBuffer{limit: outputLimit}
+	stdout := &boundedBuffer{limit: limit}
 	stderr := &boundedBuffer{limit: stderrLimit}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err := cmd.Run()

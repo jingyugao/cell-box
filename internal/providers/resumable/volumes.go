@@ -46,6 +46,19 @@ func (p *Provider) WithStoppedVolume(ctx context.Context, spec boxprovider.Volum
 	if p.WithStoppedVolumeLocal == nil {
 		return errors.New("local stopped-volume access is unavailable")
 	}
+	if err := p.requireStoppedVolumeAttachments(ctx, spec); err != nil {
+		return err
+	}
+	return p.WithStoppedVolumeLocal(ctx, spec, func(root string) error {
+		// Recheck after taking the node volume lock to narrow the transition race.
+		if err := p.requireStoppedVolumeAttachments(ctx, spec); err != nil {
+			return err
+		}
+		return work(root)
+	})
+}
+
+func (p *Provider) requireStoppedVolumeAttachments(ctx context.Context, spec boxprovider.VolumeSpec) error {
 	list := &api.ResumablePodList{}
 	if err := p.Client.List(ctx, list, client.InNamespace(spec.Namespace)); err != nil {
 		return fmt.Errorf("list volume attachments: %w", err)
@@ -64,7 +77,7 @@ func (p *Provider) WithStoppedVolume(ctx context.Context, spec boxprovider.Volum
 			return boxprovider.ErrNotReady
 		}
 	}
-	return p.WithStoppedVolumeLocal(ctx, spec, work)
+	return nil
 }
 
 func referencesIndependentVolume(box *api.ResumablePod, uid string) bool {
