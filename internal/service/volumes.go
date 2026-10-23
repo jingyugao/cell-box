@@ -110,8 +110,8 @@ func newVolume(id, owner, client string, p Profile) volumeRecord {
 
 func (s *Service) volumeProvider(p Profile) (boxprovider.VolumeProvider, error) {
 	vp, ok := s.providers[p.Provider].(boxprovider.VolumeProvider)
-	if !ok || p.Provider != "resumable-k8s-pod" || !p.PersistentHome {
-		return nil, apiError("UNSUPPORTED_CAPABILITY", "Volumes require the node-local resumable provider")
+	if !ok || (p.Provider != "resumable-k8s-pod" && p.Provider != "local-runsc") || !p.PersistentHome {
+		return nil, apiError("UNSUPPORTED_CAPABILITY", "Volumes require a persistent HOME provider")
 	}
 	return vp, nil
 }

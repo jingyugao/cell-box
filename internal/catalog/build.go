@@ -33,6 +33,13 @@ func validBuildImage(value string, snapshot json.RawMessage) bool {
 	return json.Unmarshal(snapshot, &profile) == nil && profile.Provider == "docker" && localDockerImage.MatchString(value)
 }
 
+func profileUsesLocalRunsc(snapshot json.RawMessage) bool {
+	var profile struct {
+		Provider string `json:"provider"`
+	}
+	return json.Unmarshal(snapshot, &profile) == nil && profile.Provider == "local-runsc"
+}
+
 func (b *imageBuilder) Build(ctx context.Context, in BuildInput, log io.Writer, stage func(string) error) (out BuildResult, err error) {
 	if err = stage("resolving"); err != nil {
 		return out, err
@@ -60,6 +67,14 @@ func (b *imageBuilder) Build(ctx context.Context, in BuildInput, log io.Writer, 
 	}
 	out = BuildResult{ResolvedBaseImage: resolved.Source, Command: resolved.Command, Env: resolved.Env, WorkingDir: resolved.WorkingDir}
 	fmt.Fprintf(log, "Resolved base image: %s\n", resolved.Source)
+	if profileUsesLocalRunsc(in.Profile.Snapshot) {
+		if in.BuildCommand != "" {
+			return out, errors.New("local-runsc revisions do not support buildCommand")
+		}
+		out.Image = resolved.Source
+		fmt.Fprintf(log, "Using immutable source image for local-runsc: %s\n", out.Image)
+		return out, nil
+	}
 	if err = stage("building"); err != nil {
 		return out, err
 	}
@@ -182,7 +197,10 @@ func (m *Manager) executeBuild(ctx context.Context, client string, op Operation,
 	result, buildErr := m.config.Builder.Build(ctx, in, log, func(stage string) error { return m.stage(client, op.ID, stage) })
 	var snapshot json.RawMessage
 	if buildErr == nil {
-		if !validBuildImage(result.Image, in.Profile.Snapshot) {
+		if profileUsesLocalRunsc(in.Profile.Snapshot) && (in.BuildCommand != "" || result.Image != result.ResolvedBaseImage) {
+			buildErr = errors.New("local-runsc revisions must use the resolved source image without buildCommand")
+		}
+		if buildErr == nil && !validBuildImage(result.Image, in.Profile.Snapshot) {
 			buildErr = errors.New("builder did not return an immutable registry image")
 		}
 		if buildErr == nil && m.config.FinalizeProfile != nil {

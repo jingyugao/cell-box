@@ -1,0 +1,16 @@
+{
+  "listen": "127.0.0.1:8090",
+  "dataDir": "data-local",
+  "clientId": "local",
+  "startupTimeoutSeconds": 180,
+  "profiles": [
+    {
+      "id": "local-runsc",
+      "provider": "local-runsc",
+      "image": "docker.io/library/alpine@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f",
+      "guest": {
+        "workspace": "/home/agent/workspace"
+      }
+    }
+  ]
+}

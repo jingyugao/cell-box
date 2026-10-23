@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"path"
 	"slices"
@@ -213,6 +214,10 @@ func cloneError(err error) *APIError {
 func profileCapabilities(p Profile) Capabilities {
 	k8s := p.Provider == "resumable-k8s-pod"
 	c := Capabilities{Exec: true, Files: true, HTTP: true, WebSocket: true, InternalServices: true, Suspend: "none", Archives: "none"}
+	if p.Provider == "local-runsc" {
+		c.PersistentHome = p.PersistentHome
+		c.Suspend = "same-node-checkpoint"
+	}
 	if k8s {
 		c.Suspend = "same-node-checkpoint"
 		if p.PersistentHome {
@@ -791,7 +796,8 @@ func (s *Service) create(client string, input createRequest, archiveID string, a
 	if archiveID != "" && (input.HomeVolumeID != "" || len(input.Mounts) > 0) {
 		return Operation{}, apiError("INVALID_REQUEST", "Archive restore requires a new HOME volume")
 	}
-	if (input.HomeVolumeID != "" || len(input.Mounts) > 0) && (profile.Provider != "resumable-k8s-pod" || !profile.PersistentHome) {
+	if (input.HomeVolumeID != "" || len(input.Mounts) > 0) &&
+		((profile.Provider != "resumable-k8s-pod" && profile.Provider != "local-runsc") || !profile.PersistentHome) {
 		return Operation{}, boxprovider.ErrUnsupported
 	}
 	if profile.PersistentHome {
@@ -889,8 +895,16 @@ func (s *Service) actionContextWithGeneration(ctx context.Context, client, id, a
 		if err != nil {
 			return err
 		}
-		if b.Profile.Provider != "resumable-k8s-pod" && action != "destroy" {
-			return boxprovider.ErrUnsupported
+		switch action {
+		case "destroy":
+		case "suspend", "resume":
+			if b.Profile.Provider != "resumable-k8s-pod" && b.Profile.Provider != "local-runsc" {
+				return boxprovider.ErrUnsupported
+			}
+		case "activate":
+			if b.Profile.Provider != "resumable-k8s-pod" {
+				return boxprovider.ErrUnsupported
+			}
 		}
 		if expectedGeneration != nil && *expectedGeneration != b.Box.Generation {
 			return apiError("STALE_GENERATION", "Lifecycle request targets another Box generation")
@@ -981,6 +995,7 @@ func (s *Service) actionContextWithGeneration(ctx context.Context, client, id, a
 			}
 		case "suspend":
 			if err := s.quiesceGuest(ctx, b); err != nil {
+				slog.Error("sandbox quiesce failed", "box", id, "error", err)
 				return nil, err
 			}
 			transition := p.(boxprovider.TransitionProvider)
