@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"path"
 	"slices"
@@ -994,6 +995,7 @@ func (s *Service) actionContextWithGeneration(ctx context.Context, client, id, a
 			}
 		case "suspend":
 			if err := s.quiesceGuest(ctx, b); err != nil {
+				slog.Error("sandbox quiesce failed", "box", id, "error", err)
 				return nil, err
 			}
 			transition := p.(boxprovider.TransitionProvider)

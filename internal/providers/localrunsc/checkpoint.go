@@ -162,8 +162,6 @@ func (p *Provider) WatchObservations(ctx context.Context, h boxprovider.Handle) 
 		defer close(stream)
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
-		var previous boxprovider.Observation
-		first := true
 		for {
 			p.mu.Lock()
 			o, err := p.inspect(ctx, h)
@@ -175,13 +173,12 @@ func (p *Provider) WatchObservations(ctx context.Context, h boxprovider.Handle) 
 			if err != nil {
 				return // The service reconnects after transient inspection failures.
 			}
-			if first || o != previous {
-				select {
-				case stream <- o:
-				case <-ctx.Done():
-					return
-				}
-				previous, first = o, false
+			// Heartbeats also repair a service-side admission that failed before
+			// changing runtime state, after its operation has been cleared.
+			select {
+			case stream <- o:
+			case <-ctx.Done():
+				return
 			}
 			if o.Phase == "deleted" {
 				return
@@ -206,9 +203,14 @@ func (p *Provider) RequestResume(ctx context.Context, h boxprovider.Handle, prev
 	return p.ActionTransition(ctx, h, "resume", previous, next)
 }
 
-func (p *Provider) ActionTransition(ctx context.Context, h boxprovider.Handle, action, previous, next string) error {
+func (p *Provider) ActionTransition(ctx context.Context, h boxprovider.Handle, action, previous, next string) (result error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	defer func() {
+		if result != nil {
+			slog.Error("local sandbox transition failed", "box", h.Name, "action", action, "error", result)
+		}
+	}()
 	r, err := p.owned(h)
 	if err != nil {
 		return err
