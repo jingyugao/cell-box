@@ -215,6 +215,7 @@ func profileCapabilities(p Profile) Capabilities {
 	c := Capabilities{Exec: true, Files: true, HTTP: true, WebSocket: true, InternalServices: true, Suspend: "none", Archives: "none"}
 	if p.Provider == "local-runsc" {
 		c.PersistentHome = p.PersistentHome
+		c.Suspend = "same-node-checkpoint"
 	}
 	if k8s {
 		c.Suspend = "same-node-checkpoint"
@@ -893,8 +894,16 @@ func (s *Service) actionContextWithGeneration(ctx context.Context, client, id, a
 		if err != nil {
 			return err
 		}
-		if b.Profile.Provider != "resumable-k8s-pod" && action != "destroy" {
-			return boxprovider.ErrUnsupported
+		switch action {
+		case "destroy":
+		case "suspend", "resume":
+			if b.Profile.Provider != "resumable-k8s-pod" && b.Profile.Provider != "local-runsc" {
+				return boxprovider.ErrUnsupported
+			}
+		case "activate":
+			if b.Profile.Provider != "resumable-k8s-pod" {
+				return boxprovider.ErrUnsupported
+			}
 		}
 		if expectedGeneration != nil && *expectedGeneration != b.Box.Generation {
 			return apiError("STALE_GENERATION", "Lifecycle request targets another Box generation")

@@ -23,6 +23,7 @@ import (
 	"cellbox.local/cellbox/internal/boxprovider"
 	"cellbox.local/cellbox/internal/guestapi"
 	"cellbox.local/cellbox/internal/homevolume"
+	"cellbox.local/cellbox/internal/inventory"
 	"golang.org/x/sys/unix"
 )
 
@@ -36,14 +37,24 @@ type Provider struct {
 	base, guestBinary string
 	platform          string
 	lock              *os.File
+	changed           chan struct{}
+	checkpoints       inventory.CheckpointStore
 }
 
 type record struct {
-	Handle      boxprovider.Handle `json:"handle"`
-	Spec        boxprovider.Spec   `json:"spec"`
-	Fingerprint string             `json:"fingerprint"`
-	Network     network            `json:"network"`
-	Ready       bool               `json:"ready"`
+	Handle               boxprovider.Handle `json:"handle"`
+	Spec                 boxprovider.Spec   `json:"spec"`
+	Fingerprint          string             `json:"fingerprint"`
+	Network              network            `json:"network"`
+	Ready                bool               `json:"ready"`
+	Phase                string             `json:"phase,omitempty"`
+	Generation           uint64             `json:"generation,omitempty"`
+	TransitionID         string             `json:"transitionId,omitempty"`
+	ObservedTransitionID string             `json:"observedTransitionId,omitempty"`
+	Snapshot             string             `json:"snapshot,omitempty"`
+	Platform             string             `json:"platform,omitempty"`
+	RunscVersion         string             `json:"runscVersion,omitempty"`
+	Message              string             `json:"message,omitempty"`
 }
 
 func New(dataDir, guestBinary, platform string) (*Provider, error) {
@@ -99,7 +110,12 @@ func New(dataDir, guestBinary, platform string) (*Provider, error) {
 		lock.Close()
 		return nil, errors.New("another local-runsc server owns this data directory")
 	}
-	return &Provider{base: base, guestBinary: guestBinary, platform: platform, lock: lock}, nil
+	p := &Provider{base: base, guestBinary: guestBinary, platform: platform, lock: lock, changed: make(chan struct{})}
+	if err := p.recoverInterrupted(); err != nil {
+		lock.Close()
+		return nil, err
+	}
+	return p, nil
 }
 
 func (*Provider) Name() string { return "local-runsc" }
@@ -117,7 +133,7 @@ func command(ctx context.Context, binary string, args ...string) ([]byte, error)
 
 func (p *Provider) run(ctx context.Context, args ...string) ([]byte, error) {
 	runArgs := append([]string{"--root=" + filepath.Join(p.base, "runsc"), "--network=sandbox", "--platform=" + p.platform, "--debug-log=" + filepath.Join(p.base, "runsc.log"), "--debug-command=create,start,boot,gofer"}, args...)
-	if len(args) > 0 && args[0] == "create" {
+	if len(args) > 0 && (args[0] == "create" || args[0] == "restore") {
 		// Sentry inherits OCI stdio and outlives create. A capture pipe would
 		// keep exec.Wait blocked until the whole sandbox exits.
 		log, err := os.OpenFile(filepath.Join(p.base, "runsc", args[len(args)-1]+".log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
@@ -128,7 +144,7 @@ func (p *Provider) run(ctx context.Context, args ...string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, "runsc", runArgs...)
 		cmd.Stdout, cmd.Stderr = log, log
 		if err := cmd.Run(); err != nil {
-			return nil, fmt.Errorf("runsc create failed (see %s): %w", log.Name(), err)
+			return nil, fmt.Errorf("runsc %s failed (see %s): %w", args[0], log.Name(), err)
 		}
 		return nil, nil
 	}
@@ -159,7 +175,11 @@ func (p *Provider) save(r record) error {
 		return err
 	}
 	defer d.Close()
-	return d.Sync()
+	if err := d.Sync(); err != nil {
+		return err
+	}
+	p.notify()
+	return nil
 }
 func (p *Provider) load(name string) (record, error) {
 	var r record
@@ -178,6 +198,12 @@ func (p *Provider) load(name string) (record, error) {
 	}
 	if r.Handle.Provider != p.Name() || r.Handle.Name != name || !executionID.MatchString(r.Handle.ID) || r.Network.Name != "cbl"+r.Handle.ID[:12] {
 		return r, errors.New("invalid local sandbox ownership record")
+	}
+	if r.Generation == 0 {
+		r.Generation = 1
+	}
+	if r.Phase == "" && r.Ready {
+		r.Phase = "running"
 	}
 	return r, nil
 }
@@ -252,7 +278,7 @@ func (p *Provider) Create(ctx context.Context, s boxprovider.Spec) (boxprovider.
 	if err != nil {
 		return zero, err
 	}
-	r := record{Handle: h, Spec: s, Fingerprint: fingerprint, Network: n}
+	r := record{Handle: h, Spec: s, Fingerprint: fingerprint, Network: n, Phase: "creating", Generation: 1, Platform: p.platform}
 	if err := os.MkdirAll(p.dir(h.Name), 0700); err != nil {
 		return zero, err
 	}
@@ -281,6 +307,7 @@ func (p *Provider) Create(ctx context.Context, s boxprovider.Spec) (boxprovider.
 		return fail(err)
 	}
 	r.Ready = true
+	r.Phase = "running"
 	if err := p.save(r); err != nil {
 		return fail(err)
 	}
@@ -314,42 +341,28 @@ func (p *Provider) state(ctx context.Context, id string) (runtimeState, error) {
 func (p *Provider) Inspect(ctx context.Context, h boxprovider.Handle) (boxprovider.Observation, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	r, err := p.owned(h)
-	if err != nil {
-		return boxprovider.Observation{}, err
-	}
-	s, err := p.state(ctx, h.ID)
-	if errors.Is(err, boxprovider.ErrNotFound) {
-		return boxprovider.Observation{Phase: "failed", ExecutionID: h.ID, Message: "local runsc sandbox is absent"}, nil
-	}
-	if err != nil {
-		return boxprovider.Observation{}, err
-	}
-	phase := "failed"
-	if s.Status == "running" {
-		phase = "running"
-	} else if s.Status == "created" || !r.Ready {
-		phase = "creating"
-	}
-	return boxprovider.Observation{Phase: phase, ExecutionID: h.ID}, nil
-}
-
-func (*Provider) Action(context.Context, boxprovider.Handle, string) error {
-	return boxprovider.ErrUnsupported
+	return p.inspect(ctx, h)
 }
 
 func (p *Provider) Guest(ctx context.Context, h boxprovider.Handle) (boxprovider.Connection, error) {
+	return p.GuestForExecution(ctx, h, "")
+}
+
+func (p *Provider) GuestForExecution(ctx context.Context, h boxprovider.Handle, execution string) (boxprovider.Connection, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	r, err := p.owned(h)
 	if err != nil {
 		return boxprovider.Connection{}, err
 	}
+	if execution != "" && execution != r.execution() {
+		return boxprovider.Connection{}, boxprovider.ErrStaleExecution
+	}
 	s, err := p.state(ctx, h.ID)
 	if err != nil {
 		return boxprovider.Connection{}, err
 	}
-	if !r.Ready || s.Status != "running" {
+	if !r.Ready || r.Phase != "running" || s.Status != "running" {
 		return boxprovider.Connection{}, boxprovider.ErrNotReady
 	}
 	return boxprovider.Connection{URL: fmt.Sprintf("http://%s:%d", r.Network.Guest, guestapi.Port)}, nil
@@ -383,7 +396,16 @@ func (p *Provider) cleanup(ctx context.Context, r record) error {
 	if err := r.Network.remove(ctx); err != nil {
 		return err
 	}
-	return os.RemoveAll(p.dir(r.Handle.Name))
+	if p.checkpoints != nil {
+		if err := p.checkpoints.DeleteCheckpoint(ctx, r.Handle.ID, ""); err != nil {
+			return err
+		}
+	}
+	if err := os.RemoveAll(p.dir(r.Handle.Name)); err != nil {
+		return err
+	}
+	p.notify()
+	return nil
 }
 
 func (p *Provider) volumeBusy(uid string) error {

@@ -208,6 +208,11 @@ func serveUnified(parent context.Context, config service.Config, dockerBinary st
 			return errors.Join(err, app.Close())
 		}
 	}
+	if provider, ok := providers["local-runsc"].(*localrunsc.Provider); ok {
+		if err := provider.SetCheckpointStore(ctx, app.CheckpointStore()); err != nil {
+			return errors.Join(err, app.Close())
+		}
+	}
 	runtimeResult := make(chan error, 1)
 	if mgr != nil {
 		go func() { runtimeResult <- mgr.Start(ctx) }()

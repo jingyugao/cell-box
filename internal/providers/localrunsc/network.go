@@ -159,20 +159,32 @@ func (n network) create(ctx context.Context) error {
 	if _, err := command(ctx, "ip", "link", "set", n.Name, "up"); err != nil {
 		return fmt.Errorf("bring up host veth for %s: %w", n.Name, err)
 	}
+	if err := n.configureGuest(ctx); err != nil {
+		return err
+	}
+	if err := n.installFirewall(ctx); err != nil {
+		return fmt.Errorf("install firewall rules for %s: %w", n.Name, err)
+	}
+	return nil
+}
+
+// runsc consumes the namespace's addresses and routes when setting up netstack.
+// Re-populate them before restore while retaining the same namespace and veth.
+func (n network) configureGuest(ctx context.Context) error {
+	if err := n.validate(); err != nil {
+		return err
+	}
 	if _, err := command(ctx, "ip", "-n", n.Name, "link", "set", "lo", "up"); err != nil {
 		return fmt.Errorf("bring up loopback in %s: %w", n.Name, err)
 	}
-	if _, err := command(ctx, "ip", "-n", n.Name, "addr", "add", n.Guest+"/30", "dev", "eth0"); err != nil {
+	if _, err := command(ctx, "ip", "-n", n.Name, "addr", "replace", n.Guest+"/30", "dev", "eth0"); err != nil {
 		return fmt.Errorf("assign guest address in %s: %w", n.Name, err)
 	}
 	if _, err := command(ctx, "ip", "-n", n.Name, "link", "set", "eth0", "up"); err != nil {
 		return fmt.Errorf("bring up guest veth in %s: %w", n.Name, err)
 	}
-	if _, err := command(ctx, "ip", "-n", n.Name, "route", "add", "default", "via", n.Host, "dev", "eth0"); err != nil {
+	if _, err := command(ctx, "ip", "-n", n.Name, "route", "replace", "default", "via", n.Host, "dev", "eth0"); err != nil {
 		return fmt.Errorf("add default route in %s: %w", n.Name, err)
-	}
-	if err := n.installFirewall(ctx); err != nil {
-		return fmt.Errorf("install firewall rules for %s: %w", n.Name, err)
 	}
 	return nil
 }

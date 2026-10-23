@@ -220,12 +220,27 @@ if ! $skip_smoke; then
   op=$(api '/v1/boxes' -X POST -d "$input" | jq -er '.id')
   wait_operation "$op" >/dev/null
   generation=$(api "/v1/boxes/$smoke_id" | jq -er '.generation')
-  input=$(jq -nc --argjson generation "$generation" '{argv:["/bin/sh","-c","id; test -r /etc/resolv.conf && printf cellbox-gvisor-ok"],expectedGeneration:$generation}')
+  input=$(jq -nc --arg token "$smoke_id" --argjson generation "$generation" '{argv:["/bin/sh","-c","id; test -r /etc/resolv.conf && printf %s \"$1\" >/tmp/cellbox-checkpoint-token && printf cellbox-gvisor-ok","smoke",$token],expectedGeneration:$generation}')
   op=$(api "/v1/boxes/$smoke_id/execs" -X POST -d "$input" | jq -er '.id')
   result=$(wait_operation "$op")
   execution=$(api "/v1/execs/$(jq -er '.result.execId' <<< "$result")")
   jq -e '.result.exitCode==0 and (.result.stdout | contains("cellbox-gvisor-ok"))' <<< "$execution" >/dev/null
   printf '%s\n' "$execution" | jq -r '.result.stdout'
+  input=$(jq -nc --argjson generation "$generation" '{expectedGeneration:$generation}')
+  op=$(api "/v1/boxes/$smoke_id:suspend" -X POST -d "$input" | jq -er '.id')
+  wait_operation "$op" >/dev/null
+  api '/v1/checkpoints' | jq -e --arg id "$smoke_id" 'any(.[]; .id==$id and .phase=="suspended" and .imageId!=null)' >/dev/null
+  op=$(api "/v1/boxes/$smoke_id:resume" -X POST -d "$input" | jq -er '.id')
+  wait_operation "$op" >/dev/null
+  generation=$(api "/v1/boxes/$smoke_id" | jq -er '.generation')
+  ((generation >= 2)) || die 'Resume did not advance the sandbox generation'
+  input=$(jq -nc --argjson generation "$generation" '{argv:["/bin/cat","/tmp/cellbox-checkpoint-token"],expectedGeneration:$generation}')
+  op=$(api "/v1/boxes/$smoke_id/execs" -X POST -d "$input" | jq -er '.id')
+  result=$(wait_operation "$op")
+  execution=$(api "/v1/execs/$(jq -er '.result.execId' <<< "$result")")
+  jq -e --arg token "$smoke_id" '.result.exitCode==0 and .result.stdout==$token' <<< "$execution" >/dev/null
+  api '/v1/checkpoints' | jq -e --arg id "$smoke_id" 'all(.[]; .id!=$id)' >/dev/null
+  printf 'Checkpoint/resume: restored tmpfs token, generation %s\n' "$generation"
   cleanup_smoke
   trap - EXIT
 fi
