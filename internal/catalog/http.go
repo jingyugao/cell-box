@@ -350,9 +350,6 @@ func (m *Manager) submitBuild(r *http.Request) (any, int, error) {
 	if m.config.ResolveProfile == nil {
 		return nil, 0, failure("UNSUPPORTED_CAPABILITY", "Profile resolution is not configured")
 	}
-	if b, ok := m.config.Builder.(*imageBuilder); ok && b.options.Address == "" {
-		return nil, 0, failure("UNSUPPORTED_CAPABILITY", "Image building is not configured")
-	}
 	profile, err := m.config.ResolveProfile(client, in.ProfileID)
 	if err != nil {
 		return nil, 0, err
@@ -360,9 +357,19 @@ func (m *Manager) submitBuild(r *http.Request) (any, int, error) {
 	if !json.Valid(profile.Snapshot) {
 		return nil, 0, failure("INVALID_REQUEST", "Invalid resolved profile")
 	}
+	localRunsc := profileUsesLocalRunsc(profile.Snapshot)
+	if localRunsc && in.BuildCommand != "" {
+		return nil, 0, failure("UNSUPPORTED_CAPABILITY", "local-runsc revisions do not support buildCommand")
+	}
+	if b, ok := m.config.Builder.(*imageBuilder); ok && b.options.Address == "" && !localRunsc {
+		return nil, 0, failure("UNSUPPORTED_CAPABILITY", "Image building is not configured")
+	}
 	if in.WarmSlots == nil {
 		n := t.DefaultWarmSlots
 		in.WarmSlots = &n
+	}
+	if localRunsc && *in.WarmSlots != 0 {
+		return nil, 0, failure("UNSUPPORTED_CAPABILITY", "local-runsc revisions do not support warm slots")
 	}
 	now := time.Now().UTC()
 	op := Operation{ID: newID("build-"), Kind: "template-build", TargetID: t.ID, Status: "queued", Stage: "queued", Version: 1, Input: in, CreatedAt: now, UpdatedAt: now}

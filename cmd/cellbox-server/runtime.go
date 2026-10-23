@@ -13,6 +13,7 @@ import (
 	"cellbox.local/cellbox/internal/controller"
 	"cellbox.local/cellbox/internal/node"
 	"cellbox.local/cellbox/internal/providers/docker"
+	"cellbox.local/cellbox/internal/providers/localrunsc"
 	"cellbox.local/cellbox/internal/providers/resumable"
 	"cellbox.local/cellbox/internal/runtimecontrol"
 	"cellbox.local/cellbox/internal/service"
@@ -29,6 +30,8 @@ import (
 
 type nodeOptions struct {
 	Node, Namespace, Socket string
+	LocalGuestBinary        string
+	LocalPlatform           string
 	HostMountNamespace      bool
 	WarmPoolSize            int
 }
@@ -40,7 +43,12 @@ func (o nodeOptions) validate(config service.Config) error {
 	if o.Node != "" && (o.Namespace == "" || o.Socket == "") {
 		return errors.New("node runtime requires --namespace and --cri-socket")
 	}
+	localRunsc := false
 	for _, p := range config.Profiles {
+		if p.Provider == "local-runsc" {
+			localRunsc = true
+			continue
+		}
 		if p.Provider != "resumable-k8s-pod" {
 			continue
 		}
@@ -50,6 +58,9 @@ func (o nodeOptions) validate(config service.Config) error {
 		if p.NodeName != o.Node || p.Namespace != o.Namespace {
 			return fmt.Errorf("profile %q must use this server's node and namespace", p.ID)
 		}
+	}
+	if localRunsc && o.LocalPlatform != "systrap" && o.LocalPlatform != "kvm" {
+		return errors.New("--local-runsc-platform must be systrap or kvm")
 	}
 	return nil
 }
@@ -173,6 +184,13 @@ func serveUnified(parent context.Context, config service.Config, dockerBinary st
 		switch profile.Provider {
 		case "docker":
 			providers[profile.Provider] = docker.New(dockerBinary)
+		case "local-runsc":
+			provider, err := localrunsc.New(config.DataDir, options.LocalGuestBinary, options.LocalPlatform)
+			if err != nil {
+				return fmt.Errorf("cannot initialize local-runsc provider: %w", err)
+			}
+			providers[profile.Provider] = provider
+			defer provider.Close()
 		}
 	}
 	var err error

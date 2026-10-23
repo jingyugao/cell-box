@@ -237,6 +237,8 @@ func (s *Service) listProfiles(w http.ResponseWriter, r *http.Request) {
 				runtime, behavior, kind = "docker", "normal", "docker-normal"
 			case "resumable-k8s-pod":
 				runtime, behavior, kind = "k8s", "resumable", "k8s-resumable"
+			case "local-runsc":
+				runtime, behavior, kind = "runsc", "local", "runsc-local"
 			default:
 				continue
 			}

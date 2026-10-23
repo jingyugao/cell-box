@@ -29,9 +29,9 @@ type Profile struct {
 	DebugReadOnlyHostPath  string   `json:"debugReadOnlyHostPath,omitempty"`
 	DebugReadWriteHostPath string   `json:"debugReadWriteHostPath,omitempty"`
 	// PersistentHome records the immutable storage layout, not an operator
-	// switch. Config validation always enables it for new resumable Boxes;
-	// old stored profiles retain false. The initially empty HOME hides image
-	// contents. New Boxes reference an independent HOME volume.
+	// switch. Config validation enables it for new resumable and local-runsc
+	// Boxes; old stored profiles retain false. The initially empty HOME hides
+	// image contents. New Boxes reference an independent HOME volume.
 	PersistentHome bool `json:"persistentHome,omitempty"`
 	// Resource limits are opt-in. Omitted or zero values leave that resource unlimited.
 	CPU       float64         `json:"cpu,omitempty"`

@@ -213,6 +213,9 @@ func cloneError(err error) *APIError {
 func profileCapabilities(p Profile) Capabilities {
 	k8s := p.Provider == "resumable-k8s-pod"
 	c := Capabilities{Exec: true, Files: true, HTTP: true, WebSocket: true, InternalServices: true, Suspend: "none", Archives: "none"}
+	if p.Provider == "local-runsc" {
+		c.PersistentHome = p.PersistentHome
+	}
 	if k8s {
 		c.Suspend = "same-node-checkpoint"
 		if p.PersistentHome {
@@ -791,7 +794,8 @@ func (s *Service) create(client string, input createRequest, archiveID string, a
 	if archiveID != "" && (input.HomeVolumeID != "" || len(input.Mounts) > 0) {
 		return Operation{}, apiError("INVALID_REQUEST", "Archive restore requires a new HOME volume")
 	}
-	if (input.HomeVolumeID != "" || len(input.Mounts) > 0) && (profile.Provider != "resumable-k8s-pod" || !profile.PersistentHome) {
+	if (input.HomeVolumeID != "" || len(input.Mounts) > 0) &&
+		((profile.Provider != "resumable-k8s-pod" && profile.Provider != "local-runsc") || !profile.PersistentHome) {
 		return Operation{}, boxprovider.ErrUnsupported
 	}
 	if profile.PersistentHome {

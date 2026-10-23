@@ -80,14 +80,14 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("invalid or duplicate profile ID")
 		}
 		profiles[p.ID] = true
-		if p.Provider != "docker" && p.Provider != "resumable-k8s-pod" {
+		if p.Provider != "docker" && p.Provider != "resumable-k8s-pod" && p.Provider != "local-runsc" {
 			return fmt.Errorf("profile %s has unknown provider", p.ID)
 		}
 		// New resumable Boxes always persist HOME. Stored immutable profiles are
 		// decoded separately, so pre-upgrade Boxes retain their original layout.
-		p.PersistentHome = p.Provider == "resumable-k8s-pod"
-		if !immutableImage.MatchString(p.Image) || (p.Provider == "resumable-k8s-pod" && !strings.Contains(p.Image, "@sha256:")) {
-			return fmt.Errorf("profile image must be an immutable SHA256 reference; Kubernetes requires repository@sha256:digest")
+		p.PersistentHome = p.Provider == "resumable-k8s-pod" || p.Provider == "local-runsc"
+		if !immutableImage.MatchString(p.Image) || ((p.Provider == "resumable-k8s-pod" || p.Provider == "local-runsc") && !strings.Contains(p.Image, "@sha256:")) {
+			return fmt.Errorf("profile image must be an immutable SHA256 reference; resumable and local-runsc providers require repository@sha256:digest")
 		}
 		for _, trusted := range p.TrustedToolImages {
 			if !immutableImage.MatchString(trusted) || !strings.Contains(trusted, "@sha256:") {
@@ -104,11 +104,14 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("debugHomeImages must contain immutable repository@sha256:digest references")
 			}
 		}
-		if p.Provider == "docker" && (p.Namespace != "" || p.NodeName != "") {
-			return fmt.Errorf("Docker profiles do not accept namespace or nodeName")
+		if (p.Provider == "docker" || p.Provider == "local-runsc") && (p.Namespace != "" || p.NodeName != "") {
+			return fmt.Errorf("%s profiles do not accept namespace or nodeName", p.Provider)
 		}
 		if math.IsNaN(p.CPU) || math.IsInf(p.CPU, 0) || p.CPU < 0 || p.MemoryMiB < 0 {
 			return fmt.Errorf("profile resource limits must be finite and nonnegative")
+		}
+		if p.Provider == "local-runsc" && ((p.CPU > 0 && p.CPU < 0.01) || p.CPU > float64(math.MaxInt64)/100000 || p.MemoryMiB > math.MaxInt64/(1<<20)) {
+			return fmt.Errorf("local-runsc CPU limit must be zero or at least 0.01 cores; resource limits must fit cgroup counters")
 		}
 		if p.Provider == "resumable-k8s-pod" && (p.Namespace == "" || p.NodeName == "") {
 			return fmt.Errorf("resumable profile requires namespace and nodeName")
@@ -123,7 +126,7 @@ func (c *Config) Validate() error {
 			if p.Provider != "resumable-k8s-pod" || !path.IsAbs(p.SharedReadOnlyHostPath) ||
 				path.Clean(p.SharedReadOnlyHostPath) != p.SharedReadOnlyHostPath || p.SharedReadOnlyHostPath == "/" ||
 				len(p.SharedReadOnlyHostPath) > 4096 || strings.ContainsAny(p.SharedReadOnlyHostPath, "\x00\r\n") {
-				return fmt.Errorf("profile %s has invalid sharedReadOnlyHostPath", p.ID)
+				return fmt.Errorf("profile %s sharedReadOnlyHostPath requires a resumable Kubernetes provider and a valid absolute path", p.ID)
 			}
 		}
 		if p.DebugReadOnlyHostPath != "" {
@@ -131,7 +134,7 @@ func (c *Config) Validate() error {
 				path.Clean(p.DebugReadOnlyHostPath) != p.DebugReadOnlyHostPath ||
 				p.DebugReadOnlyHostPath == "/" || len(p.DebugReadOnlyHostPath) > 4096 ||
 				strings.ContainsAny(p.DebugReadOnlyHostPath, "\x00\r\n") {
-				return fmt.Errorf("profile %s has invalid debugReadOnlyHostPath", p.ID)
+				return fmt.Errorf("profile %s debugReadOnlyHostPath requires a resumable Kubernetes provider and a valid absolute path", p.ID)
 			}
 		}
 		if p.DebugReadWriteHostPath != "" {
@@ -139,7 +142,7 @@ func (c *Config) Validate() error {
 				path.Clean(p.DebugReadWriteHostPath) != p.DebugReadWriteHostPath ||
 				p.DebugReadWriteHostPath == "/" || len(p.DebugReadWriteHostPath) > 4096 ||
 				strings.ContainsAny(p.DebugReadWriteHostPath, "\x00\r\n") {
-				return fmt.Errorf("profile %s has invalid debugReadWriteHostPath", p.ID)
+				return fmt.Errorf("profile %s debugReadWriteHostPath requires a resumable Kubernetes provider and a valid absolute path", p.ID)
 			}
 		}
 		if p.Guest.DebugHome != "" {

@@ -51,6 +51,8 @@ func run(args []string) error {
 	flags.BoolVar(&runtime.HostMountNamespace, "host-mount-namespace", false, "run runsc in the host mount namespace (requires privileged hostPID Pod)")
 	flags.IntVar(&runtime.WarmPoolSize, "warm-pool-size", 2, "maximum idle warm Pods on this node (0 disables)")
 	dockerBinary := flags.String("docker", "docker", "Docker CLI executable")
+	flags.StringVar(&runtime.LocalGuestBinary, "local-guest-binary", "", "static Cellbox guest binary for local-runsc (defaults to cellbox-container-agent beside the server)")
+	flags.StringVar(&runtime.LocalPlatform, "local-runsc-platform", "systrap", "gVisor platform for local-runsc (systrap or kvm)")
 	buildkitAddress := flags.String("buildkit-addr", "", "Unix BuildKit socket for REST image builds")
 	imageRepository := flags.String("image-repository", "", "registry repository for prepared images")
 	guestBinary := flags.String("guest-binary", "", "static Cellbox guest binary for image builds")
@@ -107,8 +109,10 @@ func run(args []string) error {
 		return err
 	}
 	needsKubernetes := runtime.Node != ""
+	pureLocalRunsc := len(config.Profiles) > 0
 	for _, profile := range config.Profiles {
 		needsKubernetes = needsKubernetes || profile.Provider == "resumable-k8s-pod"
+		pureLocalRunsc = pureLocalRunsc && profile.Provider == "local-runsc"
 	}
 
 	signalContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -123,7 +127,7 @@ func run(args []string) error {
 		defer cancel()
 		_ = shutdownTracing(ctx)
 	}()
-	if !needsKubernetes && config.ObjectStorage == (objectstorage.Config{}) {
+	if !needsKubernetes && (config.ObjectStorage == (objectstorage.Config{}) || pureLocalRunsc) {
 		return serveUnified(signalContext, config, *dockerBinary, nil, runtime)
 	}
 	if *leaderNamespace == "" {
