@@ -503,8 +503,8 @@ func (s *Service) credentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
-	if b.Profile.Provider != "resumable-k8s-pod" {
-		fail(w, apiError("UNSUPPORTED_CAPABILITY", "Docker supports only basic sandbox operations"))
+	if !supportsProtectedTools(b.Profile) {
+		fail(w, apiError("UNSUPPORTED_CAPABILITY", "Provider does not support protected tools"))
 		return
 	}
 
@@ -565,8 +565,8 @@ func (s *Service) credentialBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
-	if b.Profile.Provider != "resumable-k8s-pod" {
-		fail(w, apiError("UNSUPPORTED_CAPABILITY", "Docker supports only basic sandbox operations"))
+	if !supportsProtectedTools(b.Profile) {
+		fail(w, apiError("UNSUPPORTED_CAPABILITY", "Provider does not support protected tools"))
 		return
 	}
 
@@ -627,8 +627,8 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
-	if b.Profile.Provider != "resumable-k8s-pod" {
-		fail(w, apiError("UNSUPPORTED_CAPABILITY", "Docker supports only basic sandbox operations"))
+	if !supportsProtectedTools(b.Profile) {
+		fail(w, apiError("UNSUPPORTED_CAPABILITY", "Provider does not support protected tools"))
 		return
 	}
 

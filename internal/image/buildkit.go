@@ -78,7 +78,7 @@ func (b *boundedOutput) Write(p []byte) (int, error) {
 }
 
 // PrepareBuildKit sends a fixed build context to BuildKit and publishes it.
-// The returned manifest digest can be used directly by Kubernetes profiles.
+// The returned manifest digest can be used by either runtime provider.
 func PrepareBuildKit(ctx context.Context, opts BuildKitOptions) (BuildKitResult, error) {
 	var zero BuildKitResult
 	if err := ValidateBuildCommand(opts.BuildCommand); err != nil {

@@ -2,7 +2,6 @@ package localrunsc
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -61,6 +60,11 @@ func (p *Provider) recoverInterrupted() error {
 			if err := p.save(r); err != nil {
 				return err
 			}
+		} else if r.Phase == "running" && (p.bootChanged || (r.BootID != "" && r.BootID != p.bootID)) {
+			r.Phase, r.Message = "failed", "host restarted without a suspended checkpoint; automatic cold restart is disabled"
+			if err := p.save(r); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -100,25 +104,10 @@ func (p *Provider) publishCheckpoint(ctx context.Context, r record) error {
 	if p.checkpoints == nil {
 		return errors.New("local checkpoint inventory is not configured")
 	}
-	var item inventory.Record
-	if err := json.Unmarshal(r.Spec.Inventory, &item); err != nil {
+	item, err := r.inventory(r.observation())
+	if err != nil {
 		return err
 	}
-	var box map[string]json.RawMessage
-	if err := json.Unmarshal(item.Box, &box); err != nil {
-		return err
-	}
-	if item.ClientID == "" || box == nil {
-		return errors.New("invalid local checkpoint inventory")
-	}
-	box["phase"], _ = json.Marshal("suspended")
-	box["generation"], _ = json.Marshal(r.Generation)
-	box["imageId"], _ = json.Marshal(r.Handle.ImageID)
-	delete(box, "executionId")
-	delete(box, "operationId")
-	delete(box, "error")
-	item.Box, _ = json.Marshal(box)
-	item.RuntimeID, item.Snapshot, item.NodeName = r.Handle.ID, r.Snapshot, "local"
 	return p.checkpoints.PutCheckpoint(ctx, item)
 }
 
@@ -127,27 +116,14 @@ func (p *Provider) inspect(ctx context.Context, h boxprovider.Handle) (boxprovid
 	if err != nil {
 		return boxprovider.Observation{}, err
 	}
-	o := boxprovider.Observation{Phase: r.Phase, Generation: r.Generation, TransitionID: r.TransitionID,
-		ObservedTransitionID: r.ObservedTransitionID, Message: r.Message}
-	if o.Phase == "" {
-		o.Phase = "creating"
-	}
-	if o.Phase == "failed" {
-		return o, nil
+	if r.Phase == "failed" {
+		return r.observation(), nil
 	}
 	s, err := p.state(ctx, h.ID)
-	if o.Phase == "suspended" && errors.Is(err, boxprovider.ErrNotFound) {
-		return o, nil
-	}
 	if err != nil && !errors.Is(err, boxprovider.ErrNotFound) {
-		return o, err
+		return boxprovider.Observation{}, err
 	}
-	if o.Phase == "running" && err == nil && s.Status == "running" {
-		o.ExecutionID, o.GuestReady = r.execution(), r.Ready
-	} else if o.Phase == "running" || o.Phase == "suspended" {
-		o.Phase, o.Message = "failed", "local runsc state disagrees with the committed lifecycle"
-	}
-	return o, nil
+	return r.observeState(s, err == nil), nil
 }
 
 func (p *Provider) WatchObservations(ctx context.Context, h boxprovider.Handle) (<-chan boxprovider.Observation, error) {
@@ -282,6 +258,9 @@ func (p *Provider) suspend(ctx context.Context, r record, transition string) err
 	if err != nil {
 		return err
 	}
+	if err := r.Network.rememberMACs(ctx); err != nil {
+		return err
+	}
 	r.Phase, r.TransitionID, r.Snapshot = "suspending", transition, transition
 	r.Platform, r.RunscVersion = p.platform, strings.TrimSpace(string(version))
 	if err := p.save(r); err != nil {
@@ -386,7 +365,17 @@ func (p *Provider) resume(ctx context.Context, r record, transition string) erro
 	}
 	// Commit the consumed execution cycle before invoking restore. Once runsc
 	// starts, retrying this snapshot against a writable disk is unsafe.
+	if _, err := p.state(ctx, r.Handle.ID); !errors.Is(err, boxprovider.ErrNotFound) {
+		if err != nil {
+			return err
+		}
+		return errors.New("suspended sandbox still has a runtime execution")
+	}
+	if err := r.Network.ensure(ctx); err != nil {
+		return err
+	}
 	r.Generation++
+	r.BootID = p.bootID
 	r.Phase, r.TransitionID = "resuming", transition
 	if err := p.save(r); err != nil {
 		return err

@@ -2,6 +2,7 @@
 package localrunsc
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -24,6 +25,7 @@ import (
 	"cellbox.local/cellbox/internal/guestapi"
 	"cellbox.local/cellbox/internal/homevolume"
 	"cellbox.local/cellbox/internal/inventory"
+	"cellbox.local/cellbox/internal/objectstorage"
 	"golang.org/x/sys/unix"
 )
 
@@ -39,6 +41,10 @@ type Provider struct {
 	lock              *os.File
 	changed           chan struct{}
 	checkpoints       inventory.CheckpointStore
+	objects           objectstorage.Objects
+	bootID            string
+	bootChanged       bool
+	insecureRegistry  string
 }
 
 type record struct {
@@ -55,6 +61,8 @@ type record struct {
 	Platform             string             `json:"platform,omitempty"`
 	RunscVersion         string             `json:"runscVersion,omitempty"`
 	Message              string             `json:"message,omitempty"`
+	InventoryStage       string             `json:"inventoryStage,omitempty"`
+	BootID               string             `json:"bootId,omitempty"`
 }
 
 func New(dataDir, guestBinary, platform string) (*Provider, error) {
@@ -111,6 +119,10 @@ func New(dataDir, guestBinary, platform string) (*Provider, error) {
 		return nil, errors.New("another local-runsc server owns this data directory")
 	}
 	p := &Provider{base: base, guestBinary: guestBinary, platform: platform, lock: lock, changed: make(chan struct{})}
+	if err := p.prepareBoot(); err != nil {
+		lock.Close()
+		return nil, err
+	}
 	if err := p.recoverInterrupted(); err != nil {
 		lock.Close()
 		return nil, err
@@ -124,12 +136,19 @@ func (*Provider) Name() string { return "local-runsc" }
 func (p *Provider) Close() error { return p.lock.Close() }
 
 func command(ctx context.Context, binary string, args ...string) ([]byte, error) {
-	out, err := exec.CommandContext(ctx, binary, args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, binary, args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("%s %s: %w: %s", binary, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		return nil, fmt.Errorf("%s %s: %w: %s %s", binary, strings.Join(args, " "), err, strings.TrimSpace(string(out)), strings.TrimSpace(stderr.String()))
 	}
 	return out, nil
 }
+
+// SetInsecureRegistry uses the same explicit HTTP registry exception as the
+// shared image importer. It is configured before any runtime work starts.
+func (p *Provider) SetInsecureRegistry(host string) { p.insecureRegistry = host }
 
 func (p *Provider) run(ctx context.Context, args ...string) ([]byte, error) {
 	runArgs := append([]string{"--root=" + filepath.Join(p.base, "runsc"), "--network=sandbox", "--platform=" + p.platform, "--debug-log=" + filepath.Join(p.base, "runsc.log"), "--debug-command=create,start,boot,gofer"}, args...)
@@ -223,8 +242,16 @@ func validate(s boxprovider.Spec) error {
 	if !identifier.MatchString(s.BoxID) || !registryImage.MatchString(s.Image) {
 		return errors.New("local-runsc requires a valid box ID and repository@sha256:digest image")
 	}
-	if s.NodeName != "" || s.Namespace != "" || s.SharedReadOnlyHostPath != "" || s.DebugReadOnlyHostPath != "" || s.DebugReadWriteHostPath != "" || s.Staged {
+	if s.NodeName != "" || s.Namespace != "" {
 		return boxprovider.ErrUnsupported
+	}
+	for _, host := range []string{s.SharedReadOnlyHostPath, s.DebugReadOnlyHostPath, s.DebugReadWriteHostPath} {
+		if host != "" && (!filepath.IsAbs(host) || filepath.Clean(host) != host || host == "/" || strings.ContainsAny(host, "\x00\r\n")) {
+			return errors.New("invalid local host mount path")
+		}
+	}
+	if s.DebugReadOnlyHostPath != "" && s.DebugReadWriteHostPath != "" {
+		return errors.New("local debug HOME cannot have both read-only and writable host mounts")
 	}
 	if math.IsNaN(s.CPU) || math.IsInf(s.CPU, 0) || s.CPU < 0 || s.CPU > float64(math.MaxInt64)/100000 || s.MemoryMiB < 0 || s.MemoryMiB > math.MaxInt64/(1<<20) {
 		return errors.New("invalid local resource limits")
@@ -274,11 +301,29 @@ func (p *Provider) Create(ctx context.Context, s boxprovider.Spec) (boxprovider.
 		return zero, err
 	}
 	h := boxprovider.Handle{Provider: p.Name(), ID: hex.EncodeToString(id), Name: s.BoxID, ImageID: s.Image}
-	n, err := allocateNetwork(ctx, h.ID)
+	reserved, err := p.records()
 	if err != nil {
 		return zero, err
 	}
-	r := record{Handle: h, Spec: s, Fingerprint: fingerprint, Network: n, Phase: "creating", Generation: 1, Platform: p.platform}
+	networks := make([]network, 0, len(reserved))
+	for _, existing := range reserved {
+		networks = append(networks, existing.Network)
+	}
+	n, err := allocateNetwork(ctx, h.ID, networks...)
+	if err != nil {
+		return zero, err
+	}
+	r := record{Handle: h, Spec: s, Fingerprint: fingerprint, Network: n, Phase: "creating", Generation: 1, Platform: p.platform, BootID: p.bootID}
+	if s.Staged {
+		r.InventoryStage = "staged"
+		var item inventory.Record
+		var box struct {
+			Phase string `json:"phase"`
+		}
+		if json.Unmarshal(s.Inventory, &item) == nil && json.Unmarshal(item.Box, &box) == nil && box.Phase == "restoring" {
+			r.InventoryStage = "restoring"
+		}
+	}
 	if err := os.MkdirAll(p.dir(h.Name), 0700); err != nil {
 		return zero, err
 	}
@@ -472,10 +517,31 @@ func (p *Provider) DeleteVolume(ctx context.Context, s boxprovider.VolumeSpec) e
 func (p *Provider) WithStoppedVolume(ctx context.Context, s boxprovider.VolumeSpec, work func(string) error) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := p.volumeBusy(s.UID); err != nil {
+	return p.withStoppedVolume(ctx, s.UID, work)
+}
+
+// The provider mutex fences create/resume against the entire stopped-volume
+// operation. The existing HOME lock coordinates backup, archive and deletion.
+func (p *Provider) withStoppedVolume(ctx context.Context, uid string, work func(string) error) error {
+	records, err := p.records()
+	if err != nil {
 		return err
 	}
-	err := homevolume.WithVolume(ctx, p.base, s.UID, "local", work)
+	for _, r := range records {
+		if !r.volumes()[uid] {
+			continue
+		}
+		if r.Phase != "suspended" && r.Phase != "failed" {
+			return boxprovider.ErrNotReady
+		}
+		if _, err := p.state(ctx, r.Handle.ID); !errors.Is(err, boxprovider.ErrNotFound) {
+			if err != nil {
+				return err
+			}
+			return boxprovider.ErrNotReady
+		}
+	}
+	err = homevolume.WithVolume(ctx, p.base, uid, "local", work)
 	if errors.Is(err, homevolume.ErrStaleVolume) {
 		return boxprovider.ErrStaleVolume
 	}

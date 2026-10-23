@@ -189,6 +189,7 @@ func serveUnified(parent context.Context, config service.Config, dockerBinary st
 			if err != nil {
 				return fmt.Errorf("cannot initialize local-runsc provider: %w", err)
 			}
+			provider.SetInsecureRegistry(config.ImageBuild.InsecureRegistry)
 			providers[profile.Provider] = provider
 			defer provider.Close()
 		}
@@ -209,6 +210,7 @@ func serveUnified(parent context.Context, config service.Config, dockerBinary st
 		}
 	}
 	if provider, ok := providers["local-runsc"].(*localrunsc.Provider); ok {
+		provider.SetObjects(app.RuntimeObjects())
 		if err := provider.SetCheckpointStore(ctx, app.CheckpointStore()); err != nil {
 			return errors.Join(err, app.Close())
 		}

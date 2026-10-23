@@ -213,12 +213,9 @@ func cloneError(err error) *APIError {
 }
 func profileCapabilities(p Profile) Capabilities {
 	k8s := p.Provider == "resumable-k8s-pod"
+	localRunsc := p.Provider == "local-runsc"
 	c := Capabilities{Exec: true, Files: true, HTTP: true, WebSocket: true, InternalServices: true, Suspend: "none", Archives: "none"}
-	if p.Provider == "local-runsc" {
-		c.PersistentHome = p.PersistentHome
-		c.Suspend = "same-node-checkpoint"
-	}
-	if k8s {
+	if k8s || localRunsc {
 		c.Suspend = "same-node-checkpoint"
 		if p.PersistentHome {
 			c.Archives = "stopped-workspace"
@@ -805,11 +802,16 @@ func (s *Service) create(client string, input createRequest, archiveID string, a
 			return Operation{}, err
 		}
 	}
-	if profile.Provider != "resumable-k8s-pod" && (archiveID != "" || input.Staged) {
+	if (archiveID != "" || input.Staged) && !supportsStaging(profile.Provider, s.providers[profile.Provider]) {
 		return Operation{}, boxprovider.ErrUnsupported
 	}
 	if archiveID != "" && (s.objects == nil || !profile.PersistentHome || !workspaceUnderPersistentHome(profile.Guest.Workspace)) {
 		return Operation{}, apiError("UNSUPPORTED_CAPABILITY", "Restore requires object storage and a persistent HOME workspace")
+	}
+	if archiveID != "" {
+		if !supportsWorkspaceArchives(profile.Provider, s.providers[profile.Provider]) {
+			return Operation{}, apiError("UNSUPPORTED_CAPABILITY", "Restore requires provider workspace archive support")
+		}
 	}
 	kind := "create"
 	if archiveID != "" {
@@ -902,7 +904,7 @@ func (s *Service) actionContextWithGeneration(ctx context.Context, client, id, a
 				return boxprovider.ErrUnsupported
 			}
 		case "activate":
-			if b.Profile.Provider != "resumable-k8s-pod" {
+			if !supportsStaging(b.Profile.Provider, s.providers[b.Profile.Provider]) {
 				return boxprovider.ErrUnsupported
 			}
 		}
@@ -1107,10 +1109,38 @@ func (s *Service) execute(client, id string, input execInput) (Operation, error)
 func mustBoxJSON(box Box) json.RawMessage { data, _ := json.Marshal(box); return data }
 
 func (s *Service) setInventoryStage(ctx context.Context, b boxRecord, stage string) error {
-	if p, ok := s.providers[b.Profile.Provider].(interface {
-		SetInventoryStage(context.Context, boxprovider.Handle, string) error
-	}); ok {
+	if p, ok := s.providers[b.Profile.Provider].(inventoryStageProvider); ok {
 		return p.SetInventoryStage(ctx, b.Handle, stage)
 	}
 	return nil
+}
+
+type inventoryStageProvider interface {
+	SetInventoryStage(context.Context, boxprovider.Handle, string) error
+}
+
+func supportsStaging(provider string, p boxprovider.Provider) bool {
+	if provider == "resumable-k8s-pod" {
+		return true
+	}
+	if p == nil || provider != "local-runsc" {
+		return false
+	}
+	_, ok := p.(inventoryStageProvider)
+	return ok
+}
+
+func supportsWorkspaceArchives(provider string, p boxprovider.Provider) bool {
+	if provider == "resumable-k8s-pod" {
+		return true
+	}
+	if p == nil || provider != "local-runsc" {
+		return false
+	}
+	_, ok := p.(boxprovider.WorkspaceArchiveProvider)
+	return ok
+}
+
+func supportsProtectedTools(profile Profile) bool {
+	return profile.Provider == "resumable-k8s-pod" || profile.Provider == "local-runsc"
 }

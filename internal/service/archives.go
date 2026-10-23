@@ -1,9 +1,7 @@
 package service
 
 import (
-	"archive/tar"
 	"cellbox.local/cellbox/internal/objectstorage"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -22,15 +20,12 @@ import (
 
 	"cellbox.local/cellbox/internal/archivelimits"
 	"cellbox.local/cellbox/internal/boxprovider"
+	"cellbox.local/cellbox/internal/workspacearchive"
 	"golang.org/x/sys/unix"
 )
 
 const (
-	archiveFileLimit    = archivelimits.MaxEntryBytes
-	archiveContentLimit = archivelimits.MaxContentBytes
-	archiveWireLimit    = archivelimits.MaxWireBytes
-	archiveEntryLimit   = 100000
-	archiveDepthLimit   = 64
+	archiveWireLimit = archivelimits.MaxWireBytes
 )
 
 var archiveIDPattern = regexp.MustCompile(`^arc-[0-9a-f]{32}$`)
@@ -61,96 +56,11 @@ func openArchive(name string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), name), nil
 }
 
-func cleanArchiveEntry(name string, isDir bool) error {
-	if isDir {
-		name = strings.TrimSuffix(name, "/")
-	}
-	if name == "" || len(name) > 4096 || strings.HasPrefix(name, "/") || strings.ContainsRune(name, 0) || path.Clean(name) != name {
-		return errors.New("unsafe archive entry path")
-	}
-	parts := strings.Split(name, "/")
-	if len(parts) > archiveDepthLimit {
-		return errors.New("archive entry too deep")
-	}
-	for _, part := range parts {
-		if part == "" || part == "." || part == ".." {
-			return errors.New("unsafe archive entry path")
-		}
-	}
-	return nil
-}
-
 // validateArchive reads every payload byte, including the gzip trailer. It
 // rejects links and special entries because the guest restore accepts only
 // regular files and directories within its empty workspace.
 func validateArchive(r io.Reader) error {
-	gz, err := gzip.NewReader(io.LimitReader(r, archiveWireLimit+1))
-	if err != nil {
-		return fmt.Errorf("gzip header: %w", err)
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	seen := map[string]byte{}
-	var total int64
-	count := 0
-	for {
-		h, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("tar entry: %w", err)
-		}
-		count++
-		if count > archiveEntryLimit {
-			return errors.New("too many archive entries")
-		}
-		isDir := h.Typeflag == tar.TypeDir
-		if !isDir && h.Typeflag != tar.TypeReg {
-			return errors.New("archive contains a link or special entry")
-		}
-		if err := cleanArchiveEntry(h.Name, isDir); err != nil {
-			return err
-		}
-		name := strings.TrimSuffix(h.Name, "/")
-		if _, ok := seen[name]; ok {
-			return errors.New("duplicate archive entry")
-		}
-		parent := path.Dir(name)
-		if parent != "." && seen[parent] != tar.TypeDir {
-			return errors.New("archive parent directory is missing")
-		}
-		if isDir {
-			if h.Size != 0 {
-				return errors.New("directory has payload")
-			}
-			seen[name] = tar.TypeDir
-			continue
-		}
-		if h.Size < 0 || h.Size > archiveFileLimit || total+h.Size > archiveContentLimit {
-			return errors.New("archive exceeds content limit")
-		}
-		total += h.Size
-		seen[name] = tar.TypeReg
-		if _, err := io.CopyN(io.Discard, tr, h.Size); err != nil {
-			return fmt.Errorf("truncated archive file: %w", err)
-		}
-	}
-	if _, err := copyArchiveTail(gz); err != nil {
-		return err
-	}
-	return nil
-}
-
-func copyArchiveTail(r io.Reader) (int64, error) {
-	n, err := io.Copy(io.Discard, io.LimitReader(r, 1<<20+1))
-	if err != nil {
-		return n, err
-	}
-	if n > 1<<20 {
-		return n, errors.New("archive has excessive trailing data")
-	}
-	return n, nil
+	return workspacearchive.Validate(r)
 }
 
 func verifyArchive(f *os.File, a Archive) error {
@@ -207,11 +117,11 @@ func (s *Service) captureArchive(w http.ResponseWriter, r *http.Request) {
 		if active {
 			return apiError("BUSY", "Box has an active execution")
 		}
-		if box.Profile.Provider != "resumable-k8s-pod" || !boxCanArchiveWorkspace(box) || !workspaceUnderPersistentHome(box.Profile.Guest.Workspace) {
-			return apiError("UNSUPPORTED_CAPABILITY", "Archives require a resumable Kubernetes box with persistent HOME workspace")
+		if !supportsWorkspaceArchives(box.Profile.Provider, s.providers[box.Profile.Provider]) || !boxCanArchiveWorkspace(box) || !workspaceUnderPersistentHome(box.Profile.Guest.Workspace) {
+			return apiError("UNSUPPORTED_CAPABILITY", "Archives require provider workspace archive support and a persistent HOME workspace")
 		}
 		if _, ok := s.providers[box.Profile.Provider].(boxprovider.WorkspaceArchiveProvider); !ok || s.objects == nil {
-			return apiError("UNSUPPORTED_CAPABILITY", "Archives require node archive support and object storage")
+			return apiError("UNSUPPORTED_CAPABILITY", "Archives require provider workspace archive support and object storage")
 		}
 		if box.Box.Phase != "suspended" && box.Box.Phase != "failed" {
 			return apiError("CONFLICT", "Archive requires a suspended or failed box")
@@ -242,7 +152,7 @@ func (s *Service) captureStoppedWorkspaceArchive(ctx context.Context, b boxRecor
 		return Archive{}, apiError("CONFLICT", "Archive requires a suspended or failed box")
 	}
 	provider, ok := s.providers[b.Profile.Provider].(boxprovider.WorkspaceArchiveProvider)
-	if !ok || b.Profile.Provider != "resumable-k8s-pod" || !boxCanArchiveWorkspace(b) || s.objects == nil || !workspaceUnderPersistentHome(b.Profile.Guest.Workspace) {
+	if !ok || !supportsWorkspaceArchives(b.Profile.Provider, s.providers[b.Profile.Provider]) || !boxCanArchiveWorkspace(b) || s.objects == nil || !workspaceUnderPersistentHome(b.Profile.Guest.Workspace) {
 		return Archive{}, apiError("UNSUPPORTED_CAPABILITY", "Stopped workspace archives are unavailable")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 14*time.Minute)
@@ -331,7 +241,7 @@ func (s *Service) restoreArchive(ctx context.Context, boxID string, source Archi
 	if source.ID != b.RestoreArchiveID || source.ImageID == "" || b.Box.ImageID == "" || imageChanged && !(source.Portable && b.AcceptImageChange) || source.Agent != b.Profile.Guest.Agent {
 		return apiError("ARCHIVE_INCOMPATIBLE", "Archive image or agent identity differs from target box")
 	}
-	if b.Profile.Provider != "resumable-k8s-pod" || !b.Profile.PersistentHome || !workspaceUnderPersistentHome(b.Profile.Guest.Workspace) {
+	if !supportsWorkspaceArchives(b.Profile.Provider, s.providers[b.Profile.Provider]) || !b.Profile.PersistentHome || !workspaceUnderPersistentHome(b.Profile.Guest.Workspace) {
 		return apiError("UNSUPPORTED_CAPABILITY", "Archive restore requires a resumable Kubernetes box with persistent HOME workspace")
 	}
 	if b.Box.Phase != "restoring" || !b.Staged || b.RestoreComplete {

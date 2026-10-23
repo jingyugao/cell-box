@@ -123,26 +123,26 @@ func (c *Config) Validate() error {
 			node, namespace = p.NodeName, p.Namespace
 		}
 		if p.SharedReadOnlyHostPath != "" {
-			if p.Provider != "resumable-k8s-pod" || !path.IsAbs(p.SharedReadOnlyHostPath) ||
+			if (p.Provider != "resumable-k8s-pod" && p.Provider != "local-runsc") || !path.IsAbs(p.SharedReadOnlyHostPath) ||
 				path.Clean(p.SharedReadOnlyHostPath) != p.SharedReadOnlyHostPath || p.SharedReadOnlyHostPath == "/" ||
 				len(p.SharedReadOnlyHostPath) > 4096 || strings.ContainsAny(p.SharedReadOnlyHostPath, "\x00\r\n") {
-				return fmt.Errorf("profile %s sharedReadOnlyHostPath requires a resumable Kubernetes provider and a valid absolute path", p.ID)
+				return fmt.Errorf("profile %s sharedReadOnlyHostPath requires a resumable Kubernetes or local-runsc provider and a valid absolute path", p.ID)
 			}
 		}
 		if p.DebugReadOnlyHostPath != "" {
-			if p.Provider != "resumable-k8s-pod" || !path.IsAbs(p.DebugReadOnlyHostPath) ||
+			if (p.Provider != "resumable-k8s-pod" && p.Provider != "local-runsc") || !path.IsAbs(p.DebugReadOnlyHostPath) ||
 				path.Clean(p.DebugReadOnlyHostPath) != p.DebugReadOnlyHostPath ||
 				p.DebugReadOnlyHostPath == "/" || len(p.DebugReadOnlyHostPath) > 4096 ||
 				strings.ContainsAny(p.DebugReadOnlyHostPath, "\x00\r\n") {
-				return fmt.Errorf("profile %s debugReadOnlyHostPath requires a resumable Kubernetes provider and a valid absolute path", p.ID)
+				return fmt.Errorf("profile %s debugReadOnlyHostPath requires a resumable Kubernetes or local-runsc provider and a valid absolute path", p.ID)
 			}
 		}
 		if p.DebugReadWriteHostPath != "" {
-			if p.Provider != "resumable-k8s-pod" || p.DebugReadOnlyHostPath != "" || !path.IsAbs(p.DebugReadWriteHostPath) ||
+			if (p.Provider != "resumable-k8s-pod" && p.Provider != "local-runsc") || p.DebugReadOnlyHostPath != "" || !path.IsAbs(p.DebugReadWriteHostPath) ||
 				path.Clean(p.DebugReadWriteHostPath) != p.DebugReadWriteHostPath ||
 				p.DebugReadWriteHostPath == "/" || len(p.DebugReadWriteHostPath) > 4096 ||
 				strings.ContainsAny(p.DebugReadWriteHostPath, "\x00\r\n") {
-				return fmt.Errorf("profile %s debugReadWriteHostPath requires a resumable Kubernetes provider and a valid absolute path", p.ID)
+				return fmt.Errorf("profile %s debugReadWriteHostPath requires a resumable Kubernetes or local-runsc provider and a valid absolute path", p.ID)
 			}
 		}
 		if p.Guest.DebugHome != "" {

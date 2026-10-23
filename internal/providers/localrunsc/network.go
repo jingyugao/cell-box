@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"regexp"
 	"sort"
@@ -14,17 +15,19 @@ import (
 // network records the host-side resources owned by one local runsc sandbox.
 // Host and Guest are plain IPv4 addresses; CIDR is the sandbox's /30.
 type network struct {
-	Name  string `json:"name"`
-	Host  string `json:"host"`
-	Guest string `json:"guest"`
-	CIDR  string `json:"cidr"`
+	Name     string `json:"name"`
+	Host     string `json:"host"`
+	Guest    string `json:"guest"`
+	CIDR     string `json:"cidr"`
+	HostMAC  string `json:"hostMac,omitempty"`
+	GuestMAC string `json:"guestMac,omitempty"`
 }
 
 var networkNamePattern = regexp.MustCompile(`^cbl[a-f0-9]{12}$`)
 
 const networkPool = "10.231.0.0/16"
 
-func allocateNetwork(ctx context.Context, id string) (network, error) {
+func allocateNetwork(ctx context.Context, id string, reserved ...network) (network, error) {
 	if len(id) < 12 || !isHex(id[:12]) {
 		return network{}, errors.New("local runsc ID must begin with 12 hexadecimal characters")
 	}
@@ -63,6 +66,13 @@ func allocateNetwork(ctx context.Context, id string) (network, error) {
 		}
 	}
 	occupied := make([]netip.Prefix, 0, len(routes))
+	for _, existing := range reserved {
+		if err := existing.validate(); err != nil {
+			return network{}, err
+		}
+		prefix, _ := netip.ParsePrefix(existing.CIDR)
+		occupied = append(occupied, prefix)
+	}
 	for _, route := range routes {
 		if route.Dst == "" || route.Dst == "default" || route.Dst == "0.0.0.0/0" {
 			continue
@@ -96,7 +106,8 @@ func allocateNetwork(ctx context.Context, id string) (network, error) {
 		}
 		host := candidate.Addr().Next()
 		guest := host.Next()
-		return network{Name: name, Host: host.String(), Guest: guest.String(), CIDR: candidate.String()}, nil
+		mac := strings.ToLower(id[:2] + ":" + id[2:4] + ":" + id[4:6] + ":" + id[6:8] + ":" + id[8:10])
+		return network{Name: name, Host: host.String(), Guest: guest.String(), CIDR: candidate.String(), HostMAC: "02:" + mac, GuestMAC: "06:" + mac}, nil
 	}
 	return network{}, errors.New("no free /30 subnet remains in 10.231.0.0/16")
 }
@@ -153,6 +164,16 @@ func (n network) create(ctx context.Context) error {
 	if _, err := command(ctx, "ip", "-n", n.Name, "link", "set", peer, "name", "eth0"); err != nil {
 		return fmt.Errorf("rename guest veth in %s: %w", n.Name, err)
 	}
+	if n.HostMAC != "" {
+		if _, err := command(ctx, "ip", "link", "set", n.Name, "address", n.HostMAC); err != nil {
+			return err
+		}
+	}
+	if n.GuestMAC != "" {
+		if _, err := command(ctx, "ip", "-n", n.Name, "link", "set", "eth0", "address", n.GuestMAC); err != nil {
+			return err
+		}
+	}
 	if _, err := command(ctx, "ip", "addr", "add", n.Host+"/30", "dev", n.Name); err != nil {
 		return fmt.Errorf("assign host address for %s: %w", n.Name, err)
 	}
@@ -205,7 +226,109 @@ func (n network) validate() error {
 	if err != nil || !guest.Is4() || guest != host.Next() {
 		return errors.New("invalid local runsc guest address")
 	}
+	for _, address := range []string{n.HostMAC, n.GuestMAC} {
+		if address == "" {
+			continue
+		}
+		mac, err := net.ParseMAC(address)
+		if err != nil || len(mac) != 6 || mac[0]&1 != 0 {
+			return errors.New("invalid local runsc MAC address")
+		}
+	}
 	return nil
+}
+
+type networkLink struct {
+	Name    string `json:"ifname"`
+	Index   int    `json:"ifindex"`
+	Peer    int    `json:"link_index"`
+	Address string `json:"address"`
+	Info    struct {
+		Kind string `json:"info_kind"`
+	} `json:"linkinfo"`
+}
+
+func networkLinks(ctx context.Context, namespace string) ([]networkLink, error) {
+	args := []string{"-j", "-d"}
+	if namespace != "" {
+		args = append(args, "-n", namespace)
+	}
+	data, err := command(ctx, "ip", append(args, "link", "show")...)
+	if err != nil {
+		return nil, err
+	}
+	var links []networkLink
+	if err := json.Unmarshal(data, &links); err != nil {
+		return nil, err
+	}
+	return links, nil
+}
+
+func findLink(links []networkLink, name string) (networkLink, bool) {
+	for _, link := range links {
+		if link.Name == name {
+			return link, true
+		}
+	}
+	return networkLink{}, false
+}
+
+func (n *network) rememberMACs(ctx context.Context) error {
+	hosts, err := networkLinks(ctx, "")
+	if err != nil {
+		return err
+	}
+	guests, err := networkLinks(ctx, n.Name)
+	if err != nil {
+		return err
+	}
+	host, hostOK := findLink(hosts, n.Name)
+	guest, guestOK := findLink(guests, "eth0")
+	if !hostOK || !guestOK || host.Info.Kind != "veth" || guest.Info.Kind != "veth" || host.Peer != guest.Index || guest.Peer != host.Index {
+		return errors.New("local sandbox network ownership changed")
+	}
+	if (n.HostMAC != "" && n.HostMAC != host.Address) || (n.GuestMAC != "" && n.GuestMAC != guest.Address) {
+		return errors.New("local sandbox network MAC identity changed")
+	}
+	n.HostMAC, n.GuestMAC = host.Address, guest.Address
+	return n.validate()
+}
+
+// Called only while the execution is stopped. Rebuild ephemeral network state
+// after a host reboot, retaining the checkpoint's subnet, addresses and MACs.
+func (n network) ensure(ctx context.Context) error {
+	if err := n.validate(); err != nil {
+		return err
+	}
+	namespaces, err := command(ctx, "ip", "netns", "list")
+	if err != nil {
+		return err
+	}
+	links, err := networkLinks(ctx, "")
+	if err != nil {
+		return err
+	}
+	_, linkExists := findLink(links, n.Name)
+	namespaceExists := containsNamespace(string(namespaces), n.Name)
+	if !linkExists && !namespaceExists {
+		return n.create(ctx)
+	}
+	if !linkExists || !namespaceExists {
+		return errors.New("incomplete local sandbox network; discard the sandbox instead of replacing an unverified interface")
+	}
+	if err := n.rememberMACs(ctx); err != nil {
+		return err
+	}
+	if err := n.checkRouteOverlap(ctx); err != nil {
+		return err
+	}
+	if _, err := command(ctx, "ip", "addr", "replace", n.Host+"/30", "dev", n.Name); err != nil {
+		return err
+	}
+	if _, err := command(ctx, "ip", "link", "set", n.Name, "up"); err != nil {
+		return err
+	}
+	return n.installFirewall(ctx)
 }
 
 func (n network) checkRouteOverlap(ctx context.Context) error {
@@ -215,12 +338,16 @@ func (n network) checkRouteOverlap(ctx context.Context) error {
 	}
 	var routes []struct {
 		Dst string `json:"dst"`
+		Dev string `json:"dev"`
 	}
 	if err := json.Unmarshal(routesJSON, &routes); err != nil {
 		return fmt.Errorf("decode host routes before creating %s: %w", n.Name, err)
 	}
 	candidate, _ := netip.ParsePrefix(n.CIDR)
 	for _, route := range routes {
+		if route.Dev == n.Name {
+			continue
+		}
 		if route.Dst == "" || route.Dst == "default" || route.Dst == "0.0.0.0/0" {
 			continue
 		}
