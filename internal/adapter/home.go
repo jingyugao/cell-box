@@ -10,8 +10,8 @@ import (
 	"cellbox.local/cellbox/internal/node"
 )
 
-// bindHome runs before runsc create reads the child OCI spec. The root sandbox
-// can already be waiting to restore: the child's Gofer is created at start.
+// bindHome updates the child OCI mounts before its Gofer is created. Deferred
+// restore can bind after child create; runsc refreshes its saved mounts at restore.
 // Preserve all unrelated OCI fields, including extensions unknown to Cellbox.
 func (a Adapter) bindHome(bundle string, t node.Ticket) error {
 	if bundle == "" {

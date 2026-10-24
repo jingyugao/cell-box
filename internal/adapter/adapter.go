@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -22,7 +23,12 @@ import (
 
 var sandboxID = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
-type Adapter struct{ Base, Runsc string }
+type Adapter struct {
+	Base, Runsc     string
+	DeferCheckpoint bool
+	NoRootContainer bool
+	PodUIDAuth      bool
+}
 
 func argValue(args []string, key string) string {
 	for i, s := range args {
@@ -35,7 +41,27 @@ func argValue(args []string, key string) string {
 	}
 	return ""
 }
+
+func markStartAttempt(request string) error {
+	started := request + ".started"
+	f, err := os.OpenFile(started, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	return node.SyncDir(filepath.Dir(started))
+}
+
 func (a Adapter) Rewrite(args []string) ([]string, error) {
+	if a.DeferCheckpoint && !a.NoRootContainer {
+		return nil, fmt.Errorf("CELLBOX_DEFER_CHECKPOINT requires CELLBOX_NO_ROOT_CONTAINER")
+	}
 	idx := -1
 	for i, s := range args {
 		if s == "create" || s == "start" || s == "delete" {
@@ -66,16 +92,25 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 		if spec.Annotations["io.kubernetes.cri.container-type"] != "sandbox" {
 			return nil, fmt.Errorf("unknown OCI container type")
 		}
+		if a.NoRootContainer && !hasNoRootContainerFlag(args[idx+1:]) {
+			args = append(append(args[:len(args)-1], "--no-root-container"), id)
+		}
 		podUID := spec.Annotations["io.kubernetes.cri.sandbox-uid"]
 		if node.ValidID(podUID) {
 			if _, err := os.Stat(filepath.Join(a.Base, "warm", podUID+".json")); err == nil {
 				_, err = node.BindWarm(a.Base, podUID, spec.Annotations["io.kubernetes.cri.sandbox-name"], spec.Annotations["io.kubernetes.cri.sandbox-namespace"], id)
+				if err == nil && hasNoRootContainerFlag(args[idx+1:]) {
+					err = normalizeNoRootBundle(bundle)
+				}
 				return args, err
 			} else if !os.IsNotExist(err) {
 				return nil, err
 			}
 		}
 		uid := spec.Annotations[api.TicketAnnotation]
+		if uid == "" && a.PodUIDAuth {
+			uid = podUID
+		}
 		if !node.ValidID(uid) {
 			return nil, fmt.Errorf("missing/invalid controller authorization; refusing cold start")
 		}
@@ -131,17 +166,31 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 		if err = node.AtomicJSON(request, t); err != nil {
 			return nil, err
 		}
+		if hasNoRootContainerFlag(args[idx+1:]) {
+			if err = normalizeNoRootBundle(bundle); err != nil {
+				return nil, err
+			}
+		}
 	case "start":
 		// Requests exist only for sandbox IDs, never for business container IDs.
 		var t node.Ticket
 		err := node.ReadJSON(request, &t)
 		if os.IsNotExist(err) {
-			return args, a.childStart(id)
+			return a.childStartArgs(args, idx, id)
 		}
 		if err != nil {
 			return nil, err
 		}
 		if _, warmErr := os.Stat(filepath.Join(a.Base, "warm", t.PodUID+".json")); warmErr == nil {
+			if a.DeferCheckpoint {
+				if err = node.MarkDeferredRestore(a.Base, t.PodUID, t.PodName, t.Namespace, id); err != nil {
+					return nil, err
+				}
+				if err = markStartAttempt(request); err != nil {
+					return nil, fmt.Errorf("sandbox start already attempted: %w", err)
+				}
+				return append(append([]string{}, args[:idx]...), "restore", "--defer-checkpoint", "--background", "--detach", id), nil
+			}
 			t, err = node.WaitWarm(a.Base, t.PodUID, id)
 			if err != nil {
 				return nil, err
@@ -160,18 +209,8 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 		if !reflect.DeepEqual(live, t) {
 			return nil, fmt.Errorf("authorization changed")
 		}
-		started := request + ".started"
-		f, err := os.OpenFile(started, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-		if err != nil {
+		if err = markStartAttempt(request); err != nil {
 			return nil, fmt.Errorf("sandbox start already attempted: %w", err)
-		}
-		err = f.Sync()
-		f.Close()
-		if err != nil {
-			return nil, err
-		}
-		if err = node.SyncDir(filepath.Dir(started)); err != nil {
-			return nil, err
 		}
 		if t.Snapshot != "" {
 			path, err := node.SnapshotPath(a.Base, t.OwnerUID, t.Snapshot)
@@ -200,6 +239,41 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 		}
 	}
 	return args, nil
+}
+
+func hasNoRootContainerFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--no-root-container" {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeNoRootBundle removes fields that gVisor rejects for a no-root
+// sandbox. The raw-message map preserves OCI extensions and all other fields.
+func normalizeNoRootBundle(bundle string) error {
+	if bundle == "" {
+		return fmt.Errorf("missing root bundle for no-root container")
+	}
+	path := filepath.Join(bundle, "config.json")
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("root OCI spec must be a regular file")
+	}
+	var spec map[string]json.RawMessage
+	if err := node.ReadJSON(path, &spec); err != nil {
+		return err
+	}
+	if spec == nil {
+		return fmt.Errorf("missing root OCI spec")
+	}
+	delete(spec, "process")
+	delete(spec, "root")
+	return node.AtomicJSON(path, spec)
 }
 
 func (a Adapter) claimHome(t node.Ticket) error {
@@ -298,7 +372,7 @@ func verifyVolumeExecution(base string, t node.Ticket) error {
 	}
 	return nil
 }
-func Main() {
+func adapterFromEnv() (Adapter, error) {
 	a := Adapter{Base: node.DefaultBase, Runsc: node.DefaultRunsc}
 	if base := os.Getenv("CELLBOX_NODE_BASE"); base != "" {
 		a.Base = base
@@ -306,7 +380,36 @@ func Main() {
 	if runsc := os.Getenv("CELLBOX_RUNSC"); runsc != "" {
 		a.Runsc = runsc
 	}
-	args, err := a.Rewrite(os.Args[1:])
+	if value := os.Getenv("CELLBOX_DEFER_CHECKPOINT"); value != "" {
+		deferred, err := strconv.ParseBool(value)
+		if err != nil {
+			return a, fmt.Errorf("invalid CELLBOX_DEFER_CHECKPOINT: %w", err)
+		}
+		a.DeferCheckpoint = deferred
+	}
+	if value := os.Getenv("CELLBOX_NO_ROOT_CONTAINER"); value != "" {
+		noRoot, err := strconv.ParseBool(value)
+		if err != nil {
+			return a, fmt.Errorf("invalid CELLBOX_NO_ROOT_CONTAINER: %w", err)
+		}
+		a.NoRootContainer = noRoot
+	}
+	if value := os.Getenv("CELLBOX_POD_UID_AUTH"); value != "" {
+		authorizedByUID, err := strconv.ParseBool(value)
+		if err != nil {
+			return a, fmt.Errorf("invalid CELLBOX_POD_UID_AUTH: %w", err)
+		}
+		a.PodUIDAuth = authorizedByUID
+	}
+	return a, nil
+}
+
+func Main() {
+	a, err := adapterFromEnv()
+	args := os.Args[1:]
+	if err == nil {
+		args, err = a.Rewrite(args)
+	}
 	if err == nil {
 		args, err = a.DiagnosticArgs(args)
 	}
@@ -347,6 +450,33 @@ func (a Adapter) childCreate(id string, annotations map[string]string, bundle st
 	if t.PodUID != annotations["io.kubernetes.cri.sandbox-uid"] || t.PodName != annotations["io.kubernetes.cri.sandbox-name"] || t.Namespace != annotations["io.kubernetes.cri.sandbox-namespace"] {
 		return fmt.Errorf("child Pod identity mismatch")
 	}
+	deferredRestore := false
+	if _, err := os.Stat(filepath.Join(a.Base, "warm", t.PodUID+".json")); err == nil {
+		deferredRestore, err = node.DeferredRestore(a.Base, t.PodUID, t.PodName, t.Namespace, sid)
+		if err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if deferredRestore {
+		// Precreate the child without Box-specific mounts. Its start waits for
+		// assignment and binds the volumes before runsc creates the Gofer.
+		if bundle == "" {
+			return fmt.Errorf("missing child bundle for deferred restore")
+		}
+		bundle, err := filepath.Abs(bundle)
+		if err != nil {
+			return err
+		}
+		if _, err := os.Stat(filepath.Join(a.Base, "requests", sid+".json.started")); err != nil {
+			return fmt.Errorf("deferred root start was not recorded: %w", err)
+		}
+		if err := a.claimHomeChild(sid, id); err != nil {
+			return err
+		}
+		return node.AtomicJSON(filepath.Join(a.Base, "children", id+".json"), node.ChildRecord{Ticket: t, SandboxID: sid, DeferredRestore: true, BundleDir: bundle})
+	}
 	if err := node.ReadJSON(filepath.Join(a.Base, "tickets", t.PodUID+".json"), &live); err != nil {
 		return err
 	}
@@ -367,42 +497,98 @@ func (a Adapter) childCreate(id string, annotations map[string]string, bundle st
 			return err
 		}
 	}
-	return node.AtomicJSON(filepath.Join(a.Base, "children", id+".json"), node.ChildRecord{Ticket: t, SandboxID: sid})
+	return node.AtomicJSON(filepath.Join(a.Base, "children", id+".json"), node.ChildRecord{Ticket: t, SandboxID: sid, DeferredRestore: deferredRestore})
 }
 func (a Adapter) childStart(id string) error {
+	_, err := a.childStartArgs([]string{"start", id}, 0, id)
+	return err
+}
+
+func (a Adapter) childStartArgs(args []string, idx int, id string) ([]string, error) {
 	var c node.ChildRecord
 	if err := node.ReadJSON(filepath.Join(a.Base, "children", id+".json"), &c); err != nil {
-		return fmt.Errorf("missing container identity: %w", err)
+		return nil, fmt.Errorf("missing container identity: %w", err)
+	}
+	if c.DeferredRestore {
+		t, err := node.WaitWarm(a.Base, c.Ticket.PodUID, c.SandboxID)
+		if err != nil {
+			return nil, err
+		}
+		if t.PodUID != c.Ticket.PodUID || t.PodName != c.Ticket.PodName || t.Namespace != c.Ticket.Namespace {
+			return nil, fmt.Errorf("child Pod identity changed while waiting for warm authorization")
+		}
+		c.Ticket = t
+		if err = node.AtomicJSON(filepath.Join(a.Base, "requests", c.SandboxID+".json"), t); err != nil {
+			return nil, err
+		}
 	}
 	var live, parent node.Ticket
 	if err := node.ReadJSON(filepath.Join(a.Base, "tickets", c.Ticket.PodUID+".json"), &live); err != nil {
-		return err
+		return nil, err
 	}
 	if err := node.ReadJSON(filepath.Join(a.Base, "requests", c.SandboxID+".json"), &parent); err != nil {
-		return err
+		return nil, err
 	}
 	if !reflect.DeepEqual(live, c.Ticket) || !reflect.DeepEqual(parent, c.Ticket) {
-		return fmt.Errorf("child sandbox revoked")
+		return nil, fmt.Errorf("child sandbox revoked")
+	}
+	var restorePath string
+	if c.DeferredRestore {
+		if c.Ticket.Snapshot == "" {
+			return nil, fmt.Errorf("deferred warm restore has no checkpoint")
+		}
+		var err error
+		restorePath, err = node.SnapshotPath(a.Base, c.Ticket.OwnerUID, c.Ticket.Snapshot)
+		if err != nil {
+			return nil, err
+		}
+		manifest, err := node.VerifyPrepared(restorePath, c.Ticket.OwnerUID, c.Ticket.SpecHash, a.Runsc)
+		if err != nil {
+			return nil, fmt.Errorf("refusing restore: %w", err)
+		}
+		if err = verifyTicketManifest(c.Ticket, manifest); err != nil {
+			return nil, err
+		}
+		if err = node.ConsumeSnapshot(a.Base, c.Ticket.OwnerUID, c.Ticket.Snapshot); err != nil {
+			return nil, fmt.Errorf("refusing snapshot replay: %w", err)
+		}
+		if err = a.claimHome(c.Ticket); err != nil {
+			return nil, err
+		}
 	}
 	if len(ticketMounts(c.Ticket)) > 0 {
 		if err := a.verifyVolumeIdentities(c.Ticket); err != nil {
-			return fmt.Errorf("persistent volume attachment: %w", err)
+			return nil, fmt.Errorf("persistent volume attachment: %w", err)
 		}
 		if err := verifyVolumeExecution(a.Base, c.Ticket); err != nil {
-			return fmt.Errorf("persistent volume execution: %w", err)
+			return nil, fmt.Errorf("persistent volume execution: %w", err)
 		}
 		if err := a.claimHomeChild(c.SandboxID, id); err != nil {
-			return err
+			return nil, err
+		}
+	}
+	if c.DeferredRestore {
+		if err := a.bindHome(c.BundleDir, c.Ticket); err != nil {
+			return nil, err
+		}
+		if err := node.AtomicJSON(filepath.Join(a.Base, "children", id+".json"), c); err != nil {
+			return nil, err
 		}
 	}
 	path := filepath.Join(a.Base, "children", id+".json.started")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer f.Close()
 	if err = f.Sync(); err != nil {
-		return err
+		return nil, err
 	}
-	return node.SyncDir(filepath.Dir(path))
+	if err = node.SyncDir(filepath.Dir(path)); err != nil {
+		return nil, err
+	}
+	if c.DeferredRestore {
+		return append(append([]string{}, args[:idx]...), "restore", "--background", "--detach", "--image-path="+restorePath, id), nil
+	}
+	return args, nil
 }
