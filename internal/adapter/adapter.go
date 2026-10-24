@@ -300,6 +300,12 @@ func verifyVolumeExecution(base string, t node.Ticket) error {
 }
 func Main() {
 	a := Adapter{Base: node.DefaultBase, Runsc: node.DefaultRunsc}
+	if base := os.Getenv("CELLBOX_NODE_BASE"); base != "" {
+		a.Base = base
+	}
+	if runsc := os.Getenv("CELLBOX_RUNSC"); runsc != "" {
+		a.Runsc = runsc
+	}
 	args, err := a.Rewrite(os.Args[1:])
 	if err == nil {
 		args, err = a.DiagnosticArgs(args)

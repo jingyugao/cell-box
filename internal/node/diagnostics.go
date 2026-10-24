@@ -78,7 +78,7 @@ func (b *Backend) CaptureFailure(ctx context.Context, w *api.ResumablePod, p *co
 			e.Errors = append(e.Errors, "list sandboxes: "+err.Error())
 		} else {
 			for _, s := range res.Items {
-				if s.Metadata == nil || s.Metadata.Uid != uid || s.Metadata.Name != e.PodName || s.Metadata.Namespace != w.Namespace || s.RuntimeHandler != api.RuntimeClass {
+				if s.Metadata == nil || s.Metadata.Uid != uid || s.Metadata.Name != e.PodName || s.Metadata.Namespace != w.Namespace || s.RuntimeHandler != b.runtimeHandler() {
 					continue
 				}
 				e.Sandboxes = append(e.Sandboxes, s.Id)

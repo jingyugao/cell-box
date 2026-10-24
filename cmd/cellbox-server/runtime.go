@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"time"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
@@ -29,14 +31,65 @@ import (
 )
 
 type nodeOptions struct {
-	Node, Namespace, Socket string
-	LocalGuestBinary        string
-	LocalPlatform           string
-	HostMountNamespace      bool
-	WarmPoolSize            int
+	Node, Namespace, Socket          string
+	RuntimeClass, RuntimeHandler     string
+	NodeBase, Runsc, RunscRoot, Shim string
+	LocalGuestBinary                 string
+	LocalPlatform                    string
+	HostMountNamespace               bool
+	WarmPoolSize                     int
+}
+
+func (o nodeOptions) runtimeClass() string {
+	if o.RuntimeClass != "" {
+		return o.RuntimeClass
+	}
+	return api.RuntimeClass
+}
+
+func (o nodeOptions) runtimeHandler() string {
+	if o.RuntimeHandler != "" {
+		return o.RuntimeHandler
+	}
+	return o.runtimeClass()
+}
+
+func (o nodeOptions) nodeBase() string {
+	if o.NodeBase != "" {
+		return o.NodeBase
+	}
+	return node.DefaultBase
+}
+
+func (o nodeOptions) runsc() string {
+	if o.Runsc != "" {
+		return o.Runsc
+	}
+	return node.DefaultRunsc
+}
+
+func (o nodeOptions) runscRoot() string {
+	if o.RunscRoot != "" {
+		return o.RunscRoot
+	}
+	return node.DefaultRoot
+}
+
+func (o nodeOptions) shim() string {
+	if o.Shim != "" {
+		return o.Shim
+	}
+	return node.DefaultShim
 }
 
 func (o nodeOptions) validate(config service.Config) error {
+	for _, entry := range []struct{ name, path string }{
+		{"node-base", o.nodeBase()}, {"runsc", o.runsc()}, {"runsc-root", o.runscRoot()}, {"shim", o.shim()},
+	} {
+		if !filepath.IsAbs(entry.path) || filepath.Clean(entry.path) != entry.path || entry.path == "/" || strings.ContainsAny(entry.path, "\x00\r\n") {
+			return fmt.Errorf("--%s must be a clean absolute path other than /", entry.name)
+		}
+	}
 	if o.WarmPoolSize < 0 || o.WarmPoolSize > 32 {
 		return errors.New("warm pool size must be between 0 and 32")
 	}
@@ -100,6 +153,11 @@ func newRuntime(kube *rest.Config, options nodeOptions, readDesired func(context
 		}
 	}()
 	backend.HostMountNamespace = options.HostMountNamespace
+	backend.Base = options.nodeBase()
+	backend.Runsc = options.runsc()
+	backend.Root = options.runscRoot()
+	backend.Shim = options.shim()
+	backend.RuntimeHandler = options.runtimeHandler()
 	local := runtimecontrol.New(p.Client)
 	p.Client, p.Local = local, local
 	p.ConfirmExecutionLocal = backend.ConfirmExecution
@@ -129,7 +187,7 @@ func newRuntime(kube *rest.Config, options nodeOptions, readDesired func(context
 		defer cancel()
 		return backend.CacheImage(pull, image)
 	}
-	r := &controller.Reconciler{Client: local, Runtime: backend, NodeName: options.Node}
+	r := &controller.Reconciler{Client: local, Runtime: backend, NodeName: options.Node, NodeBase: options.nodeBase(), RuntimeClass: options.runtimeClass()}
 	if err = mgr.Add(&runtimecontrol.Synchronizer{Client: local}); err != nil {
 		return nil, nil, nil, err
 	}

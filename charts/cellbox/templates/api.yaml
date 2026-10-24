@@ -4,6 +4,15 @@
 {{- $storageHostPath := get $storage "hostPath" | default "/var/lib/cellbox-data" | toString | trim }}
 {{- $storageClaim := get $storage "existingClaim" | default "" | toString | trim }}
 {{- $dataDir := get (.Values.api.config | default dict) "dataDir" | default "/var/lib/cellbox-data" | toString | trim }}
+{{- $controller := .Values.controller | default dict }}
+{{- $nodeBase := get $controller "nodeBase" | default "/var/lib/cellbox" | toString | trim }}
+{{- $runsc := get $controller "runsc" | default "/usr/local/bin/runsc" | toString | trim }}
+{{- $runscRoot := get $controller "runscRoot" | default "/run/containerd/runsc/k8s.io" | toString | trim }}
+{{- $shim := get $controller "shim" | default "/usr/local/bin/containerd-shim-runsc-v1" | toString | trim }}
+{{- $runtimeClass := .Values.runtimeClass | default dict }}
+{{- $runtimeClassName := get $runtimeClass "name" | default "runsc-recoverable" | toString | trim }}
+{{- $runtimeHandler := get $runtimeClass "handler" | default "" | toString | trim }}
+{{- if eq $runtimeHandler "" }}{{- $runtimeHandler = $runtimeClassName }}{{- end }}
 {{- $serverNode := .Values.server.nodeName | default "" | toString | trim }}
 {{- if eq $serverNode "" }}{{- fail "server.nodeName is required; the single server must be pinned to its runtime node" }}{{- end }}
 {{- if ne $apiNamespace .Release.Namespace }}{{- fail "api.namespace must match the release namespace for the single-server runtime" }}{{- end }}
@@ -11,6 +20,11 @@
   {{- if and (hasKey $selector "kubernetes.io/hostname") (ne (get $selector "kubernetes.io/hostname" | toString) $serverNode) }}{{- fail (printf "%s kubernetes.io/hostname conflicts with server.nodeName" $selectorName) }}{{- end }}
 {{- end }}
 {{- if ne $dataDir "/var/lib/cellbox-data" }}{{- fail "api.config.dataDir must be /var/lib/cellbox-data to use the configured persistent storage" }}{{- end }}
+{{- range $pathName, $path := dict "controller.nodeBase" $nodeBase "controller.runsc" $runsc "controller.runscRoot" $runscRoot "controller.shim" $shim }}
+  {{- if or (not (hasPrefix "/" $path)) (eq $path "/") (hasSuffix "/" $path) (contains "//" $path) (regexMatch "(^|/)\\.{1,2}(/|$)" $path) }}{{- fail (printf "%s must be a clean absolute path other than /" $pathName) }}{{- end }}
+{{- end }}
+{{- if or (eq $runtimeClassName "") (contains "/" $runtimeClassName) (contains " " $runtimeClassName) }}{{- fail "runtimeClass.name must be a non-empty RuntimeClass name" }}{{- end }}
+{{- if or (eq $runtimeHandler "") (contains " " $runtimeHandler) }}{{- fail "runtimeClass.handler must be a non-empty CRI handler" }}{{- end }}
 {{- if ne (int .Values.api.replicas) 1 }}{{- fail "api.replicas must be 1; the API has a single active Lease owner" }}{{- end }}
 {{- if eq $storageClaim "" }}
   {{- if or (not (hasPrefix "/" $storageHostPath)) (eq $storageHostPath "/") (hasSuffix "/" $storageHostPath) (contains "//" $storageHostPath) (regexMatch "(^|/)\\.{1,2}(/|$)" $storageHostPath) }}{{- fail "storage.hostPath must be a clean absolute path other than /" }}{{- end }}
@@ -99,6 +113,12 @@ spec:
             - --node=$(NODE_NAME)
             - --namespace={{ .Release.Namespace }}
             - --warm-pool-size={{ if hasKey .Values.controller "warmPoolSize" }}{{ .Values.controller.warmPoolSize }}{{ else }}2{{ end }}
+            - {{ printf "--runtime-class=%s" $runtimeClassName | quote }}
+            - {{ printf "--runtime-handler=%s" $runtimeHandler | quote }}
+            - {{ printf "--node-base=%s" $nodeBase | quote }}
+            - {{ printf "--runsc=%s" $runsc | quote }}
+            - {{ printf "--runsc-root=%s" $runscRoot | quote }}
+            - {{ printf "--shim=%s" $shim | quote }}
             - --host-mount-namespace
             - --cri-socket={{ .Values.controller.criSocket }}
             {{- if .Values.buildkit.enabled }}
@@ -172,14 +192,30 @@ spec:
             - name: cri-directory
               mountPath: {{ .Values.controller.criDirectory }}
             - name: runsc-root
+              {{- if eq $runscRoot "/run/containerd/runsc/k8s.io" }}
               mountPath: /run/containerd/runsc/k8s.io
+              {{- else }}
+              mountPath: {{ $runscRoot | quote }}
+              {{- end }}
             - name: snapshot-store
+              {{- if eq $nodeBase "/var/lib/cellbox" }}
               mountPath: /var/lib/cellbox
+              {{- else }}
+              mountPath: {{ $nodeBase | quote }}
+              {{- end }}
+            {{- if eq $runsc "/usr/local/bin/runsc" }}
             - name: host-binaries
-              # Checkpoint hashes /usr/local/bin/runsc before nsenter runs it
-              # at the same path in the host mount namespace.
+              # Preserve the original default mount while hashing and invoking
+              # the host runsc binary at its absolute path.
               mountPath: /usr/local/bin
               readOnly: true
+            {{- else }}
+            - name: runsc-binary
+              # Checkpoint hashes the selected runsc binary before nsenter runs
+              # the same host path in the host mount namespace.
+              mountPath: {{ $runsc | quote }}
+              readOnly: true
+            {{- end }}
             {{- if .Values.buildkit.enabled }}
             - name: buildkit-socket
               mountPath: /run/cellbox-buildkit
@@ -257,16 +293,31 @@ spec:
             type: Directory
         - name: runsc-root
           hostPath:
+            {{- if eq $runscRoot "/run/containerd/runsc/k8s.io" }}
             path: /run/containerd/runsc/k8s.io
+            {{- else }}
+            path: {{ $runscRoot | quote }}
+            {{- end }}
             type: DirectoryOrCreate
         - name: snapshot-store
           hostPath:
+            {{- if eq $nodeBase "/var/lib/cellbox" }}
             path: /var/lib/cellbox
+            {{- else }}
+            path: {{ $nodeBase | quote }}
+            {{- end }}
             type: DirectoryOrCreate
+        {{- if eq $runsc "/usr/local/bin/runsc" }}
         - name: host-binaries
           hostPath:
             path: /usr/local/bin
             type: DirectoryOrCreate
+        {{- else }}
+        - name: runsc-binary
+          hostPath:
+            path: {{ $runsc | quote }}
+            type: File
+        {{- end }}
         - name: temp
           emptyDir:
             sizeLimit: {{ ternary "1Gi" "64Mi" .Values.buildkit.enabled }}

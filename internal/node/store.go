@@ -13,12 +13,15 @@ import (
 	"path/filepath"
 	"regexp"
 
+	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/homevolume"
 )
 
 const DefaultBase = homevolume.DefaultBase
 const DefaultRunsc = "/usr/local/bin/runsc"
 const DefaultRoot = "/run/containerd/runsc/k8s.io"
+const DefaultShim = "/usr/local/bin/containerd-shim-runsc-v1"
+const DefaultRuntimeHandler = api.RuntimeClass
 
 var safeID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]{0,100}$`)
 
