@@ -358,10 +358,7 @@ func (m *Manager) submitBuild(r *http.Request) (any, int, error) {
 		return nil, 0, failure("INVALID_REQUEST", "Invalid resolved profile")
 	}
 	localRunsc := profileUsesLocalRunsc(profile.Snapshot)
-	if localRunsc && in.BuildCommand != "" {
-		return nil, 0, failure("UNSUPPORTED_CAPABILITY", "local-runsc revisions do not support buildCommand")
-	}
-	if b, ok := m.config.Builder.(*imageBuilder); ok && b.options.Address == "" && !localRunsc {
+	if b, ok := m.config.Builder.(*imageBuilder); ok && b.options.Address == "" && (!localRunsc || in.BuildCommand != "") {
 		return nil, 0, failure("UNSUPPORTED_CAPABILITY", "Image building is not configured")
 	}
 	if in.WarmSlots == nil {

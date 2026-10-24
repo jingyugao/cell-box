@@ -68,12 +68,17 @@ func (b *imageBuilder) Build(ctx context.Context, in BuildInput, log io.Writer, 
 	out = BuildResult{ResolvedBaseImage: resolved.Source, Command: resolved.Command, Env: resolved.Env, WorkingDir: resolved.WorkingDir}
 	fmt.Fprintf(log, "Resolved base image: %s\n", resolved.Source)
 	if profileUsesLocalRunsc(in.Profile.Snapshot) {
-		if in.BuildCommand != "" {
-			return out, errors.New("local-runsc revisions do not support buildCommand")
+		// Standalone runsc can use a prebuilt immutable image without any
+		// BuildKit service. When a buildCommand is supplied, use the same
+		// BuildKit publication pipeline as the Kubernetes provider.
+		if in.BuildCommand == "" {
+			out.Image = resolved.Source
+			fmt.Fprintf(log, "Using immutable source image for local-runsc: %s\n", out.Image)
+			return out, nil
 		}
-		out.Image = resolved.Source
-		fmt.Fprintf(log, "Using immutable source image for local-runsc: %s\n", out.Image)
-		return out, nil
+	}
+	if profileUsesLocalRunsc(in.Profile.Snapshot) && b.options.Address == "" {
+		return out, errors.New("local-runsc buildCommand requires BuildKit to be configured")
 	}
 	if err = stage("building"); err != nil {
 		return out, err
@@ -197,8 +202,8 @@ func (m *Manager) executeBuild(ctx context.Context, client string, op Operation,
 	result, buildErr := m.config.Builder.Build(ctx, in, log, func(stage string) error { return m.stage(client, op.ID, stage) })
 	var snapshot json.RawMessage
 	if buildErr == nil {
-		if profileUsesLocalRunsc(in.Profile.Snapshot) && (in.BuildCommand != "" || result.Image != result.ResolvedBaseImage) {
-			buildErr = errors.New("local-runsc revisions must use the resolved source image without buildCommand")
+		if profileUsesLocalRunsc(in.Profile.Snapshot) && in.BuildCommand == "" && result.Image != result.ResolvedBaseImage {
+			buildErr = errors.New("local-runsc revisions without buildCommand must use the resolved source image")
 		}
 		if buildErr == nil && !validBuildImage(result.Image, in.Profile.Snapshot) {
 			buildErr = errors.New("builder did not return an immutable registry image")

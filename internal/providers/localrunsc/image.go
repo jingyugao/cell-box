@@ -17,6 +17,7 @@ import (
 	"cellbox.local/cellbox/internal/boxprovider"
 	"cellbox.local/cellbox/internal/guestapi"
 	"cellbox.local/cellbox/internal/homevolume"
+	"cellbox.local/cellbox/internal/image"
 )
 
 // Cache only immutable OCI blobs. Each execution gets a separate writable unpack.
@@ -29,7 +30,16 @@ func (p *Provider) prepareImage(ctx context.Context, r record) error {
 			return err
 		}
 		defer os.RemoveAll(tmp)
-		if _, err := command(ctx, "skopeo", "copy", "docker://"+r.Spec.Image, "oci:"+tmp+":image"); err != nil {
+		ref, err := image.ParseRegistryReference(r.Spec.Image, p.insecureRegistry)
+		if err != nil {
+			return err
+		}
+		args := []string{"copy"}
+		if p.insecureRegistry != "" && ref.Context().RegistryStr() == p.insecureRegistry {
+			args = append(args, "--src-tls-verify=false")
+		}
+		args = append(args, "docker://"+r.Spec.Image, "oci:"+tmp+":image")
+		if _, err := command(ctx, "skopeo", args...); err != nil {
 			return err
 		}
 		if err := os.Rename(tmp, cache); err != nil {
@@ -61,7 +71,11 @@ func (p *Provider) configure(ctx context.Context, r record) error {
 		return err
 	}
 	defer root.Close()
-	for _, dir := range []string{".", "opt", "opt/cellbox", "opt/cellbox/bin"} {
+	parents := []string{".", "opt", "opt/cellbox", "opt/cellbox/bin"}
+	if r.Spec.SharedReadOnlyHostPath != "" {
+		parents = append(parents, "var", "var/lib", "var/lib/cellbox")
+	}
+	for _, dir := range parents {
 		if err := root.MkdirAll(dir, 0755); err != nil {
 			return err
 		}
@@ -117,9 +131,13 @@ func (p *Provider) configure(ctx context.Context, r record) error {
 		}
 	}
 	caps := []string{"CAP_CHOWN", "CAP_FOWNER", "CAP_DAC_OVERRIDE", "CAP_SETUID", "CAP_SETGID", "CAP_KILL"}
+	args := []string{guestapi.Binary, "serve", "--config-base64", encoded}
+	if r.Spec.Staged {
+		args = append(args, "--staged")
+	}
 	spec["process"] = map[string]any{
 		"terminal": false, "user": map[string]any{"uid": 0, "gid": 0}, "cwd": "/",
-		"args": []string{guestapi.Binary, "serve", "--config-base64", encoded}, "env": env,
+		"args": args, "env": env,
 		"noNewPrivileges": true,
 		"capabilities":    map[string]any{"bounding": caps, "effective": caps, "permitted": caps},
 		"rlimits":         []any{map[string]any{"type": "RLIMIT_NOFILE", "hard": 65536, "soft": 65536}},
@@ -185,14 +203,35 @@ func (p *Provider) configure(ctx context.Context, r record) error {
 		return err
 	}
 	mounts = append(mounts, map[string]any{"destination": "/etc/resolv.conf", "type": "bind", "source": resolverPath, "options": []string{"bind", "ro", "nosuid", "nodev", "noexec"}})
+	for _, mount := range []struct {
+		source, target string
+		readOnly       bool
+	}{
+		{r.Spec.SharedReadOnlyHostPath, api.SharedMountPath, true},
+		{r.Spec.DebugReadOnlyHostPath, "/home/debug", true},
+		{r.Spec.DebugReadWriteHostPath, "/home/debug", false},
+	} {
+		if mount.source == "" {
+			continue
+		}
+		info, err := os.Stat(mount.source)
+		if err != nil {
+			return fmt.Errorf("local host mount %s: %w", mount.source, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("local host mount must be a directory: %s", mount.source)
+		}
+		options := []string{"rbind", "nosuid", "nodev"}
+		if mount.readOnly {
+			options = append(options, "ro")
+		}
+		mounts = append(mounts, map[string]any{"destination": mount.target, "type": "bind", "source": mount.source, "options": options})
+	}
 	volumes := r.Spec.Mounts
 	if len(volumes) == 0 && r.Spec.HomeVolumeUID != "" {
 		volumes = []api.VolumeMount{{UID: r.Spec.HomeVolumeUID, MountPath: "/home/agent"}}
 	}
 	for _, m := range volumes {
-		if err := p.attachable(r, m.UID); err != nil {
-			return err
-		}
 		if _, err := homevolume.Verify(p.base, m.UID, "local", homevolume.VolumeSpecHash, ""); err != nil {
 			return fmt.Errorf("%w: %v", boxprovider.ErrStaleVolume, err)
 		}
@@ -214,29 +253,4 @@ func (p *Provider) configure(ctx context.Context, r record) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(bundle, "config.json"), b, 0600)
-}
-
-func (p *Provider) attachable(current record, uid string) error {
-	entries, err := os.ReadDir(filepath.Join(p.base, "boxes"))
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if entry.Name() == current.Handle.Name {
-			continue
-		}
-		r, err := p.load(entry.Name())
-		if err != nil {
-			return err
-		}
-		if r.Spec.HomeVolumeUID == uid {
-			return errors.New("volume is attached to another local sandbox")
-		}
-		for _, m := range r.Spec.Mounts {
-			if m.UID == uid {
-				return errors.New("volume is attached to another local sandbox")
-			}
-		}
-	}
-	return nil
 }
