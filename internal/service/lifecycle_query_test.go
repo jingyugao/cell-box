@@ -23,6 +23,24 @@ func replaceQueryProvider(f *coreFixture, inspect func(context.Context, boxprovi
 	f.service.providers["docker"] = &queryProviderHook{Provider: f.provider, inspect: inspect}
 }
 
+func TestWaitStateReturnsObservedRuntimeFailureDetail(t *testing.T) {
+	f := newCoreFixture(t)
+	defer f.service.Close()
+	_, box := f.createBox(t, "readiness-failure-detail")
+	message := "image not present locally: prepared@sha256:digest"
+	replaceQueryProvider(f, func(context.Context, boxprovider.Handle) (boxprovider.Observation, error) {
+		return boxprovider.Observation{Phase: "failed", Message: message}, nil
+	})
+	failed, err := f.service.waitState(context.Background(), box.ID, "running", false)
+	var failure *APIError
+	if !errors.As(err, &failure) || failure.Code != "READINESS_FAILED" || failure.Message != message {
+		t.Fatalf("runtime failure detail lost: box=%+v error=%v", failed, err)
+	}
+	if failed.Error == nil || failed.Error.Message != message {
+		t.Fatalf("observed Box lost runtime failure detail: %+v", failed.Error)
+	}
+}
+
 func TestObservePreservesSuspendedGenerationAfterServiceRestart(t *testing.T) {
 	dir := t.TempDir()
 	initial, err := OpenStore(dir)

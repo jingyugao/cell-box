@@ -254,6 +254,16 @@ func (b *Backend) verifySnapshotImage(ctx context.Context, r *api.ResumablePod, 
 	if err = b.verifySnapshotHome(r, m); err != nil {
 		return nil, err
 	}
+	// Suspended Pods no longer keep their images in kubelet's active set. The
+	// replacement Pod is still scheduling-gated here, so refill its cache before
+	// checking checkpoint compatibility. Pull once and retain the identity check.
+	if r.Spec.Container.ImagePullPolicy != core.PullNever {
+		pull, cancel := context.WithTimeout(ctx, 10*time.Minute)
+		defer cancel()
+		if err := b.CacheImage(pull, r.Spec.Container.Image); err != nil {
+			return nil, fmt.Errorf("cache checkpoint image %s: %w", r.Spec.Container.Image, err)
+		}
+	}
 	id, err := b.imageID(ctx, r.Spec.Container.Image)
 	if err != nil {
 		return nil, err
