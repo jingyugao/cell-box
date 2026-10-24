@@ -20,12 +20,13 @@ import (
 )
 
 // WarmLease is an execution lease, not a running or ready business container.
-// Its deadline stays below the kubelet RunPodSandbox timeout. Expired Pod UIDs
+// Its deadline stays below the kubelet runtime RPC timeout. Expired Pod UIDs
 // are never rearmed; the pool replaces the entire Pod.
 type WarmLease struct {
 	UID, Name, Namespace, SpecHash, SID, Phase string
 	Deadline                                   time.Time
 	Ticket                                     Ticket
+	DeferredRestore                            bool `json:"deferredRestore,omitempty"`
 }
 
 func warmUpdate(base, uid string, create bool, fn func(*WarmLease) error) (WarmLease, error) {
@@ -95,6 +96,34 @@ func BindWarm(base, uid, name, namespace, sid string) (WarmLease, error) {
 		l.Phase = "created"
 		return AtomicJSON(filepath.Join(base, "requests", sid+".json"), Ticket{PodUID: uid, PodName: name, Namespace: namespace})
 	})
+}
+
+// MarkDeferredRestore records that the warm sandbox root was started without
+// binding its checkpoint. The child start path consumes the checkpoint after
+// the controller assigns this lease, before its Gofer is created.
+func MarkDeferredRestore(base, uid, name, namespace, sid string) error {
+	_, err := warmUpdate(base, uid, false, func(l *WarmLease) error {
+		if l.UID != uid || l.Name != name || l.Namespace != namespace || l.SID != sid || l.Phase != "created" {
+			return fmt.Errorf("warm sandbox identity or phase changed")
+		}
+		l.DeferredRestore = true
+		return nil
+	})
+	return err
+}
+
+// DeferredRestore reports whether this sandbox's warm root was started with
+// its checkpoint intentionally unbound. A missing lease means this is not a
+// warm sandbox; a present lease must match the supplied CRI identity.
+func DeferredRestore(base, uid, name, namespace, sid string) (deferred bool, err error) {
+	_, err = warmUpdate(base, uid, false, func(l *WarmLease) error {
+		if l.UID != uid || l.Name != name || l.Namespace != namespace || l.SID != sid {
+			return fmt.Errorf("warm sandbox identity mismatch")
+		}
+		deferred = l.DeferredRestore
+		return nil
+	})
+	return deferred, err
 }
 
 func WaitWarm(base, uid, sid string) (Ticket, error) {
@@ -220,8 +249,10 @@ func RetireWarm(base, uid string) error {
 
 // ChildRecord avoids launching runsc state merely to rediscover container type.
 type ChildRecord struct {
-	Ticket    Ticket
-	SandboxID string
+	Ticket          Ticket
+	SandboxID       string
+	DeferredRestore bool   `json:"deferredRestore,omitempty"`
+	BundleDir       string `json:"bundleDir,omitempty"`
 }
 
 func (b *Backend) removeChildren(uid string) error {

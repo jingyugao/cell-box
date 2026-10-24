@@ -26,8 +26,9 @@ import (
 )
 
 type Backend struct {
-	Base, Runsc, Root string
-	Socket            string
+	Base, Runsc, Root    string
+	Shim, RuntimeHandler string
+	Socket               string
 	// HostMountNamespace runs runsc in the node's mount/root namespace when the
 	// controller itself is running in a hostPID privileged DaemonSet Pod.
 	HostMountNamespace bool
@@ -40,12 +41,26 @@ type Backend struct {
 	Checkpoints inventory.CheckpointStore
 }
 
+func (b *Backend) runtimeHandler() string {
+	if b.RuntimeHandler != "" {
+		return b.RuntimeHandler
+	}
+	return DefaultRuntimeHandler
+}
+
+func (b *Backend) shim() string {
+	if b.Shim != "" {
+		return b.Shim
+	}
+	return DefaultShim
+}
+
 func New(socket string) (*Backend, error) {
 	conn, err := grpc.NewClient("unix://"+socket, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, err
 	}
-	return &Backend{Base: DefaultBase, Runsc: DefaultRunsc, Root: DefaultRoot, Socket: socket, Runtime: cri.NewRuntimeServiceClient(conn), Images: cri.NewImageServiceClient(conn), connection: conn}, nil
+	return &Backend{Base: DefaultBase, Runsc: DefaultRunsc, Root: DefaultRoot, Shim: DefaultShim, RuntimeHandler: DefaultRuntimeHandler, Socket: socket, Runtime: cri.NewRuntimeServiceClient(conn), Images: cri.NewImageServiceClient(conn), connection: conn}, nil
 }
 
 func (b *Backend) Close() error {
@@ -105,7 +120,7 @@ func (b *Backend) sandboxes(ctx context.Context, p *core.Pod) ([]*cri.PodSandbox
 	var out []*cri.PodSandbox
 	for _, s := range res.Items {
 		m := s.Metadata
-		if m == nil || m.Uid != string(p.UID) || m.Namespace != p.Namespace || m.Name != p.Name || s.RuntimeHandler != api.RuntimeClass {
+		if m == nil || m.Uid != string(p.UID) || m.Namespace != p.Namespace || m.Name != p.Name || s.RuntimeHandler != b.runtimeHandler() {
 			return nil, fmt.Errorf("CRI sandbox identity/runtime mismatch")
 		}
 		out = append(out, s)

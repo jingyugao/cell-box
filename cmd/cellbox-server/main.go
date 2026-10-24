@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	api "cellbox.local/cellbox/api/v1alpha1"
+	"cellbox.local/cellbox/internal/node"
 	"cellbox.local/cellbox/internal/objectstorage"
 	"cellbox.local/cellbox/internal/service"
 	"cellbox.local/cellbox/internal/telemetry"
@@ -48,6 +50,12 @@ func run(args []string) error {
 	flags.StringVar(&runtime.Node, "node", "", "single managed Kubernetes node")
 	flags.StringVar(&runtime.Namespace, "namespace", "cell-box", "managed Kubernetes namespace")
 	flags.StringVar(&runtime.Socket, "cri-socket", "/run/containerd/containerd.sock", "node CRI Unix socket")
+	flags.StringVar(&runtime.RuntimeClass, "runtime-class", api.RuntimeClass, "Kubernetes RuntimeClass used for execution Pods")
+	flags.StringVar(&runtime.RuntimeHandler, "runtime-handler", "", "CRI runtime handler; defaults to --runtime-class")
+	flags.StringVar(&runtime.NodeBase, "node-base", node.DefaultBase, "node-local Cellbox runtime data directory")
+	flags.StringVar(&runtime.Runsc, "runsc", node.DefaultRunsc, "runsc binary used by the node runtime")
+	flags.StringVar(&runtime.RunscRoot, "runsc-root", node.DefaultRoot, "runsc state root used by the CRI handler")
+	flags.StringVar(&runtime.Shim, "shim", node.DefaultShim, "containerd runsc shim executable path")
 	flags.BoolVar(&runtime.HostMountNamespace, "host-mount-namespace", false, "run runsc in the host mount namespace (requires privileged hostPID Pod)")
 	flags.IntVar(&runtime.WarmPoolSize, "warm-pool-size", 2, "maximum idle warm Pods on this node (0 disables)")
 	dockerBinary := flags.String("docker", "docker", "Docker CLI executable")

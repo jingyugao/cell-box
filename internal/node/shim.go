@@ -16,8 +16,12 @@ import (
 
 // matchesShim requires the installed executable, namespace, socket and full
 // sandbox ID. A name substring or stale PID is never sufficient authorization.
-func matchesShim(exe string, cmd []byte, id, socket string) bool {
-	if exe != "/usr/local/bin/containerd-shim-runsc-v1" {
+func matchesShim(exe string, cmd []byte, id, socket string, expected ...string) bool {
+	shim := DefaultShim
+	if len(expected) != 0 && expected[0] != "" {
+		shim = expected[0]
+	}
+	if exe != shim {
 		return false
 	}
 	args := strings.Split(string(bytes.TrimSuffix(cmd, []byte{0})), "\x00")
@@ -47,7 +51,7 @@ func (b *Backend) reapShim(id string) error {
 		}
 		proc := filepath.Join("/proc", entry.Name())
 		exe, err := os.Readlink(filepath.Join(proc, "exe"))
-		if err != nil || exe != "/usr/local/bin/containerd-shim-runsc-v1" {
+		if err != nil || exe != b.shim() {
 			continue
 		}
 		fd, err := unix.PidfdOpen(pid, 0)
@@ -59,7 +63,7 @@ func (b *Backend) reapShim(id string) error {
 		}
 		exe, exeErr := os.Readlink(filepath.Join(proc, "exe"))
 		cmd, cmdErr := os.ReadFile(filepath.Join(proc, "cmdline"))
-		if exeErr == nil && cmdErr == nil && matchesShim(exe, cmd, id, b.Socket) {
+		if exeErr == nil && cmdErr == nil && matchesShim(exe, cmd, id, b.Socket, b.shim()) {
 			err = unix.PidfdSendSignal(fd, unix.SIGKILL, nil, 0)
 			unix.Close(fd)
 			if err != nil && err != unix.ESRCH {
