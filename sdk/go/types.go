@@ -96,6 +96,18 @@ type VolumeBackup struct {
 	ProfileID  string    `json:"profileId"`
 }
 
+// VolumeExport describes a temporary archive of a directory in a Volume.
+type VolumeExport struct {
+	ID        string    `json:"id"`
+	VolumeID  string    `json:"volumeId"`
+	Path      string    `json:"path"`
+	Format    string    `json:"format"`
+	SizeBytes int64     `json:"sizeBytes"`
+	SHA256    string    `json:"sha256"`
+	CreatedAt time.Time `json:"createdAt"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
 // RestoreVolumeOptions restores a backup into a newly allocated Volume.
 type RestoreVolumeOptions struct {
 	SourceVolumeID string `json:"sourceVolumeId"`

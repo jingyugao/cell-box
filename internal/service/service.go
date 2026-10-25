@@ -38,6 +38,7 @@ type Service struct {
 	catalog      *catalog.Manager
 	providers    map[string]boxprovider.Provider
 	backups      volumeBackupEngine
+	exportDir    string
 	http         *http.Client
 	toolHTTP     *http.Client
 	ctx          context.Context
@@ -178,7 +179,7 @@ func (s *Service) Close() error {
 	s.mu.Unlock()
 	s.wg.Wait()
 	s.http.CloseIdleConnections()
-	return errors.Join(s.catalog.Close(), s.store.Close())
+	return errors.Join(s.cleanupVolumeExports(), s.catalog.Close(), s.store.Close())
 }
 
 func randomID(prefix string) string {
@@ -340,6 +341,11 @@ func (s *Service) launchWithCommitContext(request context.Context, op Operation,
 					return err
 				}
 			}
+			if op.Kind == "volume-export" {
+				if err := finishVolumeExportOperation(tx, op); err != nil {
+					return err
+				}
+			}
 			b, boxErr := tx.Box("", op.TargetID)
 			if boxErr == nil && b.Box.OperationID == op.ID {
 				if workErr != nil && op.Kind == "resume" {
@@ -384,6 +390,9 @@ func (s *Service) launchWithCommitContext(request context.Context, op Operation,
 			return tx.PutOperation(record)
 		})
 		if workErr != nil || saveErr != nil {
+			if op.Kind == "volume-export" {
+				s.discardVolumeExport(result)
+			}
 			span.SetStatus(codes.Error, "")
 		}
 		if saveErr != nil {
