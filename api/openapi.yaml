@@ -344,6 +344,20 @@ components:
         profileId: {type: string}
       required: [id, createdAt, volumeId, ownerKey, profileId]
       type: object
+    VolumeExport:
+      additionalProperties: false
+      description: Temporary archive of a directory in a stopped independent Volume. Files are stored under the server data directory's tmp/volume-exports, expire after one hour, and are discarded when the server restarts.
+      properties:
+        id: {type: string, pattern: '^exp-[a-f0-9]{32}$'}
+        volumeId: {type: string}
+        path: {type: string, description: Clean Volume-relative directory path; '.' denotes the Volume root.}
+        format: {type: string, enum: [tar.gz]}
+        sizeBytes: {type: integer, format: int64, minimum: 0}
+        sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
+        createdAt: {type: string, format: date-time}
+        expiresAt: {type: string, format: date-time}
+      required: [id, volumeId, path, format, sizeBytes, sha256, createdAt, expiresAt]
+      type: object
     RestoreVolume:
       additionalProperties: false
       properties:
@@ -1050,6 +1064,96 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/VolumeBackup'}
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/volumes/{id}/exports:
+    parameters:
+    - in: path
+      name: id
+      required: true
+      schema: {type: string, maxLength: 55, pattern: '^[a-z0-9]([-a-z0-9]{0,53}[a-z0-9])?$'}
+    post:
+      operationId: createVolumeExport
+      summary: Export a directory from a stopped independent Volume
+      description: Creates a temporary tar.gz directly from the Volume without starting a Box or using object storage. The Volume must be available and every non-deleted Box referencing it must be suspended with no operation or exec in progress; failed Boxes are rejected, and the node confirms that the Volume is stopped. A detached Volume is allowed. The path is a clean Volume-relative directory path (maximum 4096 bytes and 64 path segments); '.' denotes the Volume root. Only regular files and directories are included; symbolic links and special files are skipped. The chosen directory is the archive root. Existing archive limits apply (8 GiB per file, 16 GiB total uncompressed, and 18 GiB compressed). Exports expire after one hour, are discarded on server restart, and should be explicitly deleted after use. Empty request body or omitted path selects '.'. The accepted operation has kind volume-export; on success its result contains exportId and volumeId.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                path: {type: string, maxLength: 4096, description: Clean relative directory path with no absolute path, parent segment, backslash, or control character; '.' or empty or omitted selects the Volume root.}
+      responses:
+        "202":
+          description: Volume export operation accepted
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Operation'}
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/volumes/{id}/exports/{exportId}:
+    parameters:
+    - in: path
+      name: id
+      required: true
+      schema: {type: string, maxLength: 55, pattern: '^[a-z0-9]([-a-z0-9]{0,53}[a-z0-9])?$'}
+    - in: path
+      name: exportId
+      required: true
+      schema: {type: string, pattern: '^exp-[a-f0-9]{32}$'}
+    get:
+      operationId: getVolumeExport
+      summary: Get metadata for a temporary Volume export
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/VolumeExport'}
+        default:
+          $ref: '#/components/responses/Error'
+    delete:
+      operationId: deleteVolumeExport
+      summary: Delete a temporary Volume export
+      description: Returns 204 when deleted or already absent. The Volume must still exist and belong to the requesting client; cross-client requests return 404.
+      responses:
+        "204":
+          description: Export deleted or already absent
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/volumes/{id}/exports/{exportId}/content:
+    parameters:
+    - in: path
+      name: id
+      required: true
+      schema: {type: string, maxLength: 55, pattern: '^[a-z0-9]([-a-z0-9]{0,53}[a-z0-9])?$'}
+    - in: path
+      name: exportId
+      required: true
+      schema: {type: string, pattern: '^exp-[a-f0-9]{32}$'}
+    get:
+      operationId: downloadVolumeExport
+      summary: Download a temporary Volume export archive
+      description: Streams application/gzip content and supports byte ranges and conditional requests using standard HTTP semantics. An already-open download may finish after deletion; subsequent downloads return 404.
+      responses:
+        "200":
+          description: Complete gzip archive
+          content:
+            application/gzip:
+              schema: {type: string, format: binary}
+        "206":
+          description: Partial bytes; Content-Range identifies the range and full archive size.
+          content:
+            application/gzip:
+              schema: {type: string, format: binary}
+        "304":
+          description: Archive has not changed; no body.
+        "412":
+          description: Archive precondition failed.
+        "416":
+          description: Unsatisfiable byte range; Content-Range contains bytes */size.
         default:
           $ref: '#/components/responses/Error'
   /v1/volumes:restore:

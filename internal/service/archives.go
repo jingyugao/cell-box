@@ -479,6 +479,9 @@ func (s *Service) cleanupStartupTemps() error {
 	if s.store.lock == nil {
 		return errors.New("startup cleanup requires the data directory lock")
 	}
+	if err := s.initVolumeExports(); err != nil {
+		return err
+	}
 	return removeRegularTemps(filepath.Join(s.config.DataDir, "archives"), func(name string) bool {
 		return strings.HasPrefix(name, ".download-")
 	})

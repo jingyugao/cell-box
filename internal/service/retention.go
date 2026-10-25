@@ -9,6 +9,9 @@ import (
 func (s *Service) pruneMetadata(now time.Time) error {
 	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
 	defer cancel()
+	if err := s.pruneVolumeExports(ctx, now); err != nil {
+		return err
+	}
 	return s.store.Prune(ctx, now, time.Duration(s.config.OperationRetentionSeconds)*time.Second, time.Duration(s.config.ExecutionRetentionSeconds)*time.Second)
 }
 func (s *Store) Prune(ctx context.Context, now time.Time, operations, outputs time.Duration) error {

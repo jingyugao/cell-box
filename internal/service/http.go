@@ -97,6 +97,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/profiles", s.listProfiles)
 	s.registerVolumes(mux)
 	s.registerVolumeBackups(mux)
+	s.registerVolumeExports(mux)
 	if s.catalog != nil {
 		s.catalog.Register(mux, clientID)
 		s.registerTemplateRuntime(mux)

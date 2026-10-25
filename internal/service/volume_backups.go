@@ -77,6 +77,10 @@ func requireAvailableBoxVolumes(tx *storeTx, b boxRecord) error {
 }
 
 func requireStoppedVolumeBoxes(tx *storeTx, client, volumeID string) error {
+	return requireIdleVolumeBoxes(tx, client, volumeID, true)
+}
+
+func requireIdleVolumeBoxes(tx *storeTx, client, volumeID string, allowFailed bool) error {
 	boxes, err := listRecords[boxRecord](tx.ctx, tx.tx, "boxes", "AND client_id=?", client)
 	if err != nil {
 		return err
@@ -92,8 +96,11 @@ func requireStoppedVolumeBoxes(tx *storeTx, client, volumeID string) error {
 		if err := busy(tx, box); err != nil {
 			return err
 		}
-		if box.Box.Phase != "suspended" && box.Box.Phase != "failed" {
-			return apiError("BUSY", "All Boxes referencing the Volume must be stopped before backup")
+		if box.Box.Phase != "suspended" && !(allowFailed && box.Box.Phase == "failed") {
+			if allowFailed {
+				return apiError("BUSY", "All Boxes referencing the Volume must be stopped before backup")
+			}
+			return apiError("BUSY", "All Boxes referencing the Volume must be suspended before export")
 		}
 		active, err := tx.HasActiveExecution(box.Box.ID)
 		if err != nil {
