@@ -11,7 +11,7 @@ make check
 make build
 ```
 
-`make build` 输出到 `dist/release`，包含二进制、Chart、`doc/`、OpenAPI 和 `sdk/go/` 源码。只构建输出目录不会升级集群。临时实验文档不会被打包。
+`make build` 输出到 `dist/release`，包含二进制、Chart、`docs/`、OpenAPI 和 `sdk/go/` 源码。只构建输出目录不会升级集群。临时实验文档不会被打包。
 
 `make build` 会生成 `dist/release/cellbox-server`、guest agent 和 wrapper。Cellbox API 与节点运行时合并为一个进程和镜像：
 
@@ -38,7 +38,7 @@ docker push registry.example.com/team/cellbox-server:v1
 | `api.config.profiles` | 配置 profile ID、provider、镜像、CPU、内存、guest；Kubernetes profile 的 namespace 必须是 release namespace，`nodeName` 必须匹配 `server.nodeName`。示例结构见 [`config/sample.json`](../config/sample.json) |
 | `controller.nodeSelector` | 为单进程 server 提供节点平台约束；实际节点还会由 `server.nodeName` 固定。默认 Linux amd64 |
 | `controller.criDirectory` / `criSocket` | server 直接访问节点 CRI；普通 containerd 默认 `/run/containerd` / `/run/containerd/containerd.sock`，k3s 使用 `/run/k3s/containerd` / `/run/k3s/containerd/containerd.sock` |
-| `controller.warmPoolSize` | 单进程后台运行时循环的空闲预热槽位总预算，默认 2、允许 0–32；各 revision 的需求由 `warmSlots` 决定 |
+| `controller.warmPoolSize` | 单进程后台运行时循环的空闲预热槽位总预算，默认 2、允许 0–32；预热需求由节点上现有的 checkpoint 决定，见[预热池](warm-pool.md) |
 | `buildkit.enabled`、`repository` | 构建模板 revision 时需启用 BuildKit，并指定可推送的完整目标镜像仓库 |
 | `buildkit.registryCredentialsSecret` | 私有镜像仓库需要时，引用已有的 `kubernetes.io/dockerconfigjson` Secret |
 | `buildkit.registryHost` / `registryHTTP` | 本地 HTTP 测试仓库需显式配置；普通 HTTPS 仓库保持 HTTP 选项关闭 |
@@ -49,7 +49,7 @@ docker push registry.example.com/team/cellbox-server:v1
 
 Kubernetes profile 的 sandbox 期望状态和运行状态仍保存在 Cellbox 自定义资源中；gVisor checkpoint 文件仍放在节点的 `/var/lib/cellbox` 下。
 
-创建 template 时不创建预热池。成功构建的 active revision 在 `warmSlots > 0` 时自动触发后台预热，且受节点总预算限制；详细语义见[使用说明](cellbox-usage.md)。
+创建 template 或构建 revision 时不创建预热池。sandbox 暂停产生 checkpoint 后，后台会自动为它的兼容配置准备预热槽位，且受节点总预算限制；详细语义见[预热池](warm-pool.md)。
 
 API 不内置客户端身份认证。外部访问应由前置 Gateway 校验身份并限制 Client 数据命名空间；`X-Cellbox-Client-ID` 本身不是认证凭据。Secret 正文不应写入版本控制中的 values 或文档。
 

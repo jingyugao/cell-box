@@ -26,7 +26,7 @@ curl --fail-with-body -sS -X POST "$CELLBOX_API_URL/v1/templates" \
   -d '{"name":"coding-agent","description":"Agent workspace","defaultWarmSlots":0}'
 ```
 
-将响应中的 `id` 保存为 `TEMPLATE_ID`。模板族包含可变元数据、默认预热目标，以及可选的 stable revision 指针。创建 template 时尚无可运行镜像，因此不会创建预热池；`defaultWarmSlots` 是之后创建 revision 时使用的默认目标。模板数据保存在服务持久数据目录的 `cellbox.db` 中。
+将响应中的 `id` 保存为 `TEMPLATE_ID`。模板族包含可变元数据、`defaultWarmSlots`（兼容字段，不再决定预热），以及可选的 stable revision 指针。创建 template 时尚无可运行镜像，因此不会创建预热池。模板数据保存在服务持久数据目录的 `cellbox.db` 中。
 
 ## 构建 revision
 
@@ -68,7 +68,7 @@ export REVISION_ID='<成功 operation 的 result.revisionId>'
 
 模板、revision、构建 operation 和日志接口使用服务本地 `cellbox.db`，不查询 Kubernetes。解析或构建镜像时会访问镜像仓库和 BuildKit。选择 profile 后，系统会把当时配置快照保存到 revision。构建成功不会自动切换 stable revision。
 
-切换 stable 只影响之后新建的沙箱，不会撤回旧 revision 的预热需求。兼容的 revision 可以共用预热池，且每个节点有共享容量上限（默认最多 2 个，配置上限 32 个）。同一 `poolId` 的槽位数是共享池汇总值，会在关联 revision 的状态中重复出现；节点容量可能使 `allocatedSlots` 小于 `requestedSlots`。汇总多 revision 时按 `poolId` 去重。撤回需求只清理空闲预热 Pod；已被 sandbox 领用的 Pod 不会因此删除。当前预热 Pod 服务于 resumable sandbox 的恢复路径，不能假定它会加速首次冷创建。
+切换 stable 只影响之后新建的沙箱。预热需求来自节点上现有的 checkpoint，不来自 revision 的 `warmSlots`；兼容的 revision 共用预热池，每个节点有共享容量上限（默认最多 2 个，配置上限 32 个），详见[预热池](warm-pool.md)。同一 `poolId` 的槽位数是共享池汇总值，会在关联 revision 的状态中重复出现；节点容量可能使 `allocatedSlots` 小于 `requestedSlots`。汇总多 revision 时按 `poolId` 去重。撤回需求只清理空闲预热 Pod；已被 sandbox 领用的 Pod 不会因此删除。当前预热 Pod 服务于 resumable sandbox 的恢复路径，不能假定它会加速首次冷创建。
 
 ## 查询预热与模板运行状态
 
@@ -137,9 +137,9 @@ curl --fail-with-body -sS -X POST "$CELLBOX_API_URL/v1/boxes/$BOX_ID:destroy" \
 
 ## 行为说明
 
-- 模板与 revision 元数据操作使用服务持久数据目录中的 `cellbox.db`；成功构建或修改预热目标后，单进程 server 的运行时循环直接协调预热池。预热状态查询读取后台快照，不直接查询集群。沙箱创建和生命周期操作会写入 Kubernetes Cellbox CR，再通过进程内队列通知 runtime worker；Cellbox CR 继续作为持久期望/运行状态并拥有实际 Pod/Service。命令、文件和清单操作仍按所选 runtime provider 执行。
+- 模板与 revision 元数据操作使用服务持久数据目录中的 `cellbox.db`；单进程 server 的运行时循环根据节点上现有的 checkpoint 直接协调预热池。预热状态查询读取后台快照，不直接查询集群。沙箱创建和生命周期操作会写入 Kubernetes Cellbox CR，再通过进程内队列通知 runtime worker；Cellbox CR 继续作为持久期望/运行状态并拥有实际 Pod/Service。命令、文件和清单操作仍按所选 runtime provider 执行。
 - 模板 stable revision 只影响之后新建的沙箱。已有沙箱继续使用创建时绑定的不可变 revision。
-- 构建成功后，active 状态且 `warmSlots > 0` 会自动进入后台预热池同步；stable 指针切换不改变旧 revision 的需求。状态接口返回后台快照，`stale` / `observedAt` 用于判断新鲜度。
+- 预热需求只由 `Suspended` 且有 checkpoint 的 Box 决定，与 `warmSlots`、stable 指针无关；`desiredSlots` 只回显配置值。状态接口返回后台快照，`stale` / `observedAt` 用于判断新鲜度。
 - 只有没有 revision 且没有待处理构建的空模板族才能删除。本期不提供 revision 删除接口；将 revision 标记为 retired 可阻止新选择，同时保留历史记录。
 - 客户端断开连接或取消本地等待不会取消已受理的服务端 operation。用 operation ID 查询状态。网络失败后不要自动重新提交有副作用的操作。服务重启后无法确认的任务会以 `UNKNOWN_OUTCOME` 失败且不会自动重跑。构建需要显式调用 `POST /v1/operations/{id}:cancel` 请求取消。
 

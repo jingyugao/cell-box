@@ -39,7 +39,7 @@ build:
 	cp config/sample.json config/local-runsc.sample.json "$$out/config/"
 	cp api/openapi.yaml "$$out/api/"
 	cp LICENSE VERSION README.md "$$out/"
-	if [[ -d doc ]]; then cp -r doc "$$out/"; fi
+	if [[ -d docs ]]; then cp -r docs "$$out/"; fi
 	mkdir -p "$$out/sdk"
 	cp -r sdk/go "$$out/sdk/"
 	# Remove Markdown left by older builds; never publish local scratch notes.
