@@ -319,6 +319,12 @@ func (b *Backend) TryRetireWarm(ctx context.Context, p *core.Pod) (bool, error) 
 }
 
 func (b *Backend) ReapWarm(ctx context.Context, namespace string, existing map[string]bool) error {
+	return b.ReapWarmWithRetirement(ctx, namespace, existing, b.TryRetireWarm)
+}
+
+// ReapWarmWithRetirement uses the controller's claim fence before touching an
+// orphan. A missing API Pod alone does not prove that a local resume is idle.
+func (b *Backend) ReapWarmWithRetirement(ctx context.Context, namespace string, existing map[string]bool, retire func(context.Context, *core.Pod) (bool, error)) error {
 	entries, err := os.ReadDir(filepath.Join(b.Base, "warm"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -326,28 +332,50 @@ func (b *Backend) ReapWarm(ctx context.Context, namespace string, existing map[s
 	if err != nil {
 		return err
 	}
+	var failures error
 	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return errors.Join(failures, ctx.Err())
+		}
 		if filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
 		path := filepath.Join(b.Base, "warm", entry.Name())
 		var l WarmLease
 		if err = ReadJSON(path, &l); err != nil {
-			return err
+			failures = errors.Join(failures, fmt.Errorf("read warm lease %s: %w", entry.Name(), err))
+			continue
 		}
 		if l.Namespace != namespace || existing[l.UID] {
 			continue
 		}
+		if !ValidID(l.UID) || entry.Name() != l.UID+".json" || l.Name == "" {
+			failures = errors.Join(failures, fmt.Errorf("invalid warm lease identity: %s", entry.Name()))
+			continue
+		}
 		p := &core.Pod{ObjectMeta: meta.ObjectMeta{UID: types.UID(l.UID), Name: l.Name, Namespace: l.Namespace}}
-		if err = b.Cleanup(ctx, p); err != nil {
-			return err
+		retired, retireErr := retire(ctx, p)
+		if retireErr != nil {
+			failures = errors.Join(failures, fmt.Errorf("retire warm Pod %s: %w", l.Name, retireErr))
+			continue
+		}
+		if !retired {
+			continue
+		}
+		cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err = b.Cleanup(cleanupCtx, p)
+		cancel()
+		if err != nil {
+			failures = errors.Join(failures, fmt.Errorf("reap warm Pod %s: %w", l.Name, err))
+			continue
 		}
 		if err = os.Remove(path); err != nil {
-			return err
+			failures = errors.Join(failures, err)
+			continue
 		}
 		if err = os.Remove(filepath.Join(b.Base, "warm", l.UID+".lock")); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+			failures = errors.Join(failures, err)
 		}
 	}
-	return nil
+	return failures
 }

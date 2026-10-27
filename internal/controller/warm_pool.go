@@ -143,7 +143,7 @@ func (p *WarmPool) locallyClaimed(ctx context.Context, pod *core.Pod) (bool, err
 
 // Serialize retirement against acquisition, then release the pool lock before
 // contacting Kubernetes. The lease cannot be claimed after it becomes retired.
-func (p *WarmPool) removeIdle(ctx context.Context, pod *core.Pod) error {
+func (p *WarmPool) retireIdle(ctx context.Context, pod *core.Pod) (bool, error) {
 	p.mu.Lock()
 	claimed, err := p.locallyClaimed(ctx, pod)
 	if err == nil && !claimed {
@@ -156,7 +156,12 @@ func (p *WarmPool) removeIdle(ctx context.Context, pod *core.Pod) error {
 		}
 	}
 	p.mu.Unlock()
-	if err != nil || claimed {
+	return !claimed && err == nil, err
+}
+
+func (p *WarmPool) removeIdle(ctx context.Context, pod *core.Pod) error {
+	retired, err := p.retireIdle(ctx, pod)
+	if err != nil || !retired {
 		return err
 	}
 	return p.remove(ctx, pod)
@@ -227,13 +232,11 @@ func (p *WarmPool) reconcile(ctx context.Context) error {
 	if desiredHash == "" {
 		return fmt.Errorf("warm template configuration hash is empty")
 	}
-	if err := p.reconcilePools(ctx, configured); err != nil {
-		return err
-	}
-	return p.publishSnapshot(ctx, configured, desiredHash)
+	reconcileErr := p.reconcilePools(ctx, configured)
+	return errors.Join(reconcileErr, p.publishSnapshot(ctx, configured, desiredHash))
 }
 
-func (p *WarmPool) reconcilePools(ctx context.Context, configured []warmtemplates.Template) error {
+func (p *WarmPool) reconcilePools(ctx context.Context, configured []warmtemplates.Template) (resultErr error) {
 	r := p.Reconciler
 	backend, ok := r.Runtime.(warmRuntime)
 	if !ok {
@@ -253,8 +256,14 @@ func (p *WarmPool) reconcilePools(ctx context.Context, configured []warmtemplate
 	for _, pod := range pods {
 		existing[string(pod.UID)] = true
 	}
-	if err = backend.ReapWarm(ctx, p.Namespace, existing); err != nil {
-		return err
+	var cleanupErr error
+	defer func() { resultErr = errors.Join(resultErr, cleanupErr) }()
+	if guarded, ok := backend.(interface {
+		ReapWarmWithRetirement(context.Context, string, map[string]bool, func(context.Context, *core.Pod) (bool, error)) error
+	}); ok {
+		cleanupErr = guarded.ReapWarmWithRetirement(ctx, p.Namespace, existing, p.retireIdle)
+	} else {
+		cleanupErr = backend.ReapWarm(ctx, p.Namespace, existing)
 	}
 	var workloads api.ResumablePodList
 	if err = r.List(ctx, &workloads, client.InNamespace(p.Namespace)); err != nil {
@@ -313,7 +322,8 @@ func (p *WarmPool) reconcilePools(ctx context.Context, configured []warmtemplate
 			phase, deadline, e := backend.WarmState(ctx, pod)
 			if !recorded && e == nil && (phase == "expired" || phase == "retired" || (phase == "waiting" && time.Now().After(deadline))) {
 				if err = p.removeIdle(ctx, pod); err != nil {
-					return err
+					cleanupErr = errors.Join(cleanupErr, fmt.Errorf("retire warm Pod %s: %w", pod.Name, err))
+					total++
 				}
 			}
 			continue
@@ -326,7 +336,8 @@ func (p *WarmPool) reconcilePools(ctx context.Context, configured []warmtemplate
 				p.recordFailure(string(pod.UID), hash)
 			}
 			if err = p.removeIdle(ctx, pod); err != nil {
-				return err
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("retire warm Pod %s: %w", pod.Name, err))
+				total++
 			}
 			continue
 		}
@@ -358,7 +369,8 @@ func (p *WarmPool) reconcilePools(ctx context.Context, configured []warmtemplate
 			// shares. Keep the oldest compatible slots because pods are sorted by
 			// creation time.
 			if err = p.removeIdle(ctx, pod); err != nil {
-				return err
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("retire warm Pod %s: %w", pod.Name, err))
+				total++
 			}
 			continue
 		}
@@ -367,6 +379,12 @@ func (p *WarmPool) reconcilePools(ctx context.Context, configured []warmtemplate
 		}
 		counts[hash]++
 		total++
+	}
+	// Failed cleanup still owns runtime resources, including Pods already
+	// absent from Kubernetes. Keep reclaiming other slots but do not allocate
+	// replacements until that capacity has been released.
+	if cleanupErr != nil {
+		return nil // cleanupErr is joined into resultErr above.
 	}
 	// Retire the rotating slot only after another loop has prepared its successor.
 	if total >= p.Size+1 {

@@ -419,8 +419,17 @@ func (b *Backend) Cleanup(ctx context.Context, p *core.Pod) error {
 		}
 	}
 	for id := range ids {
+		children, err := b.cleanupContainerIDs(ctx, p, id)
+		if err != nil {
+			return err
+		}
 		// runsc delete bypasses the shim's failed-start wait/IO deadlock. CRI still owns CNI teardown.
 		if err = b.command(ctx, "delete", "--force", id); err != nil {
+			return err
+		}
+		// A no-root warm slot also precreates child tasks. Destroying its sandbox
+		// does not unblock those shims, and CRI cannot remove a running task.
+		if err = b.cleanupContainers(ctx, children); err != nil {
 			return err
 		}
 		stopCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
