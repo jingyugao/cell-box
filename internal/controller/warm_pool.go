@@ -47,6 +47,9 @@ type WarmPool struct {
 	cachedPods         []core.Pod
 	failureMu          sync.Mutex
 	failures           map[string]warmFailure
+	demandMu           sync.Mutex
+	retained           map[string]retainedDemand
+	lastDemand         map[string]warmDemand
 }
 
 type warmFailure struct {
@@ -232,11 +235,11 @@ func (p *WarmPool) reconcile(ctx context.Context) error {
 	if desiredHash == "" {
 		return fmt.Errorf("warm template configuration hash is empty")
 	}
-	reconcileErr := p.reconcilePools(ctx, configured)
+	reconcileErr := p.reconcilePools(ctx)
 	return errors.Join(reconcileErr, p.publishSnapshot(ctx, configured, desiredHash))
 }
 
-func (p *WarmPool) reconcilePools(ctx context.Context, configured []warmtemplates.Template) (resultErr error) {
+func (p *WarmPool) reconcilePools(ctx context.Context) (resultErr error) {
 	r := p.Reconciler
 	backend, ok := r.Runtime.(warmRuntime)
 	if !ok {
@@ -265,6 +268,8 @@ func (p *WarmPool) reconcilePools(ctx context.Context, configured []warmtemplate
 	} else {
 		cleanupErr = backend.ReapWarm(ctx, p.Namespace, existing)
 	}
+	// Only orphaned runtime resources are invisible to the Pod count below.
+	orphansPending := cleanupErr != nil
 	var workloads api.ResumablePodList
 	if err = r.List(ctx, &workloads, client.InNamespace(p.Namespace)); err != nil {
 		return err
@@ -278,20 +283,12 @@ func (p *WarmPool) reconcilePools(ctx context.Context, configured []warmtemplate
 			restoring = true
 		}
 	}
-	for _, configuredTemplate := range configured {
-		if configuredTemplate.Slots == 0 || configuredTemplate.Spec.NodeName != r.NodeName {
-			continue
-		}
-		w := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{Name: configuredTemplate.ID, Namespace: p.Namespace, UID: types.UID("00000000-0000-4000-8000-000000000001")}, Spec: configuredTemplate.Spec}
-		if err := validate(w, p.Reconciler.nodeBase()); err != nil {
-			return fmt.Errorf("invalid warm template %q: %w", configuredTemplate.ID, err)
-		}
-		hash := fingerprint(w)
+	// Slots follow the checkpoints on this node, not the per-revision warmSlots.
+	for hash, d := range p.retainDemand(checkpointedProfiles(workloads.Items, r.NodeName), time.Now()) {
+		w := d.template.DeepCopy()
 		w.Status.SpecHash = hash
-		if templates[hash] == nil {
-			templates[hash] = w
-		}
-		demands[hash] += configuredTemplate.Slots
+		templates[hash] = w
+		demands[hash] = d.slots
 	}
 	targets := allocateWarmSlots(demands, p.Size)
 	keys := []string{}
@@ -380,10 +377,11 @@ func (p *WarmPool) reconcilePools(ctx context.Context, configured []warmtemplate
 		counts[hash]++
 		total++
 	}
-	// Failed cleanup still owns runtime resources, including Pods already
-	// absent from Kubernetes. Keep reclaiming other slots but do not allocate
-	// replacements until that capacity has been released.
-	if cleanupErr != nil {
+	// Resources of Pods already absent from Kubernetes are not counted in total.
+	// Keep reclaiming other slots, but do not allocate replacements until they
+	// are released. A Pod that is still listed is counted, so a failed retirement
+	// of it does not need to hold back its successor.
+	if orphansPending {
 		return nil // cleanupErr is joined into resultErr above.
 	}
 	// Retire the rotating slot only after another loop has prepared its successor.
@@ -423,23 +421,20 @@ func (p *WarmPool) publishSnapshot(ctx context.Context, configured []warmtemplat
 	}
 	groups := map[string]*pool{}
 	demands := map[string]int{}
+	for hash, d := range p.demandSnapshot() {
+		groups[hash] = &pool{observation: boxprovider.WarmPoolObservation{PoolID: poolID(p.Namespace, r.NodeName, hash), DesiredHash: desiredHash, RequestedSlots: d.slots}}
+		demands[hash] = d.slots
+	}
+	// Configured revisions no longer create demand; they only name the pool a
+	// revision's compatible checkpoints are served from.
 	for _, template := range configured {
 		if template.Spec.NodeName != r.NodeName {
 			continue
 		}
 		w := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{Name: template.ID, Namespace: p.Namespace, UID: types.UID("00000000-0000-4000-8000-000000000001")}, Spec: template.Spec}
-		if err := validate(w, p.Reconciler.nodeBase()); err != nil {
-			return fmt.Errorf("invalid warm template %q: %w", template.ID, err)
+		if entry := groups[fingerprint(w)]; entry != nil {
+			entry.observation.TemplateIDs = append(entry.observation.TemplateIDs, template.ID)
 		}
-		hash := fingerprint(w)
-		entry := groups[hash]
-		if entry == nil {
-			entry = &pool{observation: boxprovider.WarmPoolObservation{PoolID: poolID(p.Namespace, r.NodeName, hash), DesiredHash: desiredHash}}
-			groups[hash] = entry
-		}
-		entry.observation.TemplateIDs = append(entry.observation.TemplateIDs, template.ID)
-		entry.observation.RequestedSlots += template.Slots
-		demands[hash] += template.Slots
 	}
 	allocated := allocateWarmSlots(demands, p.Size)
 	for hash, entry := range groups {
@@ -546,28 +541,7 @@ func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (result *co
 	}()
 	r := p.Reconciler
 	backend := r.Runtime.(warmRuntime)
-	if p.ReadDesired == nil {
-		return nil, fmt.Errorf("warm pool desired-template reader is required")
-	}
-	configured, _, err := p.ReadDesired(ctx)
-	if err != nil {
-		ctrl.LoggerFrom(ctx).Error(err, "cannot read warm templates; using cold restore")
-		return nil, nil
-	}
-	allowed := false
-	for _, template := range configured {
-		if template.Slots < 1 || template.Spec.NodeName != r.NodeName {
-			continue
-		}
-		candidate := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{Name: template.ID, Namespace: p.Namespace, UID: types.UID("00000000-0000-4000-8000-000000000001")}, Spec: template.Spec}
-		if validate(candidate, r.nodeBase()) == nil && fingerprint(candidate) == warmFingerprint(w) {
-			allowed = true
-			break
-		}
-	}
-	if !allowed {
-		return nil, nil
-	}
+	var err error
 	warmHash := warmFingerprint(w)
 	if w.Spec.NodeName != r.NodeName {
 		return nil, nil

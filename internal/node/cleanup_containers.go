@@ -90,7 +90,7 @@ func (b *Backend) cleanupContainers(ctx context.Context, ids []string) error {
 			if removeErr == nil || status.Code(removeErr) == codes.NotFound {
 				return true, nil
 			}
-			if status.Code(removeErr) == codes.FailedPrecondition {
+			if removalPending(removeErr) {
 				return false, nil
 			}
 			return false, removeErr
@@ -100,4 +100,12 @@ func (b *Backend) cleanupContainers(ctx context.Context, ids []string) error {
 		}
 	}
 	return nil
+}
+
+// removalPending reports a RemoveContainer failure that clears on its own. A warm
+// slot's StartContainer RPC is still blocked in the wrapper when the slot is
+// retired, so containerd reports the container as starting, with code Unknown
+// rather than FailedPrecondition, until that RPC unwinds.
+func removalPending(err error) bool {
+	return status.Code(err) == codes.FailedPrecondition || strings.Contains(err.Error(), "is in starting state")
 }
