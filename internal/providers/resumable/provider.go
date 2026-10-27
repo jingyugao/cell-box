@@ -75,6 +75,9 @@ func buildWanted(spec boxprovider.Spec) (*api.ResumablePod, error) {
 	if spec.HomeVolumeUID != "" && !spec.PersistentHome {
 		return nil, errors.New("homeVolumeUID requires persistentHome")
 	}
+	if spec.PersistentHome && spec.HomeVolumeUID == "" && spec.Mounts == nil {
+		return nil, errors.New("persistentHome requires an independent volume")
+	}
 	if spec.Mounts != nil {
 		if len(spec.Mounts) == 0 {
 			return nil, errors.New("mounts must not be empty when specified")

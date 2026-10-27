@@ -46,6 +46,7 @@ func createSuspendedForResume(t *testing.T, p *Provider, s boxprovider.Spec, ctx
 func TestEmbeddedArchiveCompletionUsesDirectSnapshot(t *testing.T) {
 	p, s, ctx := fixture(t)
 	s.PersistentHome = true
+	s.HomeVolumeUID = "volume-one"
 	h := createSuspendedForResume(t, p, s, ctx, "suspended")
 	w := &api.ResumablePod{}
 	key := client.ObjectKey{Namespace: h.Namespace, Name: h.Name}

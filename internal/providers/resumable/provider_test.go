@@ -72,10 +72,19 @@ func TestPersistentHomeSpecPropagationAndReentryCheck(t *testing.T) {
 	}
 }
 
+func TestPersistentHomeRequiresIndependentVolume(t *testing.T) {
+	p, s, ctx := fixture(t)
+	s.PersistentHome = true
+	if _, err := p.Create(ctx, s); err == nil {
+		t.Fatal("created a Box with a per-Box legacy HOME")
+	}
+}
+
 func TestCaptureWorkspaceArchiveRequiresSuspendedAndConsumesMatchingResult(t *testing.T) {
 	p, s, ctx := fixture(t)
 	p.Local = runtimecontrol.New(p.Client)
 	s.PersistentHome = true
+	s.HomeVolumeUID = "volume-one"
 	s.Config.Workspace = "/home/agent/workspace"
 	h, err := p.Create(ctx, s)
 	if err != nil {
