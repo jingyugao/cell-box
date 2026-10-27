@@ -171,7 +171,7 @@ _, err := client.CancelOperation(ctx, operationID)
 if err != nil { return err }
 ```
 
-修改 `DefaultWarmSlots` 或 revision 的 `WarmSlots` 会先将期望值保存到 SQLite catalog，再由后台同步到 Kubernetes 预热池；HTTP 请求不等待这一步完成。构建 revision 时，`WarmSlots == nil` 会复制模板默认值；显式传入 `WarmSlots`（包括 `0`）则使用该值。
+`DefaultWarmSlots` 和 revision 的 `WarmSlots` 会保存到 SQLite catalog，但已不再决定预热：预热需求来自节点上现有的 checkpoint，见[预热池](warm-pool.md)。构建 revision 时，`WarmSlots == nil` 会复制模板默认值；显式传入 `WarmSlots`（包括 `0`）则使用该值。
 
 模板名创建后不可修改；`description`、`defaultWarmSlots` 和 `stableRevisionId` 可通过带 `ExpectedGeneration` 的 `UpdateTemplate` 修改。可用 `SetTemplateStableRevision(ctx, templateID, "", generation)` 清空 stable 指针。Revision 的镜像、基础镜像、构建命令、运行配置和 profile 快照不可变；`description`、`status`（`active`/`retired`）和 `warmSlots` 可更新。Retire stable revision 前必须先切换或清空 stable 指针；retired 会撤回预热需求并阻止后续选择，但不影响已固定该 revision 的沙箱。`GetTemplateRuntime` 提供每个 revision 的沙箱数和阶段快照，`GetRevisionWarmPool` 提供预热同步与池状态。只有没有任何 revision、也没有排队或运行中构建任务的空模板族可删除。
 
@@ -264,7 +264,7 @@ go -C sdk/go run ./examples/lifecycle
 
 SDK 仍通过 `cellbox-api` Service 调用 HTTP API；单机部署在 Service 后面运行一个 `cellbox-server`，由同一进程处理 API 和节点运行时。生命周期请求通过进程内 key queue 交给 runtime worker，CR 提交后的状态快照会直接唤醒等待者。Cellbox CR 与 Pod ownership 保留在 Kubernetes 中，因此这条路径仍包含 CR 写入及必要的 Pod/CRI 操作。
 
-Revision 构建成功且状态为 `active`、`warmSlots > 0` 时，服务端后台会发布预热需求；`warmSlots` 为 `0` 或 revision 退休时会撤回需求。创建 template 只保存默认值，不会单独创建预热池；构建 revision 时 `warmSlots == nil` 才继承模板默认值。stable 指针切换不会改变旧 revision 的预热需求。后台发布失败会继续重试。
+预热需求来自节点上处于 `Suspended` 且有 checkpoint 的 sandbox，与 revision 的 `warmSlots`、stable 指针都无关；某个配置的最后一个 checkpoint 消失后，其槽位保留 20 分钟再释放。创建 template 或构建 revision 不会单独创建预热池。`warm.DesiredSlots` 只回显配置的 `warmSlots`，实际需求看 `Pool.RequestedSlots`；没有 checkpoint 时 `Pool` 为 `nil` 是正常的。
 
 预热 Pod 按兼容的运行配置共享池，节点总容量受 server 内运行时循环限额约束（默认最多 2 个，配置上限 32 个）。同一个 `poolId` 的槽位数是共享池汇总值，会在关联的每个 revision 状态中重复出现；`allocatedSlots` 可能因节点容量小于 `requestedSlots`，统计多 revision 时按 `poolId` 去重。`resources` 是当前分配的空闲预热 Pod 的 Kubernetes requests/limits 配置，不是实际 CPU/内存使用量。`failedSlots` 统计当前处于失败态的预热 Pod，以及运行时循环最近 15 秒内记录、但对应 Pod 已清理的创建失败。预热 Pod 用于 resumable sandbox 的恢复路径，不能据此承诺首次冷创建会更快。撤回需求只清理空闲预热 Pod，不会杀掉已经领用的 sandbox。
 

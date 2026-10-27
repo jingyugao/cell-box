@@ -4,11 +4,13 @@ Cellbox 通过 HTTP API 提供隔离沙箱。单机 Kubernetes 部署使用一�
 
 ## 快速开始
 
-- [使用流程与模板语义](doc/cellbox-usage.md)：模板、版本、预热池和沙箱生命周期的关系。
-- [Go SDK 使用指南](doc/go-sdk.md)：从本地源码引用尚未发布的 SDK，创建模板和修订版本、创建沙箱，并使用生命周期与文件接口。
-- [REST 快速开始](doc/rest-quickstart.md)：使用 `curl` 调用模板、构建任务和沙箱接口。
+- [整体架构与创建链路](docs/architecture.md)：单进程组件、节点接入、sandbox 冷创建和预热恢复的调用链。
+- [使用流程与模板语义](docs/cellbox-usage.md)：模板、版本、预热池和沙箱生命周期的关系。
+- [预热池](docs/warm-pool.md)：预热需求如何由 checkpoint 推导、槽位生命周期、预算和排查方法。
+- [Go SDK 使用指南](docs/go-sdk.md)：从本地源码引用尚未发布的 SDK，创建模板和修订版本、创建沙箱，并使用生命周期与文件接口。
+- [REST 快速开始](docs/rest-quickstart.md)：使用 `curl` 调用模板、构建任务和沙箱接口。
 - [OpenAPI 接口契约](api/openapi.yaml)：完整的 HTTP 请求和响应结构。
-- [部署与端到端验收](doc/e2e-validation.md)：完整 e2e 用例、运行命令和证据标准。
+- [部署与端到端验收](docs/e2e-validation.md)：完整 e2e 用例、运行命令和证据标准。
 
 服务元数据、模板、修订版本和构建任务共用 server 本地 `cellbox.db`；构建日志也保存在同一持久数据目录。归档操作需要配置 S3 兼容对象存储，否则会返回 `UNSUPPORTED_CAPABILITY`。Kubernetes profile 的 sandbox 期望状态和运行状态仍由 Cellbox 自定义资源持久化并拥有其 Pod/Service；API 和节点运行时在进程内通过队列与完成快照直接协作。这样减少一个进程间通知链路，仍保留 Kubernetes 对象写入和 Pod/CRI 操作。
 
@@ -25,4 +27,4 @@ make build
 
 ## 部署
 
-参阅[单机 Kubernetes 部署与升级](doc/deployment.md)，配置持久 `storage` 目录、可选归档对象存储、运行时 profile 和镜像构建器，再应用 Helm Chart。节点组件需先按[节点安装指南](doc/node-installation.md)准备。
+参阅[单机 Kubernetes 部署与升级](docs/deployment.md)，配置持久 `storage` 目录、可选归档对象存储、运行时 profile 和镜像构建器，再应用 Helm Chart。节点组件需先按[节点安装指南](docs/node-installation.md)准备。

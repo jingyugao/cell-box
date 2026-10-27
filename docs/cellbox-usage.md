@@ -8,9 +8,9 @@
 | --- | --- |
 | Client 数据命名空间 | 隔离调用方的模板 catalog 和业务记录。`X-Cellbox-Client-ID` 选择命名空间，省略时使用服务端默认值；它不是认证凭据 |
 | Profile | 管理员配置的运行时参数，包括 provider、节点、namespace、CPU、内存和 guest 配置；构建 revision 时保存配置快照 |
-| Template | 模板族，保存名称、描述、`defaultWarmSlots` 和可选的 `stableRevisionId` |
-| Revision | 一次成功构建生成的版本，固定镜像 digest、构建输入和运行配置；可修改描述、active/retired 状态与 `warmSlots` |
-| Warm pool | 按兼容运行配置共享的预热槽位，用于加速 checkpoint 恢复；不属于某一个业务 sandbox |
+| Template | 模板族，保存名称、描述、`defaultWarmSlots`（兼容字段，不再决定预热）和可选的 `stableRevisionId` |
+| Revision | 一次成功构建生成的版本，固定镜像 digest、构建输入和运行配置；可修改描述、active/retired 状态与 `warmSlots`（兼容字段，不再决定预热） |
+| Warm pool | 按兼容运行配置共享的预热槽位，用于加速 checkpoint 恢复；随节点上现有的 checkpoint 自动创建和回收，不属于某一个业务 sandbox，详见[预热池](warm-pool.md) |
 | Sandbox / Box | 从某个 revision 创建的运行实例，绑定创建时解析到的版本 |
 | Operation | 构建、创建、执行命令、生命周期等异步任务；用 operation ID 跟踪结果 |
 | Execution | 一次有时限的命令执行记录，包括退出码、stdout 和 stderr |
@@ -25,10 +25,10 @@ Kubernetes 中的 Cellbox 自定义资源仍是 sandbox 的持久记录，也是
 
 ## 从镜像到沙箱
 
-1. 创建 template，设置描述和默认预热数。此时没有具体运行镜像，也没有预热池。
-2. 为 template 构建 revision，提供 `userVersion`、`baseImage`、`profileId`，以及可选的 `buildCommand`、`runCommand`、`warmSlots`。
+1. 创建 template，设置描述。此时没有具体运行镜像，也没有预热池。
+2. 为 template 构建 revision，提供 `userVersion`、`baseImage`、`profileId`，以及可选的 `buildCommand`、`runCommand`。
 3. 等待构建 operation 成功，取得 `result.revisionId`。基础镜像 tag 会解析为 digest，构建会注入 Cellbox guest。
-4. 如需预热，等待该 revision 的预热状态就绪，然后将 template 的 stable 指针切到它。构建成功不会自动切换 stable。
+4. 将 template 的 stable 指针切到它。构建成功不会自动切换 stable。预热不需要单独开启：该 revision 的 sandbox 暂停产生 checkpoint 后，预热池会自动出现。
 5. 使用 `templateId` 创建 sandbox，跟随当时的 stable；或者使用 `revisionId` 固定版本。这两个字段必须且只能传一个。
 6. 等待创建完成，再执行命令、访问文件或管理生命周期；使用完成后显式销毁 sandbox。
 
@@ -44,25 +44,22 @@ Kubernetes 中的 Cellbox 自定义资源仍是 sandbox 的持久记录，也是
 
 已有 sandbox 固定引用其创建时解析到的 revision；切换 stable 不会替换已有实例。模板或 revision 的元数据更新需要 `expectedGeneration`，用于拒绝覆盖并发修改。更新后使用响应中的新 generation。
 
-退休 revision 会阻止新建等需要 active 版本的选择，并撤销其预热需求；已有 sandbox 继续运行。退休 stable revision 前，需先切换或清空 stable 指针。当前只允许删除没有任何 revision、也没有活动构建任务的空模板族；尚未提供 revision 删除接口。
+退休 revision 会阻止新建等需要 active 版本的选择；已有 sandbox 继续运行，其 checkpoint 仍可恢复。退休 stable revision 前，需先切换或清空 stable 指针。当前只允许删除没有任何 revision、也没有活动构建任务的空模板族；尚未提供 revision 删除接口。
 
 ## 预热池何时创建与回收
 
-构建成功且 active 的 revision，如果 `warmSlots > 0`，后台会自动发布预热需求。server 内的节点运行时循环在配置节点准备槽位，不需要先创建 sandbox，也不需要手动调用“应用配置”。需求持久保存在服务数据目录的 `cellbox.db`；server 重启后从 SQLite 恢复。节点 Pod 等实际运行时操作仍依赖 Kubernetes 可用。
-
-`defaultWarmSlots` 是构建新 revision 时的默认值。构建请求省略 `warmSlots` 时复制该默认值，显式传 `0` 则关闭该 revision 的预热。修改 template 默认值不会追溯修改已有 revision。
+预热池只服务 checkpoint 恢复，需求来自**本节点上现有的 checkpoint**，不再来自 revision 的 `warmSlots`。后台每 500 ms 统计本节点处于 `Suspended` 且有 checkpoint 的 Box，按兼容运行配置分组：每组 1 个槽，checkpoint 达到 3 个时加到 2 个槽。节点总预算由 `controller.warmPoolSize` 限制，默认 2，允许 0–32，轮换时最多额外准备一个空闲槽位。
 
 | 变化 | 行为 |
 | --- | --- |
-| 增大 revision 的 `warmSlots` | 请求增加容量，受节点总预算限制 |
-| 减小或设为 `0` | 撤销多余需求，回收相应空闲槽位 |
-| revision 退休 | 有效需求变为 0，不删除其已有 sandbox |
-| 切换 stable | 旧 revision 的预热配置保持不变，仍可按需保留旧版本容量 |
-| 多个 revision 的运行配置兼容 | 共享一个池，合并需求；镜像相同本身不保证兼容 |
+| 有 sandbox 暂停产生 checkpoint | 为它的兼容配置创建预热槽位，数秒内就绪 |
+| sandbox 恢复、销毁，或项目归档后 checkpoint 被删除 | 需求下降；某个配置的最后一个 checkpoint 消失后保留 1 个槽 20 分钟再释放 |
+| 修改 `warmSlots` / `defaultWarmSlots` | 不影响预热；`/warm-pool` 里的 `desiredSlots` 只回显配置值，实际需求看 `pool.requestedSlots` |
+| 切换 stable、退休 revision | 不影响预热；预热只看 checkpoint |
+| 多个 revision 的运行配置兼容 | 共享一个池；镜像相同本身不保证兼容 |
+| 要停用预热 | 将 `controller.warmPoolSize` 设为 0 |
 
-节点总预算由 `controller.warmPoolSize` 配置，默认 2，允许 0–32；轮换时最多额外准备一个空闲槽位。各兼容配置的需求按节点预算分配，因此实际分配量可能小于期望量。已被 sandbox 领用的 Pod 不再属于空闲池，缩容或撤销预热不会删除它。
-
-当前预热槽位用于 resumable sandbox 的 checkpoint 恢复，首次冷创建不领取槽位。没有可用或匹配的预热槽位时，走普通 checkpoint 恢复路径。不要把预热就绪视为业务进程已启动。
+当前预热槽位用于 resumable sandbox 的 checkpoint 恢复，首次冷创建不领取槽位。没有可用或匹配的预热槽位时，走普通 checkpoint 恢复路径。不要把预热就绪视为业务进程已启动。完整语义、槽位生命周期和排查方法见[预热池](warm-pool.md)。
 
 ## 查询状态与资源
 
