@@ -63,10 +63,15 @@ func (s *Service) DesiredWarmTemplates(ctx context.Context) ([]boxprovider.WarmT
 		if err = json.Unmarshal(r.Profile, &p); err != nil {
 			return nil, err
 		}
-		if p.Provider != "resumable-k8s-pod" || effectiveWarmSlots(r.Revision) == 0 {
+		// Slots no longer create warm-pool demand (it follows checkpoints), but every
+		// active revision stays listed so its pool can be reported against it.
+		if p.Provider != "resumable-k8s-pod" || r.Revision.Status != "active" {
 			continue
 		}
 		if !s.configuredWarmLocation(p) {
+			if effectiveWarmSlots(r.Revision) == 0 {
+				continue
+			}
 			return nil, fmt.Errorf("revision %s targets an unavailable warm-pool location", r.Revision.ID)
 		}
 		out = append(out, boxprovider.WarmTemplate{ID: r.Revision.ID, Slots: effectiveWarmSlots(r.Revision), Spec: runtimeSpec(boxRecord{Box: Box{ID: r.Revision.ID}, ClientID: r.ClientID, Profile: p})})
