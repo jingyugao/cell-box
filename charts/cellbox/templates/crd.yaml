@@ -47,6 +47,8 @@ spec:
                   message: homeVolumeUID is immutable
                 - rule: "(has(self.mounts) ? self.mounts : []) == (has(oldSelf.mounts) ? oldSelf.mounts : [])"
                   message: mounts are immutable
+                - rule: "(has(self.transitionID) ? self.transitionID : '') != (has(oldSelf.transitionID) ? oldSelf.transitionID : '') || (has(self.waitPorts) ? self.waitPorts : []) == (has(oldSelf.waitPorts) ? oldSelf.waitPorts : [])"
+                  message: waitPorts can change only with a new transitionID
               properties:
                 nodeName:
                   type: string
@@ -62,6 +64,15 @@ spec:
                 transitionID:
                   type: string
                   maxLength: 200
+                waitPorts:
+                  type: array
+                  x-kubernetes-list-type: set
+                  minItems: 1
+                  maxItems: 64
+                  items:
+                    type: integer
+                    minimum: 1
+                    maximum: 65535
                 sharedReadOnlyHostPath:
                   type: string
                   minLength: 2

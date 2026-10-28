@@ -191,7 +191,11 @@ func (c *Client) IsClaimed(ctx context.Context, pod *core.Pod) (bool, error) {
 
 // RequestResume records the intent locally before any runtime side effect.
 // Existing snapshots are seeded outside the request path by normal reconciliation.
-func (c *Client) RequestResume(ctx context.Context, h boxprovider.Handle, previous, transitionID string) error {
+func (c *Client) RequestResume(ctx context.Context, h boxprovider.Handle, previous, transitionID string, requestedPorts ...int) error {
+	ports, portErr := boxprovider.NormalizeWaitPorts(requestedPorts)
+	if portErr != nil {
+		return portErr
+	}
 	j := c.getJournal()
 	if j == nil {
 		return errors.New("local runtime journal is not configured")
@@ -222,7 +226,10 @@ func (c *Client) RequestResume(ctx context.Context, h boxprovider.Handle, previo
 		return boxprovider.ErrStaleTransition
 	}
 	if w.Spec.TransitionID == transitionID && w.Spec.DesiredState == "Running" {
-		return nil
+		if reflect.DeepEqual(w.Spec.WaitPorts, ports) {
+			return nil
+		}
+		return boxprovider.ErrStaleTransition
 	}
 	if r.Pending || w.Spec.DesiredState != "Suspended" || w.Status.Phase != "Suspended" || w.Spec.TransitionID != previous || w.Status.ObservedTransitionID != previous {
 		return boxprovider.ErrStaleTransition
@@ -231,6 +238,7 @@ func (c *Client) RequestResume(ctx context.Context, h boxprovider.Handle, previo
 	r.Resource = w.DeepCopy()
 	r.Resource.Spec.DesiredState = "Running"
 	r.Resource.Spec.TransitionID = transitionID
+	r.Resource.Spec.WaitPorts = ports
 	telemetry.InjectOperation(ctx, r.Resource)
 	r.Resource.Generation++
 	r.Resource.ResourceVersion = localVersion(r.Revision + 1)
@@ -448,6 +456,7 @@ func (c *Client) FallbackResume(ctx context.Context, w *api.ResumablePod) (bool,
 
 func sameProfile(a, b api.Spec) bool {
 	a.DesiredState, b.DesiredState, a.TransitionID, b.TransitionID = "", "", "", ""
+	a.WaitPorts, b.WaitPorts = nil, nil
 	return reflect.DeepEqual(a, b)
 }
 
@@ -459,14 +468,19 @@ func (c *Client) syncIntent(ctx context.Context, r *Record) (*api.ResumablePod, 
 	if current.UID != r.Resource.UID || current.DeletionTimestamp != nil {
 		return nil, boxprovider.ErrStaleTransition
 	}
+	if current.Spec.TransitionID == r.Resource.Spec.TransitionID && current.Spec.DesiredState == r.Resource.Spec.DesiredState &&
+		!reflect.DeepEqual(current.Spec.WaitPorts, r.Resource.Spec.WaitPorts) {
+		return nil, boxprovider.ErrStaleTransition
+	}
 	if r.Base == nil || !sameProfile(current.Spec, r.Base.Spec) ||
 		!((current.Spec.TransitionID == r.Base.Spec.TransitionID && current.Spec.DesiredState == r.Base.Spec.DesiredState) ||
 			(current.Spec.TransitionID == r.Resource.Spec.TransitionID && current.Spec.DesiredState == r.Resource.Spec.DesiredState)) {
 		return nil, boxprovider.ErrStaleTransition
 	}
-	if current.Spec.DesiredState != r.Resource.Spec.DesiredState || current.Spec.TransitionID != r.Resource.Spec.TransitionID {
+	if current.Spec.DesiredState != r.Resource.Spec.DesiredState || current.Spec.TransitionID != r.Resource.Spec.TransitionID || !reflect.DeepEqual(current.Spec.WaitPorts, r.Resource.Spec.WaitPorts) {
 		old := current.DeepCopy()
 		current.Spec.DesiredState, current.Spec.TransitionID = r.Resource.Spec.DesiredState, r.Resource.Spec.TransitionID
+		current.Spec.WaitPorts = append([]int(nil), r.Resource.Spec.WaitPorts...)
 		if current.Annotations == nil {
 			current.Annotations = map[string]string{}
 		}

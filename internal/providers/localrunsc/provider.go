@@ -37,6 +37,7 @@ var registryImage = regexp.MustCompile(`^[^\s@]+@sha256:[a-f0-9]{64}$`)
 type Provider struct {
 	mu                sync.Mutex
 	base, guestBinary string
+	guestPortProtocol int
 	platform          string
 	lock              *os.File
 	changed           chan struct{}
@@ -63,6 +64,7 @@ type record struct {
 	Message              string             `json:"message,omitempty"`
 	InventoryStage       string             `json:"inventoryStage,omitempty"`
 	BootID               string             `json:"bootId,omitempty"`
+	GuestPortProtocol    int                `json:"guestPortProtocol,omitempty"`
 }
 
 func New(dataDir, guestBinary, platform string) (*Provider, error) {
@@ -98,6 +100,14 @@ func New(dataDir, guestBinary, platform string) (*Provider, error) {
 	if info, err := os.Stat(guestBinary); err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
 		return nil, errors.New("local-runsc requires a Linux guest executable; build cellbox-container-agent or set --local-guest-binary")
 	}
+	guestProtocol, err := guestapi.BinaryProtocolVersion(guestBinary)
+	if err != nil {
+		return nil, fmt.Errorf("inspect local Guest capabilities: %w", err)
+	}
+	guestPortProtocol := 0
+	if guestProtocol == guestapi.ProtocolVersion {
+		guestPortProtocol = 2
+	}
 	for _, dir := range []string{base, filepath.Join(base, "boxes"), filepath.Join(base, "images"), filepath.Join(base, "runsc")} {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			return nil, err
@@ -118,7 +128,7 @@ func New(dataDir, guestBinary, platform string) (*Provider, error) {
 		lock.Close()
 		return nil, errors.New("another local-runsc server owns this data directory")
 	}
-	p := &Provider{base: base, guestBinary: guestBinary, platform: platform, lock: lock, changed: make(chan struct{})}
+	p := &Provider{base: base, guestBinary: guestBinary, guestPortProtocol: guestPortProtocol, platform: platform, lock: lock, changed: make(chan struct{})}
 	if err := p.prepareBoot(); err != nil {
 		lock.Close()
 		return nil, err
@@ -313,7 +323,7 @@ func (p *Provider) Create(ctx context.Context, s boxprovider.Spec) (boxprovider.
 	if err != nil {
 		return zero, err
 	}
-	r := record{Handle: h, Spec: s, Fingerprint: fingerprint, Network: n, Phase: "creating", Generation: 1, Platform: p.platform, BootID: p.bootID}
+	r := record{Handle: h, Spec: s, Fingerprint: fingerprint, Network: n, Phase: "creating", Generation: 1, Platform: p.platform, BootID: p.bootID, GuestPortProtocol: p.guestPortProtocol}
 	if s.Staged {
 		r.InventoryStage = "staged"
 		var item inventory.Record

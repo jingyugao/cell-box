@@ -158,7 +158,8 @@ func (s *Service) Handler() http.Handler {
 			return
 		}
 		var input struct {
-			ExpectedGeneration *uint64 `json:"expectedGeneration,omitempty"`
+			ExpectedGeneration *uint64         `json:"expectedGeneration,omitempty"`
+			WaitPorts          json.RawMessage `json:"waitPorts"`
 		}
 		if err := decodeOptionalLimit(w, r, &input, 4096); err != nil {
 			fail(w, err)
@@ -168,7 +169,18 @@ func (s *Service) Handler() http.Handler {
 			fail(w, apiError("INVALID_REQUEST", "expectedGeneration must be positive"))
 			return
 		}
-		op, err := s.actionContextWithGeneration(r.Context(), clientID(r), id, action, input.ExpectedGeneration)
+		var waitPorts []int
+		if input.WaitPorts != nil {
+			if action != "resume" {
+				fail(w, apiError("INVALID_REQUEST", "waitPorts is only valid for resume"))
+				return
+			}
+			if err := json.Unmarshal(input.WaitPorts, &waitPorts); err != nil || waitPorts == nil || len(waitPorts) == 0 {
+				fail(w, apiError("INVALID_REQUEST", "waitPorts must be a non-empty array of TCP ports"))
+				return
+			}
+		}
+		op, err := s.actionContextWithGeneration(r.Context(), clientID(r), id, action, input.ExpectedGeneration, waitPorts...)
 		if err != nil {
 			fail(w, err)
 			return

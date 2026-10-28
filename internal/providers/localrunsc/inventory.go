@@ -50,7 +50,7 @@ func (r record) observation() boxprovider.Observation {
 		o.Phase = "creating"
 	}
 	if o.Phase == "running" {
-		o.ExecutionID, o.GuestReady = r.execution(), r.Ready
+		o.ExecutionID = r.execution()
 	}
 	return o
 }
@@ -58,7 +58,7 @@ func (r record) observation() boxprovider.Observation {
 func (r record) observeState(state runtimeState, exists bool) boxprovider.Observation {
 	o := r.observation()
 	if (o.Phase == "running" && (!exists || state.Status != "running")) || (o.Phase == "suspended" && exists) {
-		o.Phase, o.ExecutionID, o.GuestReady = "failed", "", false
+		o.Phase, o.ExecutionID = "failed", ""
 		o.Message = "local runsc state disagrees with the committed lifecycle"
 	}
 	return o

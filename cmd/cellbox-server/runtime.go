@@ -191,6 +191,9 @@ func newRuntime(kube *rest.Config, options nodeOptions, readDesired func(context
 	if err = mgr.Add(&runtimecontrol.Synchronizer{Client: local}); err != nil {
 		return nil, nil, nil, err
 	}
+	if err = mgr.Add(&controller.HealthChecker{Reconciler: r, Namespace: options.Namespace}); err != nil {
+		return nil, nil, nil, err
+	}
 	r.WarmPool = &controller.WarmPool{Reconciler: r, Namespace: options.Namespace, Size: options.WarmPoolSize, ReadDesired: readDesired, PublishObservation: p.SetWarmSnapshot}
 	if err = mgr.Add(r.WarmPool); err != nil {
 		return nil, nil, nil, err

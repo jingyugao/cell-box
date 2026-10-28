@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"go.opentelemetry.io/otel/trace"
 	"os"
+	"reflect"
 	"strings"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
@@ -81,8 +82,6 @@ func observationFromResource(w *api.ResumablePod, deleted bool) boxprovider.Obse
 	observation := boxprovider.Observation{
 		Phase: "failed", ExecutionID: w.Status.PodUID, Message: w.Status.Message,
 		TransitionID: w.Spec.TransitionID, ObservedTransitionID: w.Status.ObservedTransitionID,
-		GuestReady: w.Spec.TransitionID != "" && w.Status.ResumeReadyTransitionID == w.Spec.TransitionID &&
-			w.Status.ObservedTransitionID == w.Spec.TransitionID && w.Status.ObservedGeneration == w.Generation,
 	}
 	if w.Status.Cycle > 0 {
 		observation.Generation = uint64(w.Status.Cycle)
@@ -125,7 +124,11 @@ type jsonPatchOperation struct {
 // then use resourceVersion as the patch CAS because JSON Patch cannot test an
 // absent optional field. A failed patch reads once only to confirm same-token
 // replay after an unknown response.
-func (p *Provider) RequestResume(ctx context.Context, h boxprovider.Handle, expectedPrevious, transitionID string) error {
+func (p *Provider) RequestResume(ctx context.Context, h boxprovider.Handle, expectedPrevious, transitionID string, requestedPorts ...int) error {
+	ports, portErr := boxprovider.NormalizeWaitPorts(requestedPorts)
+	if portErr != nil {
+		return portErr
+	}
 	if transitionID == "" {
 		return errors.New("resume transition ID must be non-empty")
 	}
@@ -133,7 +136,7 @@ func (p *Provider) RequestResume(ctx context.Context, h boxprovider.Handle, expe
 		return err
 	}
 	if p.Local != nil && p.Local.HasJournal() {
-		return p.Local.RequestResume(ctx, h, expectedPrevious, transitionID)
+		return p.Local.RequestResume(ctx, h, expectedPrevious, transitionID, ports...)
 	}
 	if transitionID == expectedPrevious {
 		current, err := p.get(ctx, h)
@@ -141,7 +144,10 @@ func (p *Provider) RequestResume(ctx context.Context, h boxprovider.Handle, expe
 			return err
 		}
 		if current.Spec.TransitionID == transitionID && current.Spec.DesiredState == "Running" {
-			return nil
+			if reflect.DeepEqual(current.Spec.WaitPorts, ports) {
+				return nil
+			}
+			return boxprovider.ErrStaleTransition
 		}
 		return boxprovider.ErrStaleTransition
 	}
@@ -176,7 +182,8 @@ func (p *Provider) RequestResume(ctx context.Context, h boxprovider.Handle, expe
 	}
 	operations = append(operations,
 		jsonPatchOperation{Operation: "replace", Path: "/spec/desiredState", Value: "Running"},
-		jsonPatchOperation{Operation: "add", Path: "/spec/transitionID", Value: transitionID})
+		jsonPatchOperation{Operation: "add", Path: "/spec/transitionID", Value: transitionID},
+		jsonPatchOperation{Operation: "add", Path: "/spec/waitPorts", Value: ports})
 	traceValue := telemetry.ResumeOperationAnnotation(ctx, transitionID)
 	if traceValue != "" {
 		// Change only this trace key, preserving unrelated metadata.
@@ -199,7 +206,10 @@ func (p *Provider) RequestResume(ctx context.Context, h boxprovider.Handle, expe
 	// after a committed patch from a stale operation that lost the CAS.
 	current, getErr := p.get(ctx, h)
 	if getErr == nil && current.Spec.TransitionID == transitionID && current.Spec.DesiredState == "Running" {
-		return nil
+		if reflect.DeepEqual(current.Spec.WaitPorts, ports) {
+			return nil
+		}
+		return boxprovider.ErrStaleTransition
 	}
 	if errors.Is(getErr, boxprovider.ErrNotFound) {
 		return getErr

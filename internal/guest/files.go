@@ -66,6 +66,10 @@ func workspaceDir(root, rel string) (*os.File, error) {
 }
 
 func (s *Server) fileHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPut {
+		s.beginCommand()
+		defer s.endCommand()
+	}
 	rel := r.URL.Query().Get("path")
 	if _, err := cleanRelative(rel, r.URL.Query().Get("list") == "1"); err != nil {
 		http.Error(w, err.Error(), 400)

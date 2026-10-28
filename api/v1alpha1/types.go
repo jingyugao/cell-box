@@ -55,6 +55,9 @@ type Spec struct {
 	// DesiredState. A newer operation must fence stale workers by supplying the
 	// previously observed transition ID.
 	TransitionID string `json:"transitionID,omitempty"`
+	// WaitPorts is the TCP port set that must be listening for this resume
+	// transition to complete.
+	WaitPorts []int `json:"waitPorts,omitempty"`
 	// Container is immutable. The controller owns optional directory mounts.
 	Container              core.Container     `json:"container"`
 	SharedReadOnlyHostPath string             `json:"sharedReadOnlyHostPath,omitempty"`
@@ -81,9 +84,9 @@ type Status struct {
 	// ObservedTransitionID is set with lifecycle phase updates and identifies
 	// the transition whose requested state the controller has observed.
 	ObservedTransitionID string `json:"observedTransitionID,omitempty"`
-	// ResumeReadyTransitionID is published only after the node has reopened
-	// Guest admission for this exact transition and execution.
-	ResumeReadyTransitionID string           `json:"resumeReadyTransitionID,omitempty"`
+	// Deprecated: readiness is represented by Phase and ObservedTransitionID.
+	// This field is ignored and is never serialized.
+	ResumeReadyTransitionID string           `json:"-"`
 	SpecHash                string           `json:"specHash,omitempty"`
 	Cycle                   int64            `json:"cycle,omitempty"`
 	PodName                 string           `json:"podName,omitempty"`
@@ -122,6 +125,9 @@ func (r *ResumablePod) DeepCopy() *ResumablePod {
 	}
 	if r.Spec.Mounts != nil {
 		out.Spec.Mounts = append([]VolumeMount(nil), r.Spec.Mounts...)
+	}
+	if r.Spec.WaitPorts != nil {
+		out.Spec.WaitPorts = append([]int(nil), r.Spec.WaitPorts...)
 	}
 	out.Status.Conditions = append([]meta.Condition(nil), r.Status.Conditions...)
 	if r.Status.Execution != nil {

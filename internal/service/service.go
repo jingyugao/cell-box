@@ -494,8 +494,8 @@ func projectRuntimeObservation(ctx context.Context, current *boxRecord, ob boxpr
 	}
 	previousError := current.Box.Error
 	phase := ob.Phase
-	if current.Box.Phase == "resuming" && phase == "running" && !ob.GuestReady {
-		phase = "resuming"
+	if phase == "failed" && ob.Message != "" {
+		current.Box.Error = &APIError{Code: "RUNTIME_FAILED", Message: ob.Message}
 	}
 	if phase == "deleted" {
 		if current.Box.Phase == "deleting" || current.Box.Phase == "deleted" {
@@ -717,7 +717,7 @@ func (s *Service) waitStateTransition(ctx context.Context, id, want string, chec
 
 // Startup and read RPCs can spawn short protected-tool calls after the RPC
 // itself finishes. Wait briefly for those admitted calls to drain before
-// checkpointing; Guest quiesce remains the atomic admission boundary.
+// checkpointing. Lifecycle admission blocks new Cellbox management requests.
 func (s *Service) quiesceGuest(ctx context.Context, b boxRecord) error {
 	ctx, cancel := context.WithTimeout(ctx, min(5*time.Second, time.Duration(s.config.StartupTimeoutSeconds)*time.Second))
 	defer cancel()
@@ -893,11 +893,22 @@ func (s *Service) create(client string, input createRequest, archiveID string, a
 func (s *Service) action(client, id, action string) (Operation, error) {
 	return s.actionContextWithGeneration(context.Background(), client, id, action, nil)
 }
-func (s *Service) actionContextWithGeneration(ctx context.Context, client, id, action string, expectedGeneration *uint64) (Operation, error) {
+func (s *Service) actionContextWithGeneration(ctx context.Context, client, id, action string, expectedGeneration *uint64, requestedPorts ...int) (Operation, error) {
 	switch action {
 	case "suspend", "resume", "destroy", "activate":
 	default:
 		return Operation{}, apiError("NOT_FOUND", "Endpoint not found")
+	}
+	if action != "resume" && len(requestedPorts) != 0 {
+		return Operation{}, apiError("INVALID_REQUEST", "waitPorts is only valid for resume")
+	}
+	waitPorts := requestedPorts
+	if action == "resume" {
+		var err error
+		waitPorts, err = boxprovider.NormalizeWaitPorts(requestedPorts)
+		if err != nil {
+			return Operation{}, apiError("INVALID_REQUEST", err.Error())
+		}
 	}
 	var b boxRecord
 	op, err := s.prepareOperationContext(ctx, client, action, id, func(tx *storeTx, op *Operation) error {
@@ -980,7 +991,7 @@ func (s *Service) actionContextWithGeneration(ctx context.Context, client, id, a
 		return op, err
 	}
 	if action == "resume" {
-		s.launchNodeResume(ctx, op, b, s.providers[b.Profile.Provider].(boxprovider.ResumeRequestProvider))
+		s.launchNodeResume(ctx, op, b, s.providers[b.Profile.Provider].(boxprovider.ResumeRequestProvider), waitPorts...)
 		return op, nil
 	}
 	s.launchWithCommitContext(ctx, op, func(ctx context.Context) (map[string]string, error) {

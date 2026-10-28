@@ -7,11 +7,11 @@ import (
 )
 
 // A resume submits one runtime transition. There is no repair or request replay.
-func (s *Service) launchNodeResume(ctx context.Context, op Operation, b boxRecord, provider boxprovider.ResumeRequestProvider) {
+func (s *Service) launchNodeResume(ctx context.Context, op Operation, b boxRecord, provider boxprovider.ResumeRequestProvider, waitPorts ...int) {
 	var result boxprovider.Observation
 	s.launchWithCommitContext(ctx, op, func(ctx context.Context) (map[string]string, error) {
 		s.ensureRuntimeFeed(b)
-		if err := provider.RequestResume(ctx, b.Handle, b.TransitionID, op.ID); err != nil {
+		if err := provider.RequestResume(ctx, b.Handle, b.TransitionID, op.ID, waitPorts...); err != nil {
 			return nil, err
 		}
 		var err error
@@ -33,7 +33,7 @@ func (s *Service) launchNodeResume(ctx context.Context, op Operation, b boxRecor
 			return boxprovider.ErrStaleTransition
 		}
 		latest, observed, _ := s.feedSnapshot(s.ensureRuntimeFeed(current))
-		if !observed || latest.Phase != "running" || !latest.GuestReady || latest.TransitionID != op.ID || latest.ObservedTransitionID != op.ID ||
+		if !observed || latest.Phase != "running" || latest.TransitionID != op.ID || latest.ObservedTransitionID != op.ID ||
 			latest.ExecutionID != result.ExecutionID || latest.Generation != result.Generation || result.Generation < current.Box.Generation {
 			return boxprovider.ErrStaleTransition
 		}

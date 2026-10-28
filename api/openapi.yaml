@@ -13,6 +13,27 @@ components:
                 type: integer
                 minimum: 1
                 description: Checked when the request is accepted. Empty request bodies remain supported.
+    ResumeRequest:
+      required: false
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            properties:
+              expectedGeneration:
+                type: integer
+                minimum: 1
+                description: Checked when the request is accepted. Empty request bodies remain supported.
+              waitPorts:
+                type: array
+                minItems: 1
+                maxItems: 64
+                items:
+                  type: integer
+                  minimum: 1
+                  maximum: 65535
+                description: TCP ports that must be listening for resume to complete. Omitted defaults to port 40000.
   responses:
     Error:
       content:
@@ -1572,7 +1593,7 @@ paths:
   /v1/boxes/{id}:resume:
     post:
       requestBody:
-        $ref: '#/components/requestBodies/LifecyclePrecondition'
+        $ref: '#/components/requestBodies/ResumeRequest'
       description: Accepts a resume operation for a suspended Kubernetes sandbox. The caller can query its operation ID; Cellbox does not replay interrupted work after restart.
       operationId: resumeBox
       parameters:
