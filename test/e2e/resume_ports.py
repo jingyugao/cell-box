@@ -328,7 +328,12 @@ ThreadingHTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
                 rows = self.kube("get", "pods", "-l", "cellbox.local/warm-pool=true").get("items", [])
                 candidates = [p for p in rows
                               if p.get("metadata", {}).get("uid") != previous_uid
+                              and p.get("metadata", {}).get("labels", {}).get("cellbox.local/owner", "") in ("", cr["metadata"]["uid"])
                               and any(c.get("image") == image for c in p.get("spec", {}).get("containers", []))]
+                owned = [p for p in candidates
+                         if p.get("metadata", {}).get("labels", {}).get("cellbox.local/owner") == cr["metadata"]["uid"]]
+                if owned:
+                    candidates = owned
                 if len(candidates) > 1:
                     raise RuntimeError("multiple warm Pods match the exact revision image; refusing ambiguous Guest access")
                 if len(candidates) == 1:
