@@ -455,11 +455,25 @@ ThreadingHTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
             raise RuntimeError("custom-port resume changed the counter instance or PID")
         self.state["evidence"]["customResume"] = {"ports": [MANAGEMENT_PORT, APP_PORT], "state": first_after_resume, "observedAt": utc_now()}
         self.save()
+        self.verify_warm()
 
-        before_warm = self.runtime(box["id"])
-        self.state["evidence"]["podBeforeWarmResume"] = before_warm
-        self.save()
-        self.suspend_box(box["id"])
+    def verify_warm(self):
+        self.load()
+        if "customResume" not in self.state["evidence"] or "delayedResume" in self.state["evidence"]:
+            raise RuntimeError("warm verification requires completed custom resume and no previous delayed resume")
+        record = self.find_box("current")
+        box = self.box(record["id"])
+        revision = self.request("GET", "/v1/template-revisions/" + self.api_path(record["revisionId"]))
+        initial_new = self.state["evidence"]["currentInitialState"]
+        before_warm = self.state["evidence"].get("podBeforeWarmResume")
+        if before_warm is None:
+            before_warm = self.runtime(box["id"])
+            self.state["evidence"]["podBeforeWarmResume"] = before_warm
+            self.save()
+        if box.get("phase") == "running":
+            self.suspend_box(box["id"])
+        elif box.get("phase") != "suspended":
+            raise RuntimeError("warm verification requires a running or suspended Box")
         self.patch_revision(revision["id"], warmSlots=1)
         pool = self.wait_warm_ready(revision["id"])
         warm_pods = self.kube("get", "pods", "-l", "cellbox.local/warm-pool=true").get("items", [])
@@ -533,7 +547,7 @@ ThreadingHTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
         self.state["phase"] = "verified"
         self.state["verifiedAt"] = utc_now()
         self.save()
-        print(json.dumps({"phase": self.state["phase"], "legacy": legacy_result, "warmResume": warm_evidence, "healthFailure": {"boxPhase": failed_box.get("phase"), "crPhase": failed_runtime["cr"].get("status", {}).get("phase"), "serving": serving}}, indent=2))
+        print(json.dumps({"phase": self.state["phase"], "legacy": self.state["evidence"]["legacyResume"], "warmResume": warm_evidence, "healthFailure": {"boxPhase": failed_box.get("phase"), "crPhase": failed_runtime["cr"].get("status", {}).get("phase"), "serving": serving}}, indent=2))
 
     def wait_health_failure(self, box_id, seconds):
         deadline = time.monotonic() + seconds
@@ -630,7 +644,7 @@ def utc_now():
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--phase", required=True, choices=("prepare-legacy", "verify", "cleanup"))
+    parser.add_argument("--phase", required=True, choices=("prepare-legacy", "verify", "verify-warm", "cleanup"))
     parser.add_argument("--api", default="http://127.0.0.1:18093")
     parser.add_argument("--state", required=True, help="persistent JSON file shared across phases")
     parser.add_argument("--context", default="k3s")
@@ -646,6 +660,8 @@ def main():
             suite.prepare_legacy()
         elif suite.args.phase == "verify":
             suite.verify()
+        elif suite.args.phase == "verify-warm":
+            suite.verify_warm()
         else:
             suite.cleanup()
     except BaseException as error:
