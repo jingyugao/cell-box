@@ -432,10 +432,11 @@ ThreadingHTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
         op = self.action(legacy["id"], "resume")
         first_state_started = time.monotonic()
         first_state = self.service(legacy["id"], APP_PORT, "state")
+        first_request_seconds = time.monotonic() - first_state_started
         resumed = self.box(legacy["id"])
         if resumed.get("phase") != "running":
             raise RuntimeError("legacy default resume did not reach running: " + json.dumps(resumed))
-        legacy_result = {"operationId": op["id"], "resumeSeconds": round(first_state_started - started, 3), "firstRequestSeconds": round(time.monotonic() - first_state_started, 3), "firstState": first_state}
+        legacy_result = {"operationId": op["id"], "resumeSeconds": round(first_state_started - started, 3), "firstRequestSeconds": round(first_request_seconds, 3), "firstState": first_state}
         if not self.same_instance(initial, first_state):
             raise RuntimeError("legacy resume changed the counter instance or PID: " + json.dumps({"before": initial, "after": first_state}))
         self.state["evidence"]["legacyResume"] = legacy_result
@@ -532,6 +533,9 @@ ThreadingHTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
         self.state["verifiedAt"] = utc_now()
         self.save()
 
+        health_started = time.monotonic()
+        self.state["evidence"]["closeDelayedListener"] = {"sentAt": utc_now()}
+        self.save()
         self.service_request(box["id"], APP_PORT, "close-extra", "POST", {})
         failed_box, failed_runtime = self.wait_health_failure(box["id"], 25)
         pod = failed_runtime.get("pod")
@@ -543,6 +547,7 @@ ThreadingHTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
         self.state["evidence"]["healthFailure"] = {
             "box": failed_box, "cr": failed_runtime["cr"], "pod": pod,
             "observedAt": utc_now(), "serving": serving,
+            "closeRequestToFailedSeconds": round(time.monotonic() - health_started, 3),
         }
         self.state["phase"] = "verified"
         self.state["verifiedAt"] = utc_now()
