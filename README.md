@@ -64,6 +64,7 @@ client / Go SDK
 | [Concepts](docs/concepts.md) | Terms used everywhere: Box, template, revision, generation, checkpoint, warm pool |
 | [Node installation](docs/node-installation.md) | gVisor build, wrapper, containerd handler |
 | [Deployment](docs/deployment.md) | Image, Helm values, upgrade |
+| [Configuration](docs/configuration.md) | Every flag, configuration field, environment variable and Helm value |
 | [Usage](docs/cellbox-usage.md) | Templates, revisions and the sandbox lifecycle |
 | [REST quick start](docs/rest-quickstart.md) | `curl` examples |
 | [Go SDK](docs/go-sdk.md) | Client usage and examples |
