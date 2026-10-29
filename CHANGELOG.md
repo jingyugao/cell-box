@@ -19,6 +19,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Warm pool demand is derived from the checkpoints that exist on the node. `warmSlots` and `defaultWarmSlots` are kept for compatibility and no longer create demand.
 - `make test`, `vet` and `fmt` are scoped to the source directories; `make check` also verifies formatting.
 
+### Fixed
+
+- Warm resume failed with `"Args" does not match across checkpoint restore` when a Box claimed a warm slot that had been built from another Box of the same revision, which is the normal case once a revision has more than one Box. The instance identity added to the Guest arguments made them differ. The wrapper now gives the pre-created container the claiming Box's command line, carried in the ticket, and refuses a slot whose arguments differ in anything but the instance marker.
+
 ### Documentation
 
 - Documentation is in English, with a new [concepts](docs/concepts.md) page.

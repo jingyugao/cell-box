@@ -631,6 +631,9 @@ func (a Adapter) childStartArgs(args []string, idx int, id string) ([]string, er
 		if err := a.bindHome(c.BundleDir, c.Ticket); err != nil {
 			return nil, err
 		}
+		if err := setBundleGuestArgv(c.BundleDir, c.Ticket.GuestArgv); err != nil {
+			return nil, err
+		}
 		if err := node.AtomicJSON(filepath.Join(a.Base, "children", id+".json"), c); err != nil {
 			return nil, err
 		}
