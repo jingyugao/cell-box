@@ -75,9 +75,6 @@ func buildWanted(spec boxprovider.Spec) (*api.ResumablePod, error) {
 	if spec.HomeVolumeUID != "" && !spec.PersistentHome {
 		return nil, errors.New("homeVolumeUID requires persistentHome")
 	}
-	if spec.PersistentHome && spec.HomeVolumeUID == "" && spec.Mounts == nil {
-		return nil, errors.New("persistentHome requires an independent volume")
-	}
 	if spec.Mounts != nil {
 		if len(spec.Mounts) == 0 {
 			return nil, errors.New("mounts must not be empty when specified")
@@ -164,6 +161,9 @@ func buildWanted(spec boxprovider.Spec) (*api.ResumablePod, error) {
 func (p *Provider) Create(ctx context.Context, spec boxprovider.Spec) (boxprovider.Handle, error) {
 	if p == nil || p.Client == nil {
 		return boxprovider.Handle{}, errors.New("Kubernetes client is required")
+	}
+	if spec.PersistentHome && spec.HomeVolumeUID == "" && spec.Mounts == nil {
+		return boxprovider.Handle{}, errors.New("persistentHome requires an independent volume")
 	}
 	wanted, err := buildWanted(spec)
 	if err != nil {
