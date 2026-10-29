@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -352,6 +354,18 @@ func (b *Backend) TryRetireWarm(ctx context.Context, p *core.Pod) (bool, error) 
 	return !claimed, nil
 }
 
+var foreignLeaseWarned sync.Map
+
+// warnForeignLease logs once per lease: the condition lasts until an operator
+// removes the lease or its owner takes it over, and repeating it every cycle
+// would only hide other messages.
+func warnForeignLease(l WarmLease) {
+	if _, seen := foreignLeaseWarned.LoadOrStore(l.UID, struct{}{}); !seen {
+		slog.Warn("ignoring a warm lease whose sandbox belongs to another runtime handler; remove the lease file if that runtime is gone",
+			"pod", l.Name, "podUID", l.UID, "namespace", l.Namespace)
+	}
+}
+
 func (b *Backend) ReapWarm(ctx context.Context, namespace string, existing map[string]bool) error {
 	return b.ReapWarmWithRetirement(ctx, namespace, existing, b.TryRetireWarm)
 }
@@ -388,6 +402,12 @@ func (b *Backend) ReapWarmWithRetirement(ctx context.Context, namespace string, 
 			continue
 		}
 		p := &core.Pod{ObjectMeta: meta.ObjectMeta{UID: types.UID(l.UID), Name: l.Name, Namespace: l.Namespace}}
+		// A lease whose sandbox belongs to another runtime handler is not ours to
+		// reap. Leave it untouched and do not report a failure every cycle.
+		if _, sandboxErr := b.sandboxes(ctx, p); errors.Is(sandboxErr, ErrForeignRuntime) {
+			warnForeignLease(l)
+			continue
+		}
 		retired, retireErr := retire(ctx, p)
 		if retireErr != nil {
 			failures = errors.Join(failures, fmt.Errorf("retire warm Pod %s: %w", l.Name, retireErr))
@@ -399,6 +419,10 @@ func (b *Backend) ReapWarmWithRetirement(ctx context.Context, namespace string, 
 		cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		err = b.Cleanup(cleanupCtx, p)
 		cancel()
+		if errors.Is(err, ErrForeignRuntime) {
+			warnForeignLease(l)
+			continue
+		}
 		if err != nil {
 			failures = errors.Join(failures, fmt.Errorf("reap warm Pod %s: %w", l.Name, err))
 			continue
