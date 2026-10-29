@@ -1,209 +1,248 @@
-# Cellbox 节点手工安装
+# Node installation
 
-在承载 `k8s-resumable` 工作空间的节点上完成本文步骤，再部署 Helm Chart。Chart 只创建 Kubernetes 资源，不安装 gVisor、wrapper，不修改宿主机运行时配置，也不重启节点服务。单进程 `cellbox-server` 需要特权和 hostPID 来执行 checkpoint / restore；部署时以 `server.nodeName` 固定到完成准备的节点。
+This guide prepares a Kubernetes node to run Cellbox sandboxes: it installs the gVisor build Cellbox needs, the Cellbox runsc wrapper, and a containerd runtime handler. Do it before deploying the Helm chart. The chart only creates Kubernetes resources; it never installs host software, edits runtime configuration, or restarts node services.
 
-以下节点命令使用 Bash 和 sudo。普通 containerd 与 K3s 的配置步骤二选一；路径、节点名、服务名及版本需按实际环境确认。不要在已有工作空间运行或暂停时直接替换 gVisor；已有 checkpoint 的版本兼容性需要先验证。
+`cellbox-server` runs privileged with `hostPID` on exactly one node (`server.nodeName`), and drives checkpoint and restore on that node. Everything below happens on that node.
 
-## 1. 确认环境并备份
+## Requirements and tested environment
 
-Chart 默认选择 Linux amd64。确认节点架构、运行时实际配置路径和 systemd 服务：
+| Item | Requirement |
+| --- | --- |
+| Platform | Linux amd64 only |
+| Kubernetes | A node already joined to a cluster, with containerd as the CRI (plain containerd or k3s) |
+| Privileges | root on the node (the examples use `sudo`) |
+| Tools on the node | `curl`, `tar`, `bzip2`, `sha512sum` |
 
-```bash
-uname -m
-sudo systemctl cat containerd.service   # 普通 containerd
-# K3s server 使用 k3s.service，agent 使用 k3s-agent.service
-sudo systemctl cat k3s.service
+Tested with k3s v1.36 (containerd 2.3), Ubuntu 24.04, kernel 6.8, systrap platform. Other combinations may work but have not been validated.
+
+### gVisor build
+
+Cellbox needs a gVisor build with three options that upstream gVisor does not have yet: `runsc create --no-root-container`, `runsc restore --defer-checkpoint`, and `runsc restore --background-load`. Do not install an upstream gVisor release; warm sandboxes will fail to start.
+
+| Cellbox version | gVisor build |
+| --- | --- |
+| 0.1.0 | [`cellbox-gvisor-20261029`](https://github.com/jingyugao/gvisor/releases/tag/cellbox-gvisor-20261029) |
+
+The build is upstream gVisor `ac7b4e0fdc` (2026-10-28) plus pull requests [#15721](https://github.com/google/gvisor/pull/15721), [#15722](https://github.com/google/gvisor/pull/15722) and [#16368](https://github.com/google/gvisor/pull/16368). Source: [`jingyugao/gvisor`](https://github.com/jingyugao/gvisor), tag `cellbox-gvisor-20261029`.
+
+## How the pieces fit
+
+```text
+kubelet -> containerd -> containerd-shim-runsc-v1 -> runsc-wrapper (shell script, sets environment)
+                                                       -> cellbox-runsc-wrapper (checks tickets, rewrites start -> restore)
+                                                            -> runsc (the gVisor build above)
 ```
 
-普通 containerd 通常使用 `/etc/containerd/config.toml`，但应以服务启动参数为准。K3s 的默认生成配置是 `/var/lib/rancher/k3s/agent/etc/containerd/config.toml`。阅读配置中的 `version`、`imports` 及导入文件，确认 CRI 未禁用，并检查是否已有 `runsc-recoverable` handler。已有配置应人工合并，避免重复定义。
+The shim runs the wrapper script in place of runsc. The script sets the wrapper's environment and executes `cellbox-runsc-wrapper`, which checks the node-local ticket for the Pod, binds the persistent HOME, and turns a sandbox `start` into `runsc restore`. It finally `exec`s the real `runsc`. The wrapper never calls `cellbox-server`; it only reads files under the node base directory.
 
-在修改前将实际配置文件、K3s 自定义模板或 drop-in、已有 wrapper 和 `/var/lib/cellbox/runsc.toml` 备份到运维指定目录，记录原权限。记录哪些文件原本不存在，方便回滚时移除新文件。保留原 gVisor 的完整安装目录；不要仅备份 runsc。
+## 1. Check the environment and back up
 
-## 2. 安装完整 gVisor
+Do not replace gVisor while Boxes are running or suspended on the node. Checkpoints made by one gVisor build are not guaranteed to restore under another, so validate compatibility first.
 
-已有完整且兼容的安装可跳过。本例沿用项目此前固定的 `20260914.0`，应先在测试节点确认 checkpoint / restore 功能。不要使用浮动的 `latest`。
+```bash
+uname -m                                   # expect x86_64
+sudo systemctl cat containerd.service      # plain containerd
+sudo systemctl cat k3s.service             # k3s server (k3s-agent.service for agents)
+```
 
-完整发行包包含 runsc、shim 和 `gvisor-bin/`；后者必须与 runsc 相邻。不要仅下载两个可执行文件。发行包布局及校验方式参考 [gVisor 官方安装文档](https://gvisor.dev/docs/user_guide/install/)。
+Find the configuration containerd actually uses (the service arguments are authoritative). Read its `version` and `imports`, confirm CRI is not disabled, and check whether a `runsc-recoverable` handler already exists; merge by hand instead of defining it twice. For k3s the generated file is `/var/lib/rancher/k3s/agent/etc/containerd/config.toml`.
 
-在待安装节点执行下载和检查：
+Before changing anything, copy the files you will touch (containerd configuration or k3s template and drop-ins, any existing wrapper, `/var/lib/cellbox/runsc.toml`) and note which files did not exist, so rollback can remove them.
+
+## 2. Install gVisor
+
+Install into a versioned directory so any existing gVisor stays untouched. The directory must contain `runsc`, `containerd-shim-runsc-v1`, and a `gvisor-bin/` directory next to `runsc`.
 
 ```bash
 (
   set -euo pipefail
-  gvisor_version=20260914.0
-  gvisor_arch=$(uname -m)
-  case "$gvisor_arch" in x86_64|aarch64) ;; *) exit 1 ;; esac
-  gvisor_url="https://storage.googleapis.com/gvisor/releases/release/$gvisor_version/$gvisor_arch"
-  gvisor_work=$(mktemp -d)
-  trap 'rm -rf -- "$gvisor_work"' EXIT
-  cd "$gvisor_work"
-  curl --fail --location "$gvisor_url/gvisor.tar.bz2" -o gvisor.tar.bz2
-  curl --fail --location "$gvisor_url/gvisor.tar.bz2.sha512" -o gvisor.tar.bz2.sha512
-  sha512sum -c gvisor.tar.bz2.sha512
-  mkdir unpacked
-  tar -xjf gvisor.tar.bz2 -C unpacked
-  test -x unpacked/runsc
-  test -x unpacked/containerd-shim-runsc-v1
-  test -x unpacked/gvisor-bin/gvisor_sentry
-  # 仅在确认备份且允许替换节点组件后执行下面的安装命令。
-  sudo install -d -m 755 /usr/local/bin /usr/local/bin/gvisor-bin
-  sudo cp -a unpacked/gvisor-bin/. /usr/local/bin/gvisor-bin/
-  sudo install -m 755 unpacked/containerd-shim-runsc-v1 /usr/local/bin/containerd-shim-runsc-v1
-  sudo install -m 755 unpacked/runsc /usr/local/bin/runsc
+  tag=cellbox-gvisor-20261029
+  dest=/usr/local/bin/gvisor-cellbox/$tag
+  base=https://github.com/jingyugao/gvisor/releases/download/$tag
+  work=$(mktemp -d); trap 'rm -rf -- "$work"' EXIT; cd "$work"
+
+  curl --fail --location -O "$base/gvisor-linux-amd64.tar.bz2" -O "$base/gvisor-linux-amd64.tar.bz2.sha512"
+  sha512sum -c gvisor-linux-amd64.tar.bz2.sha512
+  mkdir unpacked && tar -xjf gvisor-linux-amd64.tar.bz2 -C unpacked
+  test -x unpacked/runsc && test -x unpacked/containerd-shim-runsc-v1 && test -x unpacked/gvisor-bin/gvisor_sentry
+
+  test ! -e "$dest"          # never overwrite an installed build
+  sudo install -d -m 755 "$dest/gvisor-bin"
+  sudo install -m 755 unpacked/runsc unpacked/containerd-shim-runsc-v1 "$dest/"
+  sudo cp -a unpacked/gvisor-bin/. "$dest/gvisor-bin/"
+  "$dest/runsc" --version
 )
-/usr/local/bin/runsc --version
 ```
 
-需要 curl、CA 证书、tar、bzip2 和 sha512sum。确认运行时服务的 PATH 包含 `/usr/local/bin`，能找到 `containerd-shim-runsc-v1`；仅登录 Shell 的 PATH 正确还不够。
-
-## 3. 安装 Cellbox wrapper 和 shim 配置
-
-在构建机执行 `make build`，将对应节点架构的 `dist/release/cellbox-runsc-wrapper` 复制到节点。交叉构建可用 `GOARCH=arm64 make build`；默认 Chart 选择 amd64，其他架构还需配套的平台及沙箱镜像。
-
-在节点上，从包含已复制 wrapper 的目录执行：
+`runsc --version` should print `cellbox-gvisor-20261029`. Confirm the three options exist:
 
 ```bash
-sudo install -d -m 755 /usr/local/libexec
-sudo install -m 755 cellbox-runsc-wrapper /usr/local/libexec/cellbox-runsc-wrapper
+d=/usr/local/bin/gvisor-cellbox/cellbox-gvisor-20261029
+$d/runsc restore --help 2>&1 | grep -E 'defer-checkpoint|background-load'
+$d/runsc create  --help 2>&1 | grep 'no-root-container'
+```
+
+## 3. Install the wrapper and runtime configuration
+
+Take `cellbox-runsc-wrapper` from the Cellbox release package, or build it with `make build` (output in `dist/release/`). Then install it and create the node base directory:
+
+```bash
+sudo install -d -m 755 /usr/local/libexec/cellbox
+sudo install -m 755 cellbox-runsc-wrapper /usr/local/libexec/cellbox/cellbox-runsc-wrapper
+sudo /usr/local/libexec/cellbox/cellbox-runsc-wrapper --adapter-version
+
 sudo install -d -m 700 /var/lib/cellbox \
   /var/lib/cellbox/tickets /var/lib/cellbox/requests /var/lib/cellbox/claims \
   /var/lib/cellbox/workloads /var/lib/cellbox/logs
-sudo /usr/local/libexec/cellbox-runsc-wrapper --adapter-version
 ```
 
-将下面完整内容保存为节点的 `/var/lib/cellbox/runsc.toml`，文件属主 root、权限 `0600`。已有文件先备份并检查差异。
+Create the wrapper script. It is what containerd actually runs, and it carries the settings that make fast resume work:
+
+```bash
+sudo tee /usr/local/libexec/cellbox/runsc-wrapper >/dev/null <<'EOF'
+#!/bin/sh
+export CELLBOX_NODE_BASE=/var/lib/cellbox
+export CELLBOX_RUNSC=/usr/local/bin/gvisor-cellbox/cellbox-gvisor-20261029/runsc
+export CELLBOX_NO_ROOT_CONTAINER=true
+export CELLBOX_DEFER_CHECKPOINT=true
+export CELLBOX_BACKGROUND_LOAD=lazy
+exec /usr/local/libexec/cellbox/cellbox-runsc-wrapper "$@"
+EOF
+sudo chmod 755 /usr/local/libexec/cellbox/runsc-wrapper
+```
+
+| Variable | Meaning |
+| --- | --- |
+| `CELLBOX_NODE_BASE` | Directory for tickets, requests, claims, warm leases and logs. Must equal the chart's `controller.nodeBase`. Default `/var/lib/cellbox`. |
+| `CELLBOX_RUNSC` | The real `runsc` to execute. Must be the gVisor build from section 2. Default `/usr/local/bin/runsc`. |
+| `CELLBOX_NO_ROOT_CONTAINER` | Boot sandboxes without a root container process, so warm-pool slots can be prepared before any Box is assigned. |
+| `CELLBOX_DEFER_CHECKPOINT` | Start the warm sandbox without a checkpoint and bind the checkpoint when a Box claims the slot. Requires `CELLBOX_NO_ROOT_CONTAINER`. |
+| `CELLBOX_BACKGROUND_LOAD` | `lazy` (default) reads checkpoint pages when the application touches them; `eager` reads them all in the background. Requires the gVisor build above. |
+| `CELLBOX_POD_UID_AUTH` | Leave unset. |
+
+`CELLBOX_NO_ROOT_CONTAINER` and `CELLBOX_DEFER_CHECKPOINT` are required for the validated warm-resume path. Without them the wrapper falls back to a mode that this gVisor build and the warm pool are not validated with; in our tests warm-slot Pods failed with `StartError` and resumes with `READINESS_FAILED`.
+
+Now point the runtime at the script. Save as `/var/lib/cellbox/runsc.toml` (owner root, mode `0600`):
 
 ```toml
-binary_name = "/usr/local/libexec/cellbox-runsc-wrapper"
+binary_name = "/usr/local/libexec/cellbox/runsc-wrapper"
 log_path = "/var/lib/cellbox/logs/%ID%/shim.log"
 log_level = "info"
 [runsc_config]
+  network = "host"
   restore-spec-validation = "enforce"
   platform = "systrap"
 ```
 
 ```bash
-sudo chown root:root /var/lib/cellbox/runsc.toml
-sudo chmod 600 /var/lib/cellbox/runsc.toml
+sudo chown root:root /var/lib/cellbox/runsc.toml && sudo chmod 600 /var/lib/cellbox/runsc.toml
 ```
 
-默认使用 systrap。如明确选择 KVM，将 `platform` 改为 `kvm`，并先确认节点 `/dev/kvm` 可用。shim 配置项参考 [gVisor containerd 配置文档](https://gvisor.dev/docs/user_guide/containerd/configuration/)；wrapper 和 recovery annotation 是 Cellbox 的适配要求。
+This is the configuration used in our validation runs, including `network = "host"` and the systrap platform. To use KVM instead, set `platform = "kvm"` after confirming `/dev/kvm` is available. Shim options are described in the [gVisor containerd configuration guide](https://gvisor.dev/docs/user_guide/containerd/configuration/).
 
-## 4A. 普通 containerd
+## 4. Register the containerd handler
 
-人工编辑运行时实际使用的配置文件，保留所有原有设置。在 `version = 2` 的配置中增加：
+Add a `runsc-recoverable` handler that uses the shim from section 2 and the `runsc.toml` above. Keep all existing settings, do not overwrite the whole file, and do not change the default runtime.
 
-```toml
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc-recoverable]
-  runtime_type = "io.containerd.runsc.v1"
-  pod_annotations = ["dev.gvisor.internal.recovery.ticket"]
-  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc-recoverable.options]
-    TypeUrl = "io.containerd.runsc.v1.options"
-    ConfigPath = "/var/lib/cellbox/runsc.toml"
-```
+The Pod annotation `dev.gvisor.internal.recovery.ticket` must be allowed through to the runtime; it is how the wrapper finds the Pod's ticket.
 
-`version = 3` 使用下面的插件路径，其他内容相同：
+### 4A. Plain containerd
+
+For a `version = 3` configuration add the following; for `version = 2` replace both occurrences of `io.containerd.cri.v1.runtime` with `io.containerd.grpc.v1.cri`.
 
 ```toml
 [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc-recoverable]
   runtime_type = "io.containerd.runsc.v1"
+  runtime_path = "/usr/local/bin/gvisor-cellbox/cellbox-gvisor-20261029/containerd-shim-runsc-v1"
   pod_annotations = ["dev.gvisor.internal.recovery.ticket"]
   [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc-recoverable.options]
     TypeUrl = "io.containerd.runsc.v1.options"
     ConfigPath = "/var/lib/cellbox/runsc.toml"
 ```
 
-如使用已有的 imports/drop-in 体系，将片段放入实际被导入的文件并遵循该集群的配置规范。不要直接覆盖整个配置，也不要修改默认 runtime。合并完成后，使用节点安装的 containerd 检查配置解析和合并结果：
+If you use an imports or drop-in layout, put the snippet in a file that is really imported. Check how the configuration parses and merges before restarting:
 
 ```bash
 sudo containerd --config /etc/containerd/config.toml config dump
 ```
 
-解析通过后，再按第 5 节安排人工重启。
+### 4B. k3s
 
-## 4B. K3s
+Never edit the generated `config.toml`; k3s rewrites it on every restart. Use a drop-in. Recent k3s versions import `/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d/*.toml` (check the `imports` line of the generated file). Save the snippet below as `config-v3.toml.d/98-cellbox.toml`, mode `0644`:
 
-不要直接编辑 K3s 自动生成的 `config.toml`，重启会重新生成。使用对应版本的模板，参考 [K3s 官方 containerd 模板说明](https://docs.k3s.io/advanced#configuring-containerd)。
-
-| 生成配置版本 | 默认模板路径 | runtime 插件路径 |
-| --- | --- | --- |
-| `version = 2` | `/var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl` | `io.containerd.grpc.v1.cri` |
-| `version = 3` | `/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.tmpl` | `io.containerd.cri.v1.runtime` |
-
-若节点尚无自定义模板，版本 3 模板的完整内容如下：
-
-```gotemplate
-{{ template "base" . }}
+```toml
+version = 3
 
 [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc-recoverable]
   runtime_type = "io.containerd.runsc.v1"
+  runtime_path = "/usr/local/bin/gvisor-cellbox/cellbox-gvisor-20261029/containerd-shim-runsc-v1"
   pod_annotations = ["dev.gvisor.internal.recovery.ticket"]
   [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc-recoverable.options]
     TypeUrl = "io.containerd.runsc.v1.options"
     ConfigPath = "/var/lib/cellbox/runsc.toml"
 ```
 
-版本 2 模板保留首行，将两处 `io.containerd.cri.v1.runtime` 改为 `io.containerd.grpc.v1.cri`，保存到版本 2 对应路径。
+If your k3s does not import drop-ins, use a template instead (see the [k3s containerd documentation](https://docs.k3s.io/advanced#configuring-containerd)): `config-v3.toml.tmpl` for `version = 3` configurations, or `config.toml.tmpl` for `version = 2`. A new template starts with `{{ template "base" . }}` followed by the snippet above. If a template already exists, merge into it and do not add the `base` line again. Do not define the same handler in two places.
 
-已有模板时保留原内容，人工合并 handler；不要再次添加 base 调用。已有 `config-v3.toml.d/91-cellbox.toml` 等 drop-in 时，确认生成配置确实导入该文件；可保留并人工维护该布局，不要在模板中重复定义。不要把自动生成的 `config.toml` 整份复制为模板。
+## 5. Restart and check
 
-## 5. 人工重启和检查
-
-选择维护窗口，先处理节点上的业务和已有 Cellbox 工作空间。下面以普通 worker 为例，命令在管理机执行；drain 应遵循集群维护规范，PDB 或本地数据阻止 drain 时先处理原因，不要直接强制删除。
+Pick a maintenance window and deal with the workloads on the node first. For a worker node, drain it following your cluster's rules:
 
 ```bash
-kubectl --context <context> cordon <node>
-kubectl --context <context> drain <node> --ignore-daemonsets
+kubectl cordon <node>
+kubectl drain <node> --ignore-daemonsets
 ```
 
-在节点上只执行实际服务对应的一组命令：
+Then restart exactly one service on the node:
 
 ```bash
-# 普通 containerd
-sudo systemctl restart containerd.service
-sudo systemctl is-active containerd.service
-sudo journalctl -u containerd.service -n 100 --no-pager
-
-# 或 K3s server（会影响本机控制面，需单独安排维护窗口）
-sudo systemctl restart k3s.service
-sudo systemctl is-active k3s.service
-sudo journalctl -u k3s.service -n 100 --no-pager
-
-# 或 K3s agent
-sudo systemctl restart k3s-agent.service
-sudo systemctl is-active k3s-agent.service
-sudo journalctl -u k3s-agent.service -n 100 --no-pager
+sudo systemctl restart containerd.service      # plain containerd
+sudo systemctl restart k3s.service             # k3s server: also restarts the local control plane
+sudo systemctl restart k3s-agent.service       # k3s agent
+sudo journalctl -u <service> -n 100 --no-pager # look for config parse or CRI load errors
 ```
 
-确认日志无配置解析或 CRI 加载错误。K3s 还需检查重新生成的 `config.toml` 中 handler 与 ConfigPath 正确。使用已安装的 crictl 检查 CRI（普通 containerd）：
+Check that containerd registered the handler with the right shim and config path:
 
 ```bash
-sudo crictl --runtime-endpoint unix:///run/containerd/containerd.sock info
+sudo crictl info            # k3s: sudo k3s crictl info
+# the runtimes list must contain runsc-recoverable with runtimePath and ConfigPath as configured
 ```
 
-K3s 可用 `sudo k3s crictl info`；实际 CRI socket 通常为 `/run/k3s/containerd/containerd.sock`。
-
-在管理机确认节点 Ready 后解除调度限制：
+Wait for the node to be Ready and uncordon it:
 
 ```bash
-kubectl --context <context> wait --for=condition=Ready node/<node> --timeout=180s
-kubectl --context <context> uncordon <node>
+kubectl wait --for=condition=Ready node/<node> --timeout=180s
+kubectl uncordon <node>
 ```
 
-按[部署与升级指南](deployment.md)部署 Helm。K3s values 需设置 `controller.criDirectory: /run/k3s/containerd` 和 `controller.criSocket: /run/k3s/containerd/containerd.sock`；这两项由合并后的 server 使用。将 `server.nodeName` 设置为已准备节点的实际 Kubernetes 节点名，并确保所有 Kubernetes profile 的 `nodeName` 匹配它，`namespace` 匹配 release namespace。
+On a single-node cluster you cannot drain. In our validation, restarting k3s kept running Pods alive, but the API server was unavailable for a short time. Plan for that.
+
+## 6. Deploy and verify
+
+Deploy the chart following the [deployment guide](deployment.md). Set `server.nodeName` to this node; for k3s also set `controller.criDirectory: /run/k3s/containerd` and `controller.criSocket: /run/k3s/containerd/containerd.sock`. Make `controller.nodeBase`, `controller.runsc` and `controller.shim` match the paths used above.
 
 ```bash
-kubectl --context <context> get runtimeclass runsc-recoverable -o yaml
-kubectl --context <context> -n cell-box rollout status deploy/cellbox-server --timeout=180s
-kubectl --context <context> -n cell-box logs deploy/cellbox-server -c server
+kubectl get runtimeclass runsc-recoverable -o yaml      # handler must be runsc-recoverable
+kubectl -n <namespace> rollout status deploy/cellbox-server --timeout=180s
+kubectl -n <namespace> logs deploy/cellbox-server -c server
 ```
 
-RuntimeClass 的 handler 应为 `runsc-recoverable`。服务 active、节点 Ready 和 `cellbox-server` Running 只能证明基础状态；最后使用项目测试工作空间确认创建、执行及同节点 suspend / resume。已有 Running 的 counter 测试 CR 时，可使用 `test/scripts/e2e-k8s.sh <context>`。
+A running `cellbox-server` only proves the basics. Finish by creating a Box, suspending it and resuming it, as in the [REST quick start](rest-quickstart.md). After the first suspend, the warm pool creates a slot Pod; it shows `ContainerCreating` while it waits for a Box, which is expected (see [warm pool](warm-pool.md)).
 
-## 升级、已有安装迁移和回滚
+## Troubleshooting
 
-- 已由旧安装器配置好的节点无需重新安装。升级新 Chart 后将不再有安装 init container；旧 `runtimeInstaller` 和 `adapterImage` values 应从本地覆盖文件删除。已有 wrapper、配置和 checkpoint 保留。
-- Cellbox server 镜像升级不更新宿主机 wrapper。需要更新适配器时，从同版本发布包取 wrapper，核对 `--adapter-version`，按第 3 节人工安装。单独更新 wrapper 或 shim TOML 不要求重启 containerd，但已有 shim 可能继续使用旧配置；需验证新建工作空间，避免假定存量工作空间已更新。
-- 更换 gVisor 或 containerd handler 按节点维护流程处理，先验证已有 checkpoint 的兼容性。
-- 配置重启失败时保持节点 cordon，恢复备份的实际配置、模板或 drop-in；移除此次新增且原本不存在的配置文件，恢复原 wrapper、shim TOML 及完整 gVisor 安装，再由运维重启对应服务并验证。K3s 应恢复输入模板/drop-in，不能仅恢复生成文件。
-- 不要删除 `/var/lib/cellbox` 下的 tickets、requests、claims、workloads 或运行时状态来“重装”。`helm uninstall` 不移除节点组件；正式卸载前先处理已有工作空间，再人工撤销 handler 和组件。
+| Symptom | Likely cause |
+| --- | --- |
+| Warm-slot Pods end in `StartError` with "the sandbox exited before the container started"; resume fails with `READINESS_FAILED` | The wrapper script is missing `CELLBOX_NO_ROOT_CONTAINER=true` or `CELLBOX_DEFER_CHECKPOINT=true`, or `CELLBOX_RUNSC` points to a gVisor without the Cellbox patches |
+| `flag provided but not defined: -background-load` (or `-defer-checkpoint`) | `CELLBOX_RUNSC` is not the Cellbox gVisor build |
+| `missing/invalid controller authorization; refusing cold start` | The Pod has no ticket: the server uses a different `controller.nodeBase` than `CELLBOX_NODE_BASE` |
+| Handler missing from `crictl info` | The snippet is not in an imported file, or containerd was not restarted; check `imports` and the service logs |
+| Sandbox logs | `/var/lib/cellbox/logs/<sandbox-id>/` holds one runsc log per subcommand (`boot`, `create`, `gofer`, `state`, `restore`, `wait`, `delete`) and a `panic` log |
+
+## Upgrade, migration and rollback
+
+- A new Cellbox server image does not update host components. To update the wrapper, install the matching version, check `--adapter-version`, and replace the file as in section 3. Changing the wrapper or `runsc.toml` does not need a containerd restart, but existing shims may keep the old settings; verify with a newly created Box.
+- To change the gVisor build, install it side by side (section 2), point the wrapper script and the handler's `runtime_path` at it, and restart the runtime service. Suspended Boxes may not restore under a different build, so test existing checkpoints first, or keep the old build and handler for them.
+- If the restart fails, keep the node cordoned, restore the backed-up configuration, remove files you added, restore the previous wrapper and `runsc.toml`, then restart the service and verify. For k3s restore the template or drop-in, not the generated file.
+- Never delete `tickets`, `requests`, `claims`, `workloads` or other runtime state under the node base to "reinstall". `helm uninstall` does not remove node components; deal with existing Boxes first, then remove the handler and components by hand.

@@ -1,54 +1,56 @@
-# Go SDK 使用指南
+# Go SDK guide
 
-Go SDK 位于 [`sdk/go`](../sdk/go)，使用 Go 1.22，模块路径为 `github.com/jingyugao/cell-box/sdk/go`。当前版本随 Cellbox 源码开发，尚未发布为 Go module。开发时通过本地 `replace` 引用此仓库。
+The Go SDK lives in [`sdk/go`](../sdk/go). It requires Go 1.22 and its module path is `github.com/jingyugao/cell-box/sdk/go`. It is developed together with the Cellbox source and is not yet published as a tagged Go module, so applications reference this repository through a local `replace`.
 
-## 在应用中添加 SDK
+Terms such as Box, Template, Revision and Operation are defined in [Concepts and terminology](concepts.md). The SDK type for a Box is named `Sandbox`.
 
-在应用的 Go module 目录中，将 SDK 替换为本地绝对路径，再添加依赖：
+## Add the SDK to an application
+
+In the application's Go module directory, replace the SDK with a local checkout and add the dependency:
 
 ```sh
 go mod edit -replace=github.com/jingyugao/cell-box/sdk/go=/path/to/cell-box/sdk/go
 go get github.com/jingyugao/cell-box/sdk/go@v0.0.0
 ```
 
-请将路径换成你本机 Cellbox checkout 的绝对路径。使用此未发布版本期间，本地替换会保留在应用的 `go.mod` 中。需要时运行 `go mod tidy` 更新 `go.sum`。
+Use the absolute path of your own Cellbox checkout. Until a tagged release exists, keep the `replace` line in the application's `go.mod`. Run `go mod tidy` when needed to update `go.sum`.
 
-## 连接 Cellbox
+## Connect to Cellbox
 
-如果 `Config` 中对应字段为空，SDK 会读取以下环境变量：
+If a field in `Config` is empty, the SDK reads these environment variables:
 
-| 变量 | 作用 |
+| Variable | Purpose |
 | --- | --- |
-| `CELLBOX_API_URL` | Cellbox API 地址，例如 `http://127.0.0.1:18092` |
-| `CELLBOX_CLIENT_ID` | 模板及其他 client 所有数据的命名空间，可选 |
-| `CELLBOX_CLIENT_TOKEN` | 仅当 Cellbox 前有认证网关时使用的 Bearer token；Cellbox API 本身不将它用于 catalog 认证 |
+| `CELLBOX_API_URL` | Cellbox API address, for example `http://127.0.0.1:18092` |
+| `CELLBOX_CLIENT_ID` | Optional. Client namespace for templates and other client-owned data |
+| `CELLBOX_CLIENT_TOKEN` | Bearer token, only for an authenticating gateway placed in front of Cellbox. The Cellbox API itself does not use it for catalog authentication |
 
-`ClientID` 用于隔离 catalog 命名空间，不是密码、唯一业务 ID 或认证身份。`OwnerKey` 只是沙箱的业务关联标签，不保证唯一，也不是访问控制。省略 `ClientID` 时使用服务端配置的默认命名空间。可以通过 `HTTPClient` 配置 TLS 和代理。SDK 禁用 HTTP 重定向，避免将 token 转发到其他主机。
+`ClientID` selects a catalog namespace. It is not a password, a unique business ID or an authentication identity. `OwnerKey` is only a label that ties a Box to your own records; it is not unique and is not access control. If you omit `ClientID`, the server's default namespace is used. Configure TLS and proxies through `HTTPClient`. The SDK disables HTTP redirects so that a token is never forwarded to another host.
 
-连接当前 k3s 测试部署时，将 `cell-box-v2` 命名空间里的 Service 转发到本机：
+To reach a Cellbox deployed in Kubernetes from your machine, forward the API Service to a local port. The namespace, context, Service name and port below are examples; use the values of your deployment:
 
 ```sh
-kubectl --context k3s -n cell-box-v2 port-forward --address 127.0.0.1 svc/cellbox-api 18092:8090
+kubectl --context <context> -n <namespace> port-forward --address 127.0.0.1 svc/cellbox-api 18092:8090
 ```
 
-下面的模板 ID 只属于该部署，不能用于其他 Cellbox catalog：
+Then point the SDK at it and name a template that exists in your catalog:
 
 ```sh
 export CELLBOX_API_URL=http://127.0.0.1:18092
-export CELLBOX_TEMPLATE_ID=tpl-44312d31c4a0d898fcc9f585b9c01537
+export CELLBOX_TEMPLATE_ID=<template ID>
 ```
 
-然后在仓库根目录运行示例：
+Run the example from the repository root:
 
 ```sh
 go -C sdk/go run ./examples/basic
 ```
 
-示例会使用模板族当前的 stable revision 创建沙箱、执行短命令、打印结果并用独立的 60 秒 context 尝试清理；清理失败会写入日志。若要固定到某个不可变修订版本，设置 `CELLBOX_REVISION_ID` 并省略 `CELLBOX_TEMPLATE_ID`。两个变量必须且只能设置一个。
+The example creates a Box from the template's stable revision, runs a short command, prints the result, and tries to destroy the Box with a separate 60-second context. A failed cleanup is logged. To pin an immutable revision instead, set `CELLBOX_REVISION_ID` and leave `CELLBOX_TEMPLATE_ID` unset. Exactly one of the two variables must be set.
 
-## 创建模板并构建 revision
+## Create a template and build a revision
 
-**Template** 表示模板族及其可变配置；**revision** 是构建生成的不可变运行镜像和 profile 快照。例如，用户版本 `1.01` 连续构建成功后会得到 `1.01-r1`、`1.01-r2`。已创建的沙箱仍固定使用创建时选中的修订版本。
+A **Template** is a family of revisions with mutable metadata. A **Revision** is the immutable result of a build: a runnable image plus a snapshot of the profile. For example, building user version `1.01` twice successfully gives `1.01-r1` and `1.01-r2`. A Box stays pinned to the revision that was selected when it was created.
 
 ```go
 package main
@@ -64,7 +66,6 @@ import (
 func build(ctx context.Context, c *cellbox.Client) error {
 	template, err := c.CreateTemplate(ctx, cellbox.CreateTemplateOptions{
 		Name: "coding-agent",
-		DefaultWarmSlots: 0,
 	})
 	if err != nil {
 		return err
@@ -107,11 +108,11 @@ func main() {
 }
 ```
 
-构建需要一个可用的 profile，并配置好镜像构建器和仓库。构建前会将 `baseImage` 解析为不可变镜像。`buildCommand` 在镜像构建过程中以 root 执行；`runCommand` 是用字面 `docker run ...` 语法描述沙箱工作负载配置的输入，Cellbox 会解析其中支持的 command、entrypoint、环境变量、工作目录和端口，不会真的执行 `docker run`，也不会据此改写 OCI 镜像的 ENTRYPOINT。它必须引用相同的基础镜像。本期构建支持 `linux/amd64`。构建输入会保存在 revision 和 operation 记录中，不要把密码或 token 写进 `buildCommand`。
+A build needs a usable profile and a configured image builder and registry. Before building, `baseImage` is resolved to an immutable digest. `buildCommand` runs as root during the image build. `runCommand` is an input written in literal `docker run ...` syntax that describes the workload of the Box. Cellbox parses the command, entrypoint, environment variables, working directory and ports it supports. It does not run `docker run` and does not rewrite the image's OCI ENTRYPOINT. It must reference the same base image as `baseImage`. Builds support `linux/amd64`. Build inputs are stored in the revision and in the Operation record, so never put passwords or tokens in `buildCommand`.
 
-构建以异步任务提交。SDK 返回持久化的 operation，`WaitBuildRevision` 会等待完成并读取生成的 revision。应用可使用 `GetOperation`、`ListOperations` 和 `GetOperationLogs` 查看进度。每次提交都会创建独立构建任务，不提供请求重放。服务重启后无法确认的任务会以 `UNKNOWN_OUTCOME` 失败，不会自动重跑。`CancelOperation` 会请求取消构建，但不能保证清理已经发布的镜像产物。
+A build is an asynchronous Operation. The SDK returns the persisted Operation, and `WaitBuildRevision` waits for it to finish and then reads the resulting revision. Use `GetOperation`, `ListOperations` and `GetOperationLogs` to follow progress. Every submission creates an independent build; requests are never replayed. After a server restart, an Operation whose outcome cannot be confirmed fails with `UNKNOWN_OUTCOME` and is not rerun. `CancelOperation` requests cancellation of a build, but it does not guarantee that already published image artifacts are cleaned up.
 
-等待超时只停止 SDK 的本地等待，不会取消已受理的构建；使用新的 context 可继续调用 `WaitOperation` 查询。提交请求发生网络错误时，结果可能未知，先查询已有 operation 或构建状态，再决定后续动作：
+A wait timeout only stops the SDK from waiting. It does not cancel the accepted build; call `WaitOperation` with a new context to keep waiting. If the submit request fails with a network error, its outcome may be unknown. Look up existing Operations or build state before deciding what to do next.
 
 ```go
 import (
@@ -132,7 +133,7 @@ revision, err := client.WaitBuildRevision(waitCtx, op)
 if err != nil {
 	var operationErr *cellbox.OperationError
 	if errors.As(err, &operationErr) && operationErr.Operation != nil {
-		// 保存 ID；之后可以用新的 context 调用 WaitOperation。
+		// Save the ID; you can call WaitOperation again later with a new context.
 		fmt.Println("operation:", operationErr.Operation.ID)
 	}
 	return err
@@ -140,7 +141,7 @@ if err != nil {
 _ = revision
 ```
 
-日志读取可按 `NextOffset` 分页，SDK 单次最多读取 1 MiB：
+Read logs page by page using `NextOffset`. The SDK reads at most 1 MiB per call:
 
 ```go
 offset := int64(0)
@@ -150,7 +151,7 @@ for {
 	fmt.Print(chunk.Text)
 	if chunk.EOF { break }
 	if chunk.NextOffset == offset {
-		// 构建尚未产生新日志时暂停轮询，避免空转请求。
+		// No new log output yet; pause to avoid busy polling.
 		select {
 		case <-ctx.Done(): return ctx.Err()
 		case <-time.After(500 * time.Millisecond):
@@ -160,35 +161,43 @@ for {
 }
 ```
 
-`GetOperation` / `WaitOperation` 同时支持构建和运行时任务；`ListOperations`、日志和取消接口当前只支持模板构建。日志读到 EOF 后，仍需检查任务状态以区分成功、失败和取消。
+`GetOperation` and `WaitOperation` work for both build and runtime Operations. `ListOperations`, logs and cancellation currently apply only to template builds. After the log reaches EOF, still check the Operation status to tell success, failure and cancellation apart.
 
-SDK 的主要错误类型：`APIError` 表示 HTTP/API 错误，包含状态码和错误码；`RequestError` 表示一次提交请求失败，网络错误时服务端可能已受理请求；`OperationError` 携带最近一次 operation 快照和底层错误；命令非零退出会返回 `CommandExitError`，同时保留 `CommandResult` 中的 stdout/stderr/exit code。使用 `errors.As` 提取这些类型。命令非零退出时，`Run` 会同时返回结果和 `CommandExitError`。命令每次提交都会独立执行。网络失败后先查询 operation 和执行记录，不要自动重发。
+The main error types are:
 
-需要取消仍在运行的构建时，用 operation ID 显式请求取消；这只适用于可取消的模板构建任务：
+- `APIError`: an HTTP or API error, with the status code and error code.
+- `RequestError`: a failed submit request. After a network error the server may have accepted it.
+- `OperationError`: carries the latest Operation snapshot and the underlying error.
+- `CommandExitError`: returned when a command exits non-zero. `Run` returns it together with the `CommandResult`, so stdout, stderr and the exit code are preserved.
+
+Extract them with `errors.As`. Each command submission runs independently. After a network failure, look up the Operation and the Exec record first; do not resend automatically.
+
+To cancel a build that is still running, request cancellation explicitly with its Operation ID. This only works for cancellable template builds:
 
 ```go
 _, err := client.CancelOperation(ctx, operationID)
 if err != nil { return err }
 ```
 
-`DefaultWarmSlots` 和 revision 的 `WarmSlots` 会保存到 SQLite catalog，但已不再决定预热：预热需求来自节点上现有的 checkpoint，见[预热池](warm-pool.md)。构建 revision 时，`WarmSlots == nil` 会复制模板默认值；显式传入 `WarmSlots`（包括 `0`）则使用该值。
+`DefaultWarmSlots` on a template and `WarmSlots` on a revision are stored in the SQLite catalog but no longer decide warm-pool demand. Demand comes from checkpoints that exist on the node; see [warm pool](warm-pool.md). When you build a revision, `WarmSlots == nil` copies the template default, and an explicit value (including `0`) is used as given.
 
-模板名创建后不可修改；`description`、`defaultWarmSlots` 和 `stableRevisionId` 可通过带 `ExpectedGeneration` 的 `UpdateTemplate` 修改。可用 `SetTemplateStableRevision(ctx, templateID, "", generation)` 清空 stable 指针。Revision 的镜像、基础镜像、构建命令、运行配置和 profile 快照不可变；`description`、`status`（`active`/`retired`）和 `warmSlots` 可更新。Retire stable revision 前必须先切换或清空 stable 指针；retired 会撤回预热需求并阻止后续选择，但不影响已固定该 revision 的沙箱。`GetTemplateRuntime` 提供每个 revision 的沙箱数和阶段快照，`GetRevisionWarmPool` 提供预热同步与池状态。只有没有任何 revision、也没有排队或运行中构建任务的空模板族可删除。
+A template name cannot be changed after creation. `description`, `defaultWarmSlots` and `stableRevisionId` can be changed with `UpdateTemplate`, which requires `ExpectedGeneration` (the template generation). `SetTemplateStableRevision(ctx, templateID, "", generation)` clears the stable pointer. A revision's image, base image, build command, runtime configuration and profile snapshot are immutable; `description`, `status` (`active` or `retired`) and `warmSlots` can be updated. Before retiring the stable revision, switch or clear the stable pointer. Retiring a revision blocks new selections of it but does not affect Boxes already pinned to it. `GetTemplateRuntime` returns the Box count and phases per revision, and `GetRevisionWarmPool` returns warm-pool sync and pool state. Only an empty template, with no revisions and no queued or running build, can be deleted.
 
-常用方法按资源整理如下：
+The common methods, grouped by resource:
 
-| 能力 | SDK 方法 | 说明 |
+| Area | SDK methods | Notes |
 | --- | --- | --- |
-| 模板族 | `CreateTemplate`、`ListTemplates`、`GetTemplate`、`UpdateTemplate`、`DeleteTemplate` | 删除仅适用于空模板族；更新使用 generation 防止覆盖并发修改 |
-| Revision | `BuildRevision`、`WaitBuildRevision`、`ListTemplateRevisions`、`GetTemplateRevision`、`UpdateTemplateRevision`、`GetRevisionWarmPool` | 构建成功后生成不可变 revision；可改描述、状态和预热配置 |
-| 构建任务 | `GetOperation`、`WaitOperation`、`ListOperations`、`GetOperationLogs`、`CancelOperation` | 查看/等待/取消构建，按 offset 读取日志；不会自动重放构建命令 |
-| Profile / 执行记录 | `ListProfiles`、`GetExecution` | Profile 是服务端配置；执行记录用于读取已完成命令的结果 |
-| 沙箱 | `Create`、`CreateAsync`、`Connect`、`GetSandbox`、`ListSandboxes`、`GetTemplateRuntime`、`Sandbox.Destroy` | `GetSandbox` 读服务端已保存记录；`ListSandboxes` 和 `GetTemplateRuntime` 查询 runtime inventory（Kubernetes profile 会查询集群）；`GetRevisionWarmPool` 读服务端的最新预热观察 |
-| 命令 | `Commands.Run`、`RunArgv`、`Start`、`StartArgv`、`Command.Wait` | 有时限的单次命令，不提供 PTY 或流式输出 |
-| 文件 | `Files.Open`、`Read`、`Write`、`List` | workspace 相对路径；不自动恢复沙箱 |
-| 生命周期 | `Suspend`、`Resume`、`Activate`、`Destroy` | Kubernetes 按能力支持暂停、恢复和暂存激活；Docker 仅支持销毁。`Resume`、`Activate` 返回新 handle，需接收返回值 |
+| Templates | `CreateTemplate`, `ListTemplates`, `GetTemplate`, `UpdateTemplate`, `DeleteTemplate` | Delete works only on an empty template. Updates use the generation to avoid overwriting concurrent changes |
+| Revisions | `BuildRevision`, `WaitBuildRevision`, `ListTemplateRevisions`, `GetTemplateRevision`, `UpdateTemplateRevision`, `GetRevisionWarmPool` | A successful build produces an immutable revision. Description, status and warm-pool settings can be changed |
+| Build Operations | `GetOperation`, `WaitOperation`, `ListOperations`, `GetOperationLogs`, `CancelOperation` | Inspect, wait for and cancel builds; read logs by offset. Build commands are never replayed |
+| Profiles and Execs | `ListProfiles`, `GetExecution` | Profiles are server configuration. An Exec record holds the result of a finished command |
+| Boxes | `Create`, `CreateAsync`, `Connect`, `GetSandbox`, `ListSandboxes`, `GetTemplateRuntime`, `Sandbox.Destroy` | `GetSandbox` reads the stored record. `ListSandboxes` and `GetTemplateRuntime` query the runtime inventory (the cluster, for a Kubernetes profile). `GetRevisionWarmPool` reads the server's latest warm-pool observation |
+| Commands | `Commands.Run`, `RunArgv`, `Start`, `StartArgv`, `Command.Wait` | One time-limited command per call. No PTY and no streamed output |
+| Files | `Files.Open`, `Read`, `Write`, `List` | Paths are relative to the workspace. A suspended Box is not resumed automatically |
+| Lifecycle | `Suspend`, `Resume`, `Activate`, `Destroy` | Kubernetes supports suspend, resume and activating a staged Box according to its capabilities. Docker supports only destroy. `Resume` and `Activate` return a new handle, so use the return value |
+| Volumes | `CreateVolume`, `GetVolume`, `ListVolumes`, `DeleteVolume`, `CreateVolumeBackup`, `ListVolumeBackups`, `RestoreVolume`, `CreateVolumeExport`, `OpenVolumeExport` and related methods | Persistent volumes and their backups and exports. See the method documentation in [`sdk/go`](../sdk/go) |
 
-## 创建并使用沙箱
+## Create and use a Box
 
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -220,53 +229,56 @@ if err != nil {
 }
 ```
 
-如需固定到特定 revision，传入 `RevisionID` 而不是 `TemplateID`，二者必须且只能设置一个。`OwnerKey` 是调用方填写的业务关联标签，不保证唯一，也不用于认证。`Sandbox` handle 保存创建或连接时观察到的 runtime generation；其他调用方更改沙箱后，应通过 `Client.Connect` 重新连接。
+To pin a specific revision, pass `RevisionID` instead of `TemplateID`. Exactly one of the two must be set. `OwnerKey` is a label you choose; it is not unique and is not used for authentication. A `Sandbox` handle stores the Box generation observed when it was created or connected. If someone else changes the Box, reconnect with `Client.Connect`.
 
-`Run`/`Start` 使用 `/bin/sh -c` 执行命令；`RunArgv`/`StartArgv` 则直接调用绝对路径程序。命令执行有时限，不提供交互式终端或无限期后台进程。服务端默认超时为 30 秒，可设置 1 毫秒至 5 分钟；`Start` 只是先返回已受理的有时限命令 handle，不会让命令脱离服务端超时限制。命令结束后一次性返回输出，不提供流式输出。
+`Run` and `Start` execute the command with `/bin/sh -c`. `RunArgv` and `StartArgv` call a program by absolute path directly. Commands are time-limited; there is no interactive terminal and no indefinitely running background process. The server's default timeout is 30 seconds and you can set 1 millisecond to 5 minutes. `Start` only returns a handle for the accepted command earlier; the command is still bound by the server timeout. Output is returned in one piece when the command ends, not streamed.
 
-默认 HTTP client 对每个请求设置 30 秒总超时（包含读取响应体）；调用方传入的 context 可再设置更短的整体截止时间。长时间等待构建时请给 context 留足时间。若要下载耗时较长的大文件，可通过 `Config.HTTPClient` 提供合适的超时时间。取消 context 只停止客户端请求/等待，不会自动取消已受理的服务端 operation。网络超时不代表请求未受理；Cellbox 不会重放请求，调用方应先查询 operation 状态。服务重启后无法确认的任务以 `UNKNOWN_OUTCOME` 失败，不会自动重跑。
+The default HTTP client applies a 30-second total timeout to each request, including reading the response body. A context you pass can set a shorter overall deadline. When you wait for a long build, leave enough time in the context. To download a large file that takes longer, supply a suitable timeout through `Config.HTTPClient`. Cancelling a context only stops the client's request or wait; it does not cancel an accepted server Operation. A network timeout does not mean the request was not accepted. Cellbox does not replay requests, so query the Operation status first. After a server restart, an Operation whose outcome cannot be confirmed fails with `UNKNOWN_OUTCOME` and is not rerun.
 
-## 生命周期和文件
+## Lifecycle and files
 
-生命周期操作取决于 runtime profile。Kubernetes 可支持 `Suspend`/`Resume` 和暂存后 `Activate`；Docker 只支持基础操作，调用暂停、恢复、归档、暂存激活或受保护工具/凭据时服务端返回 `UNSUPPORTED_CAPABILITY`。`Resume` 和 `Activate` 会返回一个**新的 sandbox handle**；后续执行命令前请改用新 handle。请求不提供幂等或自动重放承诺。请先检查 `SandboxInfo.Capabilities`，确认当前 profile 支持所需操作。Docker 不支持的能力会直接返回 `UNSUPPORTED_CAPABILITY`。`Client.ListSandboxes` 返回当前沙箱清单并直接查询 runtime inventory；使用 Kubernetes profile 时会查询 Kubernetes。`GetTemplateRuntime` 每次也查询当前 Kubernetes 自定义资源清单（不列 Pod）；`GetRevisionWarmPool` 读取 SQLite 期望配置和服务端最新预热观察快照，不在请求内查询 Kubernetes。
+Which lifecycle operations are available depends on the runtime profile. Kubernetes can support `Suspend` and `Resume`, and `Activate` for a staged Box. Docker supports only the basic operations; for suspend, resume, archive, activating a staged Box, or protected tools and credentials, the server returns `UNSUPPORTED_CAPABILITY`. `Resume` and `Activate` return a **new Box handle**; use it for every later command. Requests carry no idempotency or automatic replay guarantee. Check `SandboxInfo.Capabilities` first to see which operations the current profile supports.
 
-`Sandbox.Files` 可在配置的 workspace 下读取、写入和列出文件，路径相对于 workspace。文件访问不会自动恢复已挂起的沙箱。`Read` 最大读取 16 MiB；`Write` 最大写入 16 MiB，会覆盖目标文件（非原子操作，父目录必须已存在）；`Open` 流式下载并返回 `io.ReadCloser`，调用方必须关闭它。文件请求作用于当前沙箱，不使用命令和生命周期接口的 generation compare-and-swap。网络错误导致写入结果不确定时，不要自动重试。
+`Client.ListSandboxes` returns the current Box list and queries the runtime inventory directly; with a Kubernetes profile it queries Kubernetes. `GetTemplateRuntime` also lists the current Cellbox custom resources on every call (it does not list Pods). `GetRevisionWarmPool` reads the desired configuration from SQLite and the server's latest warm-pool observation; it does not query Kubernetes during the request.
 
-仓库还提供完整的模板构建和生命周期示例：
+`Sandbox.Files` reads, writes and lists files under the configured workspace, with paths relative to the workspace. File access never resumes a suspended Box. `Read` returns at most 16 MiB. `Write` accepts at most 16 MiB and overwrites the target file; it is not atomic, and the parent directory must already exist. `Open` streams a download and returns an `io.ReadCloser` that the caller must close. File requests act on the current Box and do not use the generation compare-and-swap that command and lifecycle calls use. If a network error leaves the outcome of a write uncertain, do not retry automatically.
+
+The repository also has full template-build and lifecycle examples:
 
 ```sh
-# 创建/复用模板，构建 revision，将它设为 stable，然后创建沙箱执行工具
-export CELLBOX_PROFILE_ID='<当前部署中已配置的 profile ID>'
+# Create or reuse a template, build a revision, make it stable,
+# then create a Box and run a tool in it
+export CELLBOX_PROFILE_ID='<profile ID configured in your deployment>'
 export CELLBOX_BASE_IMAGE='docker.io/library/ubuntu:24.04'
 go -C sdk/go run ./examples/template
 
-# 在模板的 stable revision 上测试文件接口和 Kubernetes suspend/resume
-export CELLBOX_TEMPLATE_ID='<上一步创建或复用的模板 ID>'
+# On the template's stable revision, test the file API and Kubernetes suspend/resume
+export CELLBOX_TEMPLATE_ID='<template ID created or reused in the previous step>'
 go -C sdk/go run ./examples/lifecycle
 ```
 
-模板示例支持以下环境变量：
+The template example reads these environment variables:
 
-| 环境变量 | 是否必需 | 作用 |
+| Variable | Required | Purpose |
 | --- | --- | --- |
-| `CELLBOX_API_URL` | 必需 | API 地址；也可通过 `Config.BaseURL` 指定 |
-| `CELLBOX_PROFILE_ID`、`CELLBOX_BASE_IMAGE` | 必需 | 构建使用的 profile 与基础镜像 |
-| `CELLBOX_TEMPLATE_ID` | 可选 | 复用现有模板；不设置时创建新模板 |
-| `CELLBOX_TEMPLATE_NAME`、`CELLBOX_USER_VERSION` | 可选 | 新模板名和用户版本；默认随机名和 `1.01` |
-| `CELLBOX_BUILD_COMMAND`、`CELLBOX_RUN_COMMAND` | 可选 | 自定义镜像构建命令和 workload 配置 |
-| `CELLBOX_VERIFY_COMMAND` | 可选 | revision 构建后在沙箱中执行的检查命令 |
-| `CELLBOX_PLATFORM` | 可选 | 构建平台，默认为 `linux/amd64` |
-| `CELLBOX_CLIENT_ID`、`CELLBOX_CLIENT_TOKEN` | 可选 | 数据命名空间；仅有前置认证 Gateway 时设置 token |
+| `CELLBOX_API_URL` | Yes | API address. It can also be set with `Config.BaseURL` |
+| `CELLBOX_PROFILE_ID`, `CELLBOX_BASE_IMAGE` | Yes | Profile and base image used for the build |
+| `CELLBOX_TEMPLATE_ID` | No | Reuse an existing template. If unset, a new template is created |
+| `CELLBOX_TEMPLATE_NAME`, `CELLBOX_USER_VERSION` | No | Name and user version of a new template. Defaults: a random name and `1.01` |
+| `CELLBOX_BUILD_COMMAND`, `CELLBOX_RUN_COMMAND` | No | Custom image build command and workload settings |
+| `CELLBOX_VERIFY_COMMAND` | No | Check command run in a Box after the revision is built |
+| `CELLBOX_PLATFORM` | No | Build platform. Default `linux/amd64` |
+| `CELLBOX_CLIENT_ID`, `CELLBOX_CLIENT_TOKEN` | No | Data namespace. Set the token only when a gateway in front of Cellbox authenticates requests |
 
-默认构建命令会安装示例工具 `template-tool`；如果自定义了 `CELLBOX_BUILD_COMMAND`，示例默认只打印提示并查看工作目录，不会假设自定义镜像里有该工具。可用 `CELLBOX_VERIFY_COMMAND` 指定实际验证命令。模板示例和生命周期示例创建的 sandbox 都会尝试自动销毁；模板和构建出的 revision 会保留。生命周期示例需要 `CELLBOX_TEMPLATE_ID` 或 `CELLBOX_REVISION_ID`，并要求 profile 支持同节点 checkpoint。其他示例代码位于 [`sdk/go/examples`](../sdk/go/examples)。HTTP 契约和各 provider 的能力字段见 [OpenAPI 文档](../api/openapi.yaml)。SDK 当前不提供 PTY/流式交互或归档方法；归档 REST 接口只适用于满足持久 HOME 条件的 Kubernetes sandbox。
+The default build command installs an example tool, `template-tool`. If you set a custom `CELLBOX_BUILD_COMMAND`, the example by default only prints a note and lists the working directory, because it cannot assume the custom image contains that tool. Use `CELLBOX_VERIFY_COMMAND` to run a real check. Both the template example and the lifecycle example try to destroy the Boxes they create; the template and the built revision are kept. The lifecycle example needs `CELLBOX_TEMPLATE_ID` or `CELLBOX_REVISION_ID`, and a profile that supports same-node checkpoints. More examples are in [`sdk/go/examples`](../sdk/go/examples). The HTTP contract and the per-provider capability fields are in the [OpenAPI document](../api/openapi.yaml). The SDK currently has no PTY or streaming support and no archive methods; the archive REST endpoints apply only to Kubernetes Boxes that meet the persistent HOME requirement.
 
-## 预热池和运行时状态
+## Warm pool and runtime state
 
-SDK 仍通过 `cellbox-api` Service 调用 HTTP API；单机部署在 Service 后面运行一个 `cellbox-server`，由同一进程处理 API 和节点运行时。生命周期请求通过进程内 key queue 交给 runtime worker，CR 提交后的状态快照会直接唤醒等待者。Cellbox CR 与 Pod ownership 保留在 Kubernetes 中，因此这条路径仍包含 CR 写入及必要的 Pod/CRI 操作。
+The SDK calls the HTTP API through the `cellbox-api` Service. In a single-node deployment one `cellbox-server` runs behind the Service and handles both the API and the node runtime. Lifecycle requests reach the runtime worker through an in-process keyed queue, and the state snapshot published after the custom resource is written wakes up waiters. The Cellbox custom resource and Pod ownership stay in Kubernetes, so this path still includes custom resource writes and the necessary Pod and CRI operations.
 
-预热需求来自节点上处于 `Suspended` 且有 checkpoint 的 sandbox，与 revision 的 `warmSlots`、stable 指针都无关；某个配置的最后一个 checkpoint 消失后，其槽位保留 20 分钟再释放。创建 template 或构建 revision 不会单独创建预热池。`warm.DesiredSlots` 只回显配置的 `warmSlots`，实际需求看 `Pool.RequestedSlots`；没有 checkpoint 时 `Pool` 为 `nil` 是正常的。
+Warm-pool demand comes from Boxes on the node that are suspended and have a checkpoint. It does not depend on a revision's `warmSlots` or on the stable pointer. When the last checkpoint of a configuration disappears, its slot is kept for 20 minutes and then released. Creating a template or building a revision does not create a warm pool by itself. `warm.DesiredSlots` only echoes the configured `warmSlots`; read `Pool.RequestedSlots` for the real demand. A `nil` `Pool` is normal when there are no checkpoints.
 
-预热 Pod 按兼容的运行配置共享池，节点总容量受 server 内运行时循环限额约束（默认最多 2 个，配置上限 32 个）。同一个 `poolId` 的槽位数是共享池汇总值，会在关联的每个 revision 状态中重复出现；`allocatedSlots` 可能因节点容量小于 `requestedSlots`，统计多 revision 时按 `poolId` 去重。`resources` 是当前分配的空闲预热 Pod 的 Kubernetes requests/limits 配置，不是实际 CPU/内存使用量。`failedSlots` 统计当前处于失败态的预热 Pod，以及运行时循环最近 15 秒内记录、但对应 Pod 已清理的创建失败。预热 Pod 用于 resumable sandbox 的恢复路径，不能据此承诺首次冷创建会更快。撤回需求只清理空闲预热 Pod，不会杀掉已经领用的 sandbox。
+Warm Pods are shared between compatible runtime configurations. The total capacity of the node is limited by the runtime loop in the server (default at most 2, configurable up to 32). The slot counts of one `poolId` are totals for the shared pool and repeat in the status of every revision that uses it. `allocatedSlots` can be lower than `requestedSlots` when node capacity is smaller, and when you aggregate over several revisions, de-duplicate by `poolId`. `resources` is the Kubernetes requests and limits configured for the idle warm Pods currently allocated, not measured CPU or memory use. `failedSlots` counts warm Pods currently in a failed state, plus creation failures that the runtime loop recorded in the last 15 seconds for Pods that have since been cleaned up. Warm Pods serve the resume path of resumable Boxes; do not assume they make a first cold create faster. Withdrawing demand removes only idle warm Pods and never kills a Box that has already claimed one.
 
 ```go
 runtime, err := client.GetTemplateRuntime(ctx, templateID)
@@ -287,4 +299,4 @@ if err != nil { return err }
 log.Printf("sync=%s desired=%d applied-generation=%d current=%t", warm.SyncStatus, warm.DesiredSlots, warm.ObservedGeneration, !warm.Stale)
 ```
 
-`GetTemplateRuntime` 每次会为 Kubernetes profile 查询当前自定义资源清单（不列 Pod），Docker 用量从 SQLite 读取；清单查询失败时 `SandboxCount == nil` 且 `Stale` 为 true。`GetRevisionWarmPool` 从 SQLite 读取期望配置，并返回 controller 保存的最新预热观察快照；该接口本身不查询 Kubernetes。warm-pool 的 `ObservedAt` 是 controller 采集时间，超过约 15 秒或尚无快照时状态会过期/未知；用量接口的 `ObservedAt` 是本次清单查询时间。检查 `Error`、`SyncStatus`、`Stale` 和 `ObservedAt`；预热池不存在时 `Pool` 为 nil。
+For a Kubernetes profile, `GetTemplateRuntime` lists the current custom resources on every call (not Pods); Docker usage is read from SQLite. If the listing fails, `SandboxCount == nil` and `Stale` is true. `GetRevisionWarmPool` reads the desired configuration from SQLite and returns the controller's latest warm-pool observation; it does not query Kubernetes itself. The warm-pool `ObservedAt` is the time the controller collected the data. After about 15 seconds, or before the first snapshot exists, the state is stale or unknown. For the usage endpoint, `ObservedAt` is the time of this listing. Check `Error`, `SyncStatus`, `Stale` and `ObservedAt`. When no pool exists, `Pool` is nil.

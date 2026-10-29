@@ -1,74 +1,77 @@
-# 单机 Kubernetes 部署与升级
+# Single-node Kubernetes deployment and upgrade
 
-本指南面向 Kubernetes / k3s 单机部署。节点上的 gVisor、Cellbox wrapper 和 containerd handler 需先按[节点安装](node-installation.md)准备；Helm Chart 不负责安装这些宿主机组件。应用侧使用方法见[使用流程](cellbox-usage.md)。
+This guide covers deploying Cellbox to a single Kubernetes node (plain containerd or k3s). Prepare the node first, following [node installation](node-installation.md). That means the Cellbox gVisor build (upstream gVisor is not enough), the Cellbox runsc wrapper and the containerd handler. The Helm chart does not install any of these host components. For using Cellbox once it runs, see [usage](cellbox-usage.md).
 
-## 构建并发布镜像
+The chart is not published to a chart registry. Install it from the repository path `charts/cellbox`.
 
-仓库后端需要 Go 1.26 或更高版本。在仓库根目录运行：
+## Build and publish the image
+
+The backend needs Go 1.26 or later. From the repository root, run:
 
 ```sh
 make check
 make build
 ```
 
-`make build` 输出到 `dist/release`，包含二进制、Chart、`docs/`、OpenAPI 和 `sdk/go/` 源码。只构建输出目录不会升级集群。临时实验文档不会被打包。
+`make build` writes to `dist/release`. The output contains the binaries, the chart, `docs/`, the OpenAPI spec and the `sdk/go/` sources. Building the output directory does not upgrade a cluster.
 
-`make build` 会生成 `dist/release/cellbox-server`、guest agent 和 wrapper。Cellbox API 与节点运行时合并为一个进程和镜像：
+It produces `dist/release/cellbox-server`, the guest agent and the wrapper. The Cellbox API and the node runtime run as one process in one image:
 
 ```sh
 docker build -f images/cellbox-server.Dockerfile -t registry.example.com/team/cellbox-server:v1 dist/release
 docker push registry.example.com/team/cellbox-server:v1
 ```
 
-推送成功后，将镜像 digest 写入 `server.image`。Chart 不会自动使用刚构建的镜像。宿主机的 gVisor、containerd handler 和 wrapper 仍按[节点安装指南](node-installation.md)单独维护。
+After the push, set the image (preferably by digest) in `server.image`. The chart's default is `ghcr.io/jingyugao/cellbox-server:0.1.0`, which is only a default value: the chart never uses an image you built unless you set `server.image`. The host's gVisor build, containerd handler and wrapper are maintained separately, as described in [node installation](node-installation.md).
 
-## 配置存储、节点和构建器
+## Configure storage, node and builder
 
-以 [`charts/cellbox/values.yaml`](../charts/cellbox/values.yaml) 为配置参考，将环境覆盖值保存在被 Git 忽略的 `charts/cellbox/values_local.yaml`。升级已有环境时维护原来的完整配置，保留仍在使用的 profile、存储路径和 Secret 引用。
+Use [`charts/cellbox/values.yaml`](../charts/cellbox/values.yaml) as the reference. Keep your overrides in `charts/cellbox/values_local.yaml`, which Git ignores. When you upgrade an existing installation, keep maintaining its full configuration, including the profiles, storage paths and Secret references still in use.
 
-| 配置 | 单机部署要求 |
+| Setting | Requirement for a single-node deployment |
 | --- | --- |
-| `server.nodeName` | 必填；填写实际 Kubernetes 节点名，单进程 server 固定运行在该节点 |
-| `api.replicas` | 保持 1；单机运行不扩容，由 Kubernetes Lease 选出唯一活动进程 |
-| `storage.hostPath` | 单一持久数据目录，默认 `/var/lib/cellbox-data`；保存 `cellbox.db`、构建日志和归档下载校验时的临时文件 |
-| `storage.existingClaim` | 可选；提供已有 PVC 后，数据目录改用该 PVC。未提供时使用 `storage.hostPath` |
-| `api.config.dataDir` | 保持 `/var/lib/cellbox-data`，它是唯一服务数据目录，不要覆盖为其他容器路径 |
-| `objectStorage.endpoint`、`bucket`、`region`、`prefix`、`pathStyle` | S3 兼容归档存储；未配置时归档 capture、download、restore、delete 返回 `UNSUPPORTED_CAPABILITY`。模板、operation 等元数据始终保存在 SQLite |
-| `objectStorage.credentialsSecret` | 引用同 namespace 中的已有 Secret；默认字段为 `OSS_ACCESS_KEY`、`OSS_SECRET_KEY`，可通过 `accessKeyKey` / `secretKeyKey` 修改字段名 |
-| `api.config.profiles` | 配置 profile ID、provider、镜像、CPU、内存、guest；Kubernetes profile 的 namespace 必须是 release namespace，`nodeName` 必须匹配 `server.nodeName`。示例结构见 [`config/sample.json`](../config/sample.json) |
-| `controller.nodeSelector` | 为单进程 server 提供节点平台约束；实际节点还会由 `server.nodeName` 固定。默认 Linux amd64 |
-| `controller.criDirectory` / `criSocket` | server 直接访问节点 CRI；普通 containerd 默认 `/run/containerd` / `/run/containerd/containerd.sock`，k3s 使用 `/run/k3s/containerd` / `/run/k3s/containerd/containerd.sock` |
-| `controller.warmPoolSize` | 单进程后台运行时循环的空闲预热槽位总预算，默认 2、允许 0–32；预热需求由节点上现有的 checkpoint 决定，见[预热池](warm-pool.md) |
-| `buildkit.enabled`、`repository` | 构建模板 revision 时需启用 BuildKit，并指定可推送的完整目标镜像仓库 |
-| `buildkit.registryCredentialsSecret` | 私有镜像仓库需要时，引用已有的 `kubernetes.io/dockerconfigjson` Secret |
-| `buildkit.registryHost` / `registryHTTP` | 本地 HTTP 测试仓库需显式配置；普通 HTTPS 仓库保持 HTTP 选项关闭 |
+| `server.nodeName` | Required. The name of the Kubernetes node. The single `cellbox-server` process is pinned to it. |
+| `server.image` | The server image. Set it to the image you built. |
+| `api.replicas` | Keep at 1. Single-node operation does not scale out; a Kubernetes Lease selects the one active process. |
+| `storage.hostPath` | The single durable data directory, default `/var/lib/cellbox-data`. Holds `cellbox.db`, build logs and temporary files used to validate archive downloads. |
+| `storage.existingClaim` | Optional. If you provide an existing PVC, the data directory uses it instead of `storage.hostPath`. |
+| `api.config.dataDir` | Keep `/var/lib/cellbox-data`. It is the only service data directory; do not override it with another container path. |
+| `objectStorage.endpoint`, `bucket`, `region`, `prefix`, `pathStyle` | S3-compatible archive storage. Without it, archive capture, download, restore and delete return `UNSUPPORTED_CAPABILITY`. Template and operation metadata is always stored in SQLite. |
+| `objectStorage.credentialsSecret` | Name of an existing Secret in the same namespace. The default keys are `OSS_ACCESS_KEY` and `OSS_SECRET_KEY`; change them with `accessKeyKey` / `secretKeyKey`. |
+| `api.config.profiles` | Profile ID, provider, image, CPU, memory and guest settings. For a Kubernetes profile, the namespace must be the release namespace and `nodeName` must match `server.nodeName`. See [`config/sample.json`](../config/sample.json) for the structure. |
+| `controller.nodeSelector` | Platform constraint for the server. The node is also fixed by `server.nodeName`. Default is Linux amd64. |
+| `controller.criDirectory` / `criSocket` | Where the server reaches the node's CRI. Plain containerd: `/run/containerd` and `/run/containerd/containerd.sock` (the defaults). k3s: `/run/k3s/containerd` and `/run/k3s/containerd/containerd.sock`. |
+| `controller.warmPoolSize` | Total budget of idle warm slots for the node, default 2, allowed 0-32. Demand comes from the checkpoints that exist on the node; see [warm pool](warm-pool.md). |
+| `buildkit.enabled`, `repository` | Building revisions needs BuildKit enabled and a full image repository that the build can push to. |
+| `buildkit.registryCredentialsSecret` | If the registry is private, reference an existing `kubernetes.io/dockerconfigjson` Secret. |
+| `buildkit.registryHost` / `registryHTTP` | Set these explicitly for a plain-HTTP registry. Leave the HTTP option off for a normal HTTPS registry. |
 
-服务元数据和模板 catalog 共用 `storage` 挂载中的 `cellbox.db`。库内只有 `templates`、`template_revisions`、`operations`（构建任务）和 `runtime_records` 四张业务表。`runtime_records` 只保存 sandbox、运行操作、执行记录、执行结果、归档元数据和 checkpoint 索引；查询直接读库，事务内使用的临时对象不保留为进程级数据副本。归档 payload 仅保存在配置的 S3 兼容对象存储中；本地 dataDir 只用于 SQLite、构建日志和下载校验的临时文件。
+Service metadata and the template catalog share one `cellbox.db` on the `storage` mount. The database has four business tables: `templates`, `template_revisions`, `operations` (build tasks) and `runtime_records`. `runtime_records` holds Boxes, running operations, Execs, exec results, archive metadata and the checkpoint index. Queries read the database directly. Archive payloads are stored only in the configured S3-compatible object storage; the local data directory holds only SQLite, build logs and temporary files for download validation.
 
-旧的 `state.json`、对象元数据账本和独立 `catalog.db` 不做自动转换。部署新版时使用新的数据目录；这里的改造没有迁移现存集群数据。
+An older `state.json`, object metadata ledger or separate `catalog.db` is not converted automatically. When you deploy this version, use a new data directory.
 
-Kubernetes profile 的 sandbox 期望状态和运行状态仍保存在 Cellbox 自定义资源中；gVisor checkpoint 文件仍放在节点的 `/var/lib/cellbox` 下。
+For Kubernetes profiles, the desired and observed state of each Box is still stored in Cellbox custom resources (API group `cellbox.jingyugao.github.io`). The gVisor checkpoint files stay on the node under `/var/lib/cellbox`.
 
-创建 template 或构建 revision 时不创建预热池。sandbox 暂停产生 checkpoint 后，后台会自动为它的兼容配置准备预热槽位，且受节点总预算限制；详细语义见[预热池](warm-pool.md)。
+Creating a template or building a revision does not create a warm pool. After a Box is suspended and produces a checkpoint, the background loop prepares warm slots for the matching configuration, within the node's total budget. See [warm pool](warm-pool.md) for the details.
 
-API 不内置客户端身份认证。外部访问应由前置 Gateway 校验身份并限制 Client 数据命名空间；`X-Cellbox-Client-ID` 本身不是认证凭据。Secret 正文不应写入版本控制中的 values 或文档。
+The API has no built-in client authentication. Put a gateway in front of it to authenticate callers and restrict the client data namespace; `X-Cellbox-Client-ID` is not an authentication credential. Do not write Secret values into version-controlled values files or documents.
 
-## 单进程与运行时状态
+## One process and its runtime state
 
-Helm 只部署一个 node-pinned `cellbox-server` Deployment；`cellbox-api` Service 名称保持不变，SDK 和现有端口转发继续使用它。server 内部通过函数调用和按 sandbox key 排队，把 API 生命周期写入与节点 reconcile 串起来；状态提交后，完成快照直接通知等待中的请求。Warm pool 和镜像预热请求也由进程内共享组件交接，不使用 ConfigMap 作为这些功能的进程间消息通道。
+Helm deploys a single node-pinned `cellbox-server` Deployment, exposed by the `cellbox-api` Service. Inside the server, API lifecycle writes and node reconciliation are linked by function calls and a queue per Box key. When state is committed, the completed snapshot notifies waiting requests directly. The warm pool and image warm-up requests are also handed over between in-process components, not through ConfigMaps.
 
-Kubernetes 仍保存 Cellbox 自定义资源，作为 sandbox 的持久期望状态、运行状态和 Pod/Service ownership 记录；实际 Pod 创建、删除及 CRI/gVisor checkpoint 操作仍由 Kubernetes 和节点运行时完成。因此合并缩短的是本地通知链路，不会消除 Kubernetes 持久化写入、Pod 生命周期操作或它们的等待时间。本文描述目标部署结构，不代表该 Chart 已部署到任何环境。
+Kubernetes still stores the Cellbox custom resources as the durable desired state, observed state and Pod/Service ownership record of each Box. Creating and deleting Pods, and CRI/gVisor checkpoint operations, are still performed by Kubernetes and the node runtime. Merging the API and the runtime shortens the local notification path; it does not remove Kubernetes writes, Pod lifecycle operations or their latency.
 
-由于 API 与节点运行时处于同一个进程容器，`cellbox-server` Pod 使用 `hostPID`、特权容器和 containerd、gVisor、`/var/lib/cellbox` 等宿主机挂载。只应把 `server.nodeName` 指向已准备并受信任的单机运行节点；不要按普通无特权 API Deployment 的安全边界部署。
+Because the API and the node runtime share one container, the `cellbox-server` Pod uses `hostPID`, runs privileged, and mounts host paths such as containerd, gVisor and `/var/lib/cellbox`. Point `server.nodeName` only at a node you have prepared and trust. Do not treat this Deployment like an ordinary unprivileged API Deployment.
 
-## 应用配置
+## Apply the configuration
 
-以下命令使用 Bash。先明确目标环境；当前仓库的独立测试环境为 `k3s` context、`cell-box-v2` namespace、`cellbox-v2` release，实际部署请替换为自己的值：
+The commands below use Bash. Choose your target environment first and replace the values:
 
 ```sh
-export CELLBOX_CONTEXT=k3s
-export CELLBOX_NAMESPACE=cell-box-v2
-export CELLBOX_RELEASE=cellbox-v2
+export CELLBOX_CONTEXT=<context>
+export CELLBOX_NAMESPACE=<namespace>
+export CELLBOX_RELEASE=<release>
 export CELLBOX_VALUES=charts/cellbox/values_local.yaml
 
 helm lint charts/cellbox -f "$CELLBOX_VALUES"
@@ -77,9 +80,9 @@ helm upgrade --install "$CELLBOX_RELEASE" charts/cellbox \
   -f "$CELLBOX_VALUES" --wait --timeout 10m
 ```
 
-升级时保持 `storage.hostPath` 或 `storage.existingClaim` 不变，这决定 SQLite 数据和构建日志的持久位置。S3 prefix 只影响归档对象的路径。
+On upgrade, keep `storage.hostPath` or `storage.existingClaim` unchanged. It decides where SQLite data and build logs persist. The S3 prefix affects only the path of archive objects.
 
-## 检查部署与调用
+## Check the deployment and call the API
 
 ```sh
 kubectl --context "$CELLBOX_CONTEXT" -n "$CELLBOX_NAMESPACE" get pods
@@ -89,13 +92,13 @@ kubectl --context "$CELLBOX_CONTEXT" -n "$CELLBOX_NAMESPACE" \
   logs deploy/cellbox-server -c server --tail=100
 ```
 
-在单独终端运行并保持端口转发：
+Run the port-forward in a separate terminal and keep it open:
 
 ```sh
 kubectl --context "$CELLBOX_CONTEXT" -n "$CELLBOX_NAMESPACE" \
   port-forward --address 127.0.0.1 svc/cellbox-api 18092:8090
 ```
 
-另一个终端设置 `CELLBOX_API_URL=http://127.0.0.1:18092`，按 [REST 快速开始](rest-quickstart.md)或 [Go SDK 指南](go-sdk.md)验证构建、创建、执行、文件访问和 suspend/resume。Pod 更新后，旧 port-forward 可能断开，需要重新建立。
+In another terminal, set `CELLBOX_API_URL=http://127.0.0.1:18092`. Then follow the [REST quickstart](rest-quickstart.md) or the [Go SDK guide](go-sdk.md) to check build, create, exec, file access and suspend/resume. An existing port-forward may break when the Pod is replaced; start it again.
 
-`cellbox-server` Running 不能替代完整功能验证。预热 Pod 的业务容器尚未启动时，Kubernetes 可能显示 `ContainerCreating`；以 revision 的 `/warm-pool` 状态中本进程维护的新鲜 `readySlots` 判断预热就绪。该就绪只用于恢复准备，不是业务应用健康。
+A Running `cellbox-server` Pod does not replace that functional check. A warm Pod whose business container has not started can show `ContainerCreating`. To decide whether warm-up is ready, read the fresh `readySlots` in the revision's `/warm-pool` status, which this process maintains. That readiness only means the slot is prepared for a resume; it says nothing about the health of the application.

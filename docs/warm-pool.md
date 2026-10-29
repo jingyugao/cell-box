@@ -1,104 +1,131 @@
-# 预热池
+# Warm pool
 
-预热池提前准备好 Pod 和 gVisor root sandbox，让 checkpoint 恢复（resume）不必在请求内创建 Pod。本文说明预热需求从哪里来、槽位怎么创建和回收、哪些请求会命中，以及怎么观察。接口字段见 [REST 快速开始](rest-quickstart.md)和 [Go SDK 指南](go-sdk.md)，调用链见[整体架构](architecture.md)。
+The warm pool prepares Pods and gVisor root sandboxes ahead of time, so resuming from a checkpoint does not have to create a Pod inside the request. This page explains where warm demand comes from, how slots are created and retired, which resumes hit the pool, and how to observe it. For API fields see the [REST quick start](rest-quickstart.md) and the [Go SDK guide](go-sdk.md); for the call chain see [architecture](architecture.md). Terms are defined in [concepts](concepts.md).
 
-## 1. 作用与边界
+With a warm-pool hit on the same node, the business process serves requests again in about 200 ms (see [the sample measurement](#8-sample-measurement) for the conditions).
 
-- 预热只服务 **resumable sandbox 的 checkpoint 恢复**。首次创建 sandbox 不领取预热槽，没有 checkpoint 的 Box 也用不上。
-- 空闲槽位里 `runsc create` 已完成，wrapper 在 root sandbox 的 `start` 路径等待领用。此时没有业务容器或 guest 程序在运行，`readySlots` 只表示槽位进入了这种等待状态，不表示业务就绪。
-- 因为 wrapper 一直阻塞在 `StartContainer` 里，Kubernetes 会把空闲槽位显示为 `ContainerCreating`，这是正常的。
-- 没有可用或匹配的槽位时，走普通 checkpoint 恢复路径，进程内存同样保持，只是慢一些。
+## 1. Scope
 
-## 2. 预热需求从哪里来
+- The pool serves **checkpoint resume only**. Creating a new Box never claims a slot, and a Box without a checkpoint cannot use one.
+- An idle slot is a Pod whose sandbox has been prepared but is not yet assigned to a Box. No Box-specific state is loaded and no business program runs in it. `readySlots` only means the slot reached this waiting state; it does not mean any application is ready.
+- The start call that waits for assignment does not return while the slot is idle, so Kubernetes shows an idle slot as `ContainerCreating`. This is expected.
+- With no usable matching slot, the resume takes the standard checkpoint restore path. Process memory is preserved in both cases; the standard path is slower.
 
-需求由**本节点上现有的 checkpoint** 决定，不由 revision 上的 `warmSlots` 决定。预热池循环每 500 ms 列出本节点的 Cellbox 自定义资源：
+### Two wrapper modes
 
-| 计入条件 | 说明 |
+How a slot waits depends on the environment the node's wrapper script sets (see [node installation](node-installation.md)). `CELLBOX_NO_ROOT_CONTAINER=true` creates the root sandbox without a root container process, and `CELLBOX_DEFER_CHECKPOINT=true` (which requires it) starts the warm sandbox without a checkpoint.
+
+| | Deferred mode (validated) | Standard mode |
+| --- | --- | --- |
+| Environment | `CELLBOX_NO_ROOT_CONTAINER=true` and `CELLBOX_DEFER_CHECKPOINT=true` | Neither variable set |
+| Root sandbox start | Starts immediately with `runsc restore --defer-checkpoint --background --detach` and no checkpoint | The wrapper blocks in the root sandbox `start` until a Box claims the slot |
+| Business container | Created ahead of time without Box-specific mounts; its `start` waits for assignment (`WaitWarm`, 60 s lease) | Not started before the claim |
+| After a claim | The wrapper verifies and consumes the checkpoint, binds HOME, then restores with `--background --background-load=<mode>` | The wrapper verifies and consumes the checkpoint, binds HOME, then restores with the same flags |
+
+Deferred mode is the one the warm pool is validated with. Run the standard mode only if you have validated it yourself. In our tests without these variables, warm-slot Pods failed to start (see the troubleshooting table in [node installation](node-installation.md)).
+
+`CELLBOX_BACKGROUND_LOAD` selects how checkpoint pages are loaded after a restore that binds a checkpoint: `lazy` (the default) reads pages when the application touches them, `eager` reads them all in the background. The wrapper passes it as `--background-load` to those restores, not to the deferred root restore, which has no checkpoint. In both modes the process resumes before all pages are loaded, so the first requests after a resume may be slower than later ones.
+
+## 2. Where demand comes from
+
+Demand is set by **the checkpoints that exist on this node**, not by `warmSlots` on a revision. Every 500 ms the pool loop lists the Cellbox custom resources for this node and counts a Box only if all of these hold:
+
+| Condition | Why |
 | --- | --- |
-| `spec.nodeName` 是本节点 | checkpoint 在节点本地，没有跨节点恢复 |
-| `status.phase` 是 `Suspended` | 正在暂停、正在恢复的不计入 |
-| `status.snapshot` 非空 | 恢复完成后旧 checkpoint 会被撤销，这样的 Box 不再计入 |
-| 未在删除 | |
+| `spec.nodeName` is this node | Checkpoints are node-local; there is no cross-node restore |
+| `status.phase` is `Suspended` | Boxes that are suspending or resuming are not counted |
+| `status.snapshot` is set | Once a restore has completed the old checkpoint is revoked, so such a Box no longer counts |
+| Not being deleted | |
 
-满足条件的 Box 按**兼容运行配置**分组。兼容指纹包含镜像、命令、环境变量、资源、Service 端口等，**忽略持久 HOME 和挂载**，所以挂载不同 HOME 的 Box 可以共用一个池。镜像相同本身不保证兼容。
+Counted Boxes are grouped by **compatible runtime configuration**. The compatibility fingerprint covers the image, command, environment, resources, Service ports and similar fields. It **ignores the persistent HOME and mounts**, so Boxes with different HOME volumes can share a pool. The same image alone does not guarantee compatibility.
 
-每个分组的槽位数：
+Slots per group:
 
-| 该分组的 checkpoint 数 | 槽位 |
+| Checkpoints in the group | Slots |
 | --- | --- |
-| 1–2 | 1 |
-| 3 个及以上 | 2（每组上限） |
+| 1-2 | 1 |
+| 3 or more | 2 (per-group maximum) |
 
-槽位对应的是**并发恢复**能力，不是 checkpoint 库存：2 个槽只能让同时到达的 2 个恢复命中，第 3 个会走普通恢复。
+Slots reflect **concurrent resume** capacity, not checkpoint stock. Two slots let two simultaneous resumes hit the pool; a third goes through the standard restore path.
 
-池的模板直接取自这些 Box 自己的规格（清除 HOME 和挂载后），所以池与要恢复的 Box 的指纹天然一致。
+The pool's Pod template is taken from the Boxes themselves (with HOME and mounts removed), so a pool always matches the fingerprint of the Boxes it serves.
 
-## 3. 回收
+## 3. Retirement
 
-- 项目归档、Box 被回收或恢复完成后，checkpoint 消失，需求随之下降，不需要手工改配置。
-- 一个分组的最后一个 checkpoint 消失后，**保留 1 个槽 20 分钟**再释放。恢复后的 Box 空闲一段时间会再次暂停，保留期避免每次 resume/suspend 都重建 Pod。保留计时只在内存里，server 重启后按现有 checkpoint 重算。
-- 已被 Box 领用的 Pod 不再属于池，回收预热需求不会删除它。
+- When a project is archived, a Box is deleted, or a restore completes, its checkpoint disappears and demand drops. No manual change is needed.
+- When the last checkpoint of a group disappears, **one slot is kept for 20 minutes** before release. A resumed Box suspends again after idling, and the grace period avoids recreating a Pod on every resume and suspend cycle. The timer lives in memory only; after a server restart demand is recomputed from the checkpoints that exist.
+- A Pod that a Box has claimed no longer belongs to the pool, and lowering demand does not delete it.
 
-## 4. 总预算
+## 4. Total budget
 
-| 项 | 值 |
+| Item | Value |
 | --- | --- |
-| 参数 | `controller.warmPoolSize`（`--warm-pool-size`），0–32，默认 2，0 关闭预热 |
-| 范围 | 每个节点一个预算，所有分组共享，按最大最小公平分配，每个分组不超过自己的需求 |
-| 轮换 | 为先建后继再退休老槽，空闲 Pod 数最多到预算加 1 |
-| 创建速度 | 每轮对账最多创建 1 个 Pod；刚有恢复请求（约 2 秒内）时暂缓创建，避免和恢复抢资源 |
+| Setting | `controller.warmPoolSize` (`--warm-pool-size`), 0-32, default 2; 0 disables the pool |
+| Scope | One budget per node, shared by all groups, allocated max-min fairly; no group gets more than it needs |
+| Rotation | A successor is created before an old slot is retired, so idle Pods can reach the budget plus 1 |
+| Creation rate | At most one Pod per reconcile pass; creation pauses for about 2 seconds after a resume starts, so it does not compete with it |
 
-预算只数个数，不看 CPU/内存。每个槽位是完整的 container 配置，Pod 的 requests/limits 与它服务的 revision 相同。**每个槽位大约每 45 秒整体轮换一次**，所以预算越大，持续的 `runsc create` 开销越大，预算应按"有 checkpoint 的镜像数 × 每组槽数"估计，不要无故调大。
+The budget counts Pods; it does not look at CPU or memory. Each slot has a full container configuration, and the Pod's requests and limits equal those of the revision it serves. Slots are replaced about every 45 seconds (the 60-second lease, with a successor created when under 15 seconds remain), so a larger budget means more continuous `runsc` and containerd work. Size it as the number of images with checkpoints times slots per group, and do not raise it without a reason.
 
-## 5. 槽位生命周期
+### Resource cost of idle slots
 
-1. 控制器创建带调度门控的 Pod（标签 `cellbox.jingyugao.github.io/warm-pool=true`，注解里记录兼容指纹）。
-2. 节点后端登记租约（`registered`），控制器去掉门控，Pod 被调度。
-3. wrapper 在 root sandbox 的 `start` 里绑定租约（`created`），开始等待（`waiting`），**租约 60 秒**。
-4. 剩余不足 15 秒时先建后继；不足 5 秒视为过期，整个 Pod 被删除并清理 runtime，Pod UID 不复用（`expired` / `retired`）。
-5. 恢复请求领用槽位：准备 checkpoint 和 ticket，租约变为 `claimed`，再变为 `restoring`，wrapper 执行 `restore`。此后该 Pod 属于这个 Box。
+- **Declared resources.** A slot's container copies the Box configuration, so its limits equal the revision's limits, but its CPU and memory **requests are 0**. An idle slot reserves nothing from the scheduler, and the limits only cap what a Box may use after it claims the slot. The `resources` fields in the warm-pool status report these configured values; they are not usage.
+- **Memory.** An idle slot holds no business program and no checkpoint data. Measured on one slot (2026-10-29, deferred mode, gVisor `cellbox-gvisor-20261029`), the processes belonging to it (containerd shim, the gVisor sandbox process and the waiting `runsc` process) used about 21-28 MiB of proportional set size, whatever the Box's memory limit. That is one sample on one machine; expect tens of MiB per slot, not hundreds.
+- **CPU.** An idle slot used no measurable CPU over a 20-second window. The cost is in creating and retiring slots: each slot is replaced about every 45 seconds, which runs `runsc create` and containerd calls continuously. Keep the budget small.
+- **Pod and IP.** Each slot is a real Pod and takes one Pod IP and one place under the node's Pod limit. During rotation the idle count can reach the budget plus one.
+- **Disk.** Slots add no checkpoint or HOME data. Those are written when a Box suspends, not when a slot is created.
 
-领用条件：Box 在本节点、有 checkpoint、指纹与某个 `waiting` 槽位一致、该槽位剩余租期不少于 5 秒，并且领用时校验 owner、Pod UID 和 snapshot。竞争失败或身份变化时跳过该槽位。
+## 5. Slot lifecycle
 
-回收空闲槽位时，容器可能仍处于"正在启动"状态（`StartContainer` 还没有从 wrapper 返回）。containerd 会拒绝此时的删除，错误里带 `is in starting state`，清理逻辑把它当作可重试的暂态，在删除窗口内继续等待。事件里出现 `OCI runtime start failed: warm slot retired` 是 wrapper 被叫醒后的正常退出。
+1. The controller creates a Pod with a scheduling gate (`cellbox.jingyugao.github.io/prepared`), the label `cellbox.jingyugao.github.io/warm-pool=true`, and an annotation holding the compatibility fingerprint.
+2. The node backend registers a lease (`registered`) and the controller removes the gate, so the Pod is scheduled.
+3. The wrapper binds the lease when the root sandbox is created (`created`). It then starts waiting (`waiting`), with a **60-second lease**. In deferred mode the wait happens in the business container's `start`; in standard mode it happens in the root sandbox's `start`.
+4. When under 15 seconds remain, the controller creates a successor. When under 5 seconds remain, the slot counts as expired and the whole Pod is deleted and its runtime state cleaned up. A Pod UID is never reused (`expired` / `retired`).
+5. A resume claims the slot: the node prepares the checkpoint and ticket, the lease becomes `claimed` and then `restoring`, and the wrapper restores. From then on the Pod belongs to that Box.
 
-## 6. 与 `warmSlots` 的关系
+A slot can be claimed when the Box is on this node, has a checkpoint, its fingerprint matches a `waiting` slot, and that slot has at least 5 seconds of lease left. The claim checks the owner, Pod UID and snapshot. A slot that is lost in a race, or whose identity changed, is skipped.
 
-`defaultWarmSlots` 和 revision 的 `warmSlots` 字段仍可读写，但**不再产生预热需求**，把它改成 0 也不会关闭预热。现在它们的作用只是把某个 revision 关联到服务它的池：
+After a claim the node confirms the execution through the local CRI (`ListPodSandbox`, `ListContainers`, `PodSandboxStatus`) rather than waiting for kubelet to publish Pod status. The Pod IP is stored in the Cellbox custom resource under `status.execution`, and requests to the Box go straight to that Pod IP on port 40000, not through the Service.
 
-- `GET /v1/template-revisions/{id}/warm-pool` 的 `desiredSlots` 仍是配置的 `warmSlots`，只用于回显。
-- `pool.requestedSlots` 才是由 checkpoint 推导出的需求，`pool.allocatedSlots` 是受节点预算限制后的分配量。
-- revision 的规格与某个现有池一致时，`pool` 才有值；没有 checkpoint 时 `pool` 为 `null`，这是正常的。
-- 要停用预热，把 `controller.warmPoolSize` 设为 0。
+When an idle slot is retired, its container may still be in the starting state (the start call has not returned from the wrapper). containerd rejects the delete with an error containing `is in starting state`; cleanup treats this as retryable and keeps trying inside the delete window. An event containing `OCI runtime start failed: warm slot retired` is the wrapper exiting normally after it was woken.
 
-## 7. 观察与排查
+## 6. Relation to `warmSlots`
 
-| 现象 | 含义 |
+`defaultWarmSlots` and the revision's `warmSlots` can still be read and written, but they **no longer create warm demand**, and setting them to 0 does not disable warming. Their only remaining role is linking a revision to the pool that serves it:
+
+- `desiredSlots` in `GET /v1/template-revisions/{id}/warm-pool` still shows the configured `warmSlots`. It is informational.
+- `pool.requestedSlots` is the demand derived from checkpoints, and `pool.allocatedSlots` is the amount after the node budget is applied.
+- `pool` has a value only when the revision's spec matches an existing pool. With no checkpoints, `pool` is `null`, which is normal.
+- To disable warming, set `controller.warmPoolSize` to 0.
+
+## 7. Observing and troubleshooting
+
+| Observation | Meaning |
 | --- | --- |
-| 没有任何 checkpoint 时没有 `cb-warm-*` Pod | 正常，需求为 0 |
-| `cb-warm-*` 显示 `ContainerCreating` | 正常，wrapper 在等待领用；以 `readySlots` 判断就绪 |
-| `requestedSlots` 大于 `allocatedSlots` | 节点预算不够，调大 `warmPoolSize` 或确认是否有无用的分组 |
-| 恢复比预期慢 | 先看是否命中：槽位数不足、租约不足 5 秒、指纹不一致或节点不同都会走普通恢复 |
-| 日志里 `warm pool reconcile failed ... starting state` | 旧版本的回收竞争，当前版本会重试，不应再出现 |
+| No `cb-warm-*` Pods when there are no checkpoints | Normal; demand is 0 |
+| `cb-warm-*` shows `ContainerCreating` | Normal; the slot is waiting for a claim. Use `readySlots` to judge readiness |
+| `requestedSlots` is greater than `allocatedSlots` | The node budget is too small. Raise `warmPoolSize`, or check for groups you do not need |
+| Resume is slower than expected | Check for a miss first: too few slots, under 5 seconds of lease left, a different fingerprint, or a different node all use the standard path |
+| Log line `warm pool reconcile failed ... starting state` | A retirement race in older versions; the current version retries and it should not appear |
 
-`failedSlots` 统计当前失败态的预热 Pod，以及最近 15 秒内记录、但已清理的创建失败。`stale` 与 `observedAt` 用于判断 controller 观察是否新鲜，超过约 15 秒会标记为过期。
+`failedSlots` counts warm Pods currently in a failed state, plus creation failures recorded in the last 15 seconds that have since been cleaned up. `stale` and `observedAt` show whether the controller's observation is fresh; it is marked stale after about 15 seconds.
 
-## 8. 性能参考
+## 8. Sample measurement
 
-下面是 2026-10-27 在 perf 环境（k3s 单节点，节点磁盘在 NVMe）上的实测，每组样本很少，只用于说明量级，不是性能承诺：
+The numbers below are one sample from a single machine (a single-node k3s cluster with the node disk on NVMe, measured on 2026-10-27), with few runs per case. They show order of magnitude only and are not a performance guarantee.
 
-| 场景 | resume 延迟 |
+| Scenario | Resume latency |
 | --- | --- |
-| 单个 Box 串行 resume，命中预热（8 次） | 176–224 ms |
-| 4 个 Box 并发 resume，2 个槽：命中的 2 个（4 轮） | 263–341 ms |
-| 同一轮里未命中的另外 2 个（4 轮） | 876–967 ms |
+| One Box, serial resumes, warm-pool hit (8 runs) | 176-224 ms |
+| 4 Boxes resuming concurrently with 2 slots: the 2 that hit (4 rounds) | 263-341 ms |
+| The other 2 in the same rounds, which missed (4 rounds) | 876-967 ms |
 
-节点磁盘对结果影响很大：同一环境里，虚拟磁盘放在机械盘上时命中约 2.7 s、未命中约 7.1 s，主要被 fsync 拖慢。生产云盘的写延迟在毫秒级，建议在目标环境里自行测量。
+Disk speed has a large effect. On the same machine with the virtual disk on a spinning drive, hits took about 2.7 s and misses about 7.1 s, mostly from fsync latency. Measure in your own environment.
 
-## 9. 已知限制
+## 9. Known limits
 
-- 只对 `Suspended` 且有 checkpoint 的 Box 预热，首次创建不加速。
-- 每个分组最多 2 个槽，同一镜像的并发恢复超过槽数时，多出的请求走普通恢复。
-- 预算是节点级的，所有分组共享；预热不区分业务重要性。
-- 升级到这套行为时，已有空闲槽的指纹会变化，会被回收后重建一次。
-- 槽位大约每 45 秒轮换一次，持续消耗 `runsc create` 的 CPU 和 containerd 的 RPC。
+- Only `Suspended` Boxes with a checkpoint are warmed; creating a new Box is not faster.
+- Each group has at most 2 slots. Concurrent resumes beyond the slot count take the standard path.
+- The budget is per node and shared by all groups. The pool does not rank workloads by importance.
+- When upgrading to this behavior, the fingerprint of existing idle slots changes, so they are retired and recreated once.
+- Slots are replaced about every 45 seconds, which continuously costs `runsc` CPU and containerd RPCs.
