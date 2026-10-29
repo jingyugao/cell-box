@@ -21,7 +21,7 @@ import urllib.request
 
 
 CLIENT_ID = "waitports-e2e-20261029"
-BASE_IMAGE = "192.168.133.1:5001/cellbox-perf-counter@sha256:ea985da4418bc0f038881c244fd71d9a9f7f9febfd68d6f2d7a3270603ad8297"
+BASE_IMAGE = "192.168.133.1:5001/mybox@sha256:e2aa919642df6fd323da2a5e8136f7b8061ea9bdcfee03f91f9089fa5b52388d"
 PROFILE_ID = "cocell-k8s-resumable"
 MANAGEMENT_PORT = 40000
 APP_PORT = 8000
@@ -157,6 +157,14 @@ class ResumePorts:
     def service(self, box_id, port, path="", *, raw=False):
         return self.request("GET", f"/v1/boxes/{self.api_path(box_id)}/services/{port}/{path}", raw=raw, timeout=12)
 
+    def service_request(self, box_id, port, path, method, data=None, *, raw=False):
+        return self.request(method, f"/v1/boxes/{self.api_path(box_id)}/services/{port}/{path}", data,
+                            raw=raw, timeout=12)
+
+    @staticmethod
+    def same_instance(before, after):
+        return before.get("instance") == after.get("instance") and before.get("pid") == after.get("pid")
+
     def initial_state(self, box_id, seconds=60):
         deadline = time.monotonic() + seconds
         last = None
@@ -180,23 +188,65 @@ class ResumePorts:
         return template
 
     def create_revision(self, template_id, label):
-        workspace = "/home/agent/workspace"
-        run = ("docker run -e COUNTER_MEMORY_MIB=1 -e COUNTER_MARKER_PATH=" + workspace + "/marker"
-               + " --workdir " + workspace + " " + BASE_IMAGE + " /server")
-        placeholder = shlex.quote("#!/bin/sh\nexit 127\n")
-        tools = ("mkdir -p /opt/cellbox/tools"
-                 + " && printf %s " + placeholder + " > /opt/cellbox/tools/cocell-proxy"
-                 + " && chmod 0755 /opt/cellbox/tools/cocell-proxy"
-                 + " && chown 0:0 /opt/cellbox/tools/cocell-proxy"
-                 + " && printf %s " + placeholder + " > /opt/cellbox/tools/cocell-archive-restore"
-                 + " && chmod 0755 /opt/cellbox/tools/cocell-archive-restore"
-                 + " && chown 0:0 /opt/cellbox/tools/cocell-archive-restore")
+        app = '''import json, os, threading, time, uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+STATE = {"instance": uuid.uuid4().hex, "count": 0, "started": time.time(), "pid": os.getpid()}
+extra = None
+
+class ExtraHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"ok\\n"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *_):
+        pass
+
+class Handler(BaseHTTPRequestHandler):
+    def reply(self, code, value):
+        body = json.dumps(value).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        if self.path != "/state":
+            self.reply(404, {"error": "not found"})
+            return
+        STATE["count"] += 1
+        self.reply(200, STATE)
+    def do_POST(self):
+        global extra
+        if self.path == "/open-extra":
+            if extra is None:
+                extra = ThreadingHTTPServer(("0.0.0.0", 8011), ExtraHandler)
+                threading.Thread(target=extra.serve_forever, daemon=True).start()
+            self.reply(200, {"listening": 8011})
+        elif self.path == "/close-extra":
+            if extra is not None:
+                extra.shutdown()
+                extra.server_close()
+                extra = None
+            self.reply(200, {"closed": 8011})
+        else:
+            self.reply(404, {"error": "not found"})
+    def log_message(self, *_):
+        pass
+
+ThreadingHTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
+'''
+        build = "mkdir -p /opt/cellbox && cat > /opt/cellbox/port-test.py <<'CELLBOX_E2E_PY'\n" + app + "CELLBOX_E2E_PY\nchmod 0644 /opt/cellbox/port-test.py"
+        run = ("docker run --entrypoint /usr/local/bin/python3 --workdir /home/agent/workspace "
+               + BASE_IMAGE + " /opt/cellbox/port-test.py")
         op = self.submit("/v1/templates/" + self.api_path(template_id) + "/revisions", {
             "userVersion": "1.01",
             "profileId": PROFILE_ID,
             "baseImage": BASE_IMAGE,
             "runCommand": run,
-            "buildCommand": tools,
+            "buildCommand": build,
             "warmSlots": 0,
         })
         operation = self.wait(op)
@@ -317,20 +367,20 @@ class ResumePorts:
             time.sleep(0.5)
         raise TimeoutError(f"Guest control did not become reachable for {box_id}: {last}")
 
-    def wait_guest_instance(self, pod_ip, expected_instance, seconds=120):
+    def wait_guest_instance(self, pod_ip, expected_state, seconds=120):
         url = f"http://{pod_ip}:{MANAGEMENT_PORT}/proxy/{APP_PORT}/state"
         deadline = time.monotonic() + seconds
         last = None
         while time.monotonic() < deadline:
             try:
                 state = json.loads(self.ssh_curl(url, timeout=12))
-                if state.get("instance") != expected_instance:
-                    raise RuntimeError("exact-image Guest serves a different counter instance; refusing to execute inside it")
+                if not self.same_instance(expected_state, state):
+                    raise RuntimeError("exact-image Guest serves a different counter instance or PID; refusing to execute inside it")
                 return state
             except (OSError, ValueError, subprocess.TimeoutExpired) as error:
                 last = str(error)
             except RuntimeError as error:
-                if "different counter instance" in str(error):
+                if "different counter instance or PID" in str(error):
                     raise
                 last = str(error)
             time.sleep(0.5)
@@ -386,8 +436,8 @@ class ResumePorts:
         if resumed.get("phase") != "running":
             raise RuntimeError("legacy default resume did not reach running: " + json.dumps(resumed))
         legacy_result = {"operationId": op["id"], "resumeSeconds": round(first_state_started - started, 3), "firstRequestSeconds": round(time.monotonic() - first_state_started, 3), "firstState": first_state}
-        if first_state.get("instance") != initial.get("instance"):
-            raise RuntimeError("legacy resume changed the counter instance: " + json.dumps({"before": initial, "after": first_state}))
+        if not self.same_instance(initial, first_state):
+            raise RuntimeError("legacy resume changed the counter instance or PID: " + json.dumps({"before": initial, "after": first_state}))
         self.state["evidence"]["legacyResume"] = legacy_result
         self.save()
         self.suspend_box(legacy["id"])
@@ -401,8 +451,8 @@ class ResumePorts:
         self.suspend_box(box["id"])
         self.action(box["id"], "resume", [MANAGEMENT_PORT, APP_PORT])
         first_after_resume = self.service(box["id"], APP_PORT, "state")
-        if first_after_resume.get("instance") != initial_new.get("instance"):
-            raise RuntimeError("custom-port resume changed the counter instance")
+        if not self.same_instance(initial_new, first_after_resume):
+            raise RuntimeError("custom-port resume changed the counter instance or PID")
         self.state["evidence"]["customResume"] = {"ports": [MANAGEMENT_PORT, APP_PORT], "state": first_after_resume, "observedAt": utc_now()}
         self.save()
 
@@ -427,20 +477,18 @@ class ResumePorts:
         old_pod_uid = (before_warm.get("pod") or {}).get("metadata", {}).get("uid")
         runtime, pod_ip = self.current_pod_ip(box["id"], revision["image"], old_pod_uid)
         self.wait_guest_control(box["id"], pod_ip)
-        observed_state = self.wait_guest_instance(pod_ip, initial_new.get("instance"))
+        observed_state = self.wait_guest_instance(pod_ip, initial_new)
         observed_op = self.get_operation(pending_op["id"])
         if observed_op.get("status") not in ("queued", "running"):
             raise RuntimeError("resume should remain pending while port 8011 is absent: " + json.dumps(observed_op))
         self.state["evidence"]["delayedResume"].update({
             "pendingObservedAt": utc_now(), "pendingStatus": observed_op.get("status"),
-            "runtimeAtPending": runtime, "podIP": pod_ip,
+            "runtimeAtPending": runtime, "podIP": pod_ip, "verifiedGuestState": observed_state,
         })
         self.save()
 
-        command = "mkdir -p /tmp/port-test; echo ok > /tmp/port-test/index.html; httpd -p 8011 -h /tmp/port-test"
-        exec_result = self.ssh_curl(f"http://{pod_ip}:{MANAGEMENT_PORT}/v1/exec", post_json={
-            "argv": ["sh", "-ec", command], "timeoutMs": 5000,
-        }, timeout=15)
+        exec_result = self.ssh_curl(f"http://{pod_ip}:{MANAGEMENT_PORT}/proxy/{APP_PORT}/open-extra",
+                                    post_json={}, timeout=15)
         self.state["evidence"]["startDelayedListener"] = {"response": exec_result, "sentAt": utc_now()}
         self.save()
         self.wait(pending_op)
@@ -449,8 +497,8 @@ class ResumePorts:
         if body.strip() != b"ok":
             raise RuntimeError("public service 8011 returned unexpected content: " + repr(body[:500]))
         final_state = self.service(box["id"], APP_PORT, "state")
-        if final_state.get("instance") != initial_new.get("instance"):
-            raise RuntimeError("warm resume changed the counter instance")
+        if not self.same_instance(initial_new, final_state):
+            raise RuntimeError("warm resume changed the counter instance or PID")
         after_warm = self.runtime(box["id"])
         old_pod = (before_warm.get("pod") or {}).get("metadata", {}).get("uid")
         new_pod = (after_warm.get("pod") or {}).get("metadata", {}).get("uid")
@@ -470,7 +518,7 @@ class ResumePorts:
         self.state["verifiedAt"] = utc_now()
         self.save()
 
-        self.execute(box["id"], 'kill "$(pidof httpd)"')
+        self.service_request(box["id"], APP_PORT, "close-extra", "POST", {})
         failed_box, failed_runtime = self.wait_health_failure(box["id"], 25)
         pod = failed_runtime.get("pod")
         if not pod:
@@ -486,16 +534,6 @@ class ResumePorts:
         self.state["verifiedAt"] = utc_now()
         self.save()
         print(json.dumps({"phase": self.state["phase"], "legacy": legacy_result, "warmResume": warm_evidence, "healthFailure": {"boxPhase": failed_box.get("phase"), "crPhase": failed_runtime["cr"].get("status", {}).get("phase"), "serving": serving}}, indent=2))
-
-    def execute(self, box_id, command):
-        box = self.box(box_id)
-        body = {"argv": ["/bin/sh", "-ec", command], "expectedGeneration": box.get("generation"), "timeoutMs": 15000}
-        op = self.submit(f"/v1/boxes/{self.api_path(box_id)}/execs", body)
-        op = self.wait(op)
-        execution = self.request("GET", "/v1/execs/" + self.api_path((op.get("result") or {}).get("execId", "")))
-        if execution.get("state") != "exited" or (execution.get("result") or {}).get("exitCode") != 0:
-            raise RuntimeError("Box command failed: " + json.dumps(execution))
-        return execution
 
     def wait_health_failure(self, box_id, seconds):
         deadline = time.monotonic() + seconds
