@@ -44,6 +44,13 @@ func (b *Backend) ResumeGuest(ctx context.Context, w *api.ResumablePod, p *core.
 	if err != nil {
 		return fmt.Errorf("create guest resume request")
 	}
+	instanceID, err := guestapi.InstanceIDFromArgs(w.Spec.Container.Args)
+	if err != nil {
+		return err
+	}
+	if instanceID != "" {
+		req.Header.Set(guestapi.InstanceIDHeader, instanceID)
+	}
 	transport := &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: resumeGuestTimeout, KeepAlive: 30 * time.Second}).DialContext}
 	client := &http.Client{
 		Transport: transport,

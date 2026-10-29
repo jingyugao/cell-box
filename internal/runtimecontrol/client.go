@@ -28,14 +28,15 @@ type Snapshot struct {
 // controller's keyed queue, so different sandboxes can run concurrently.
 type Client struct {
 	client.Client
-	locks    [64]sync.Mutex
-	mu       sync.Mutex
-	queue    workqueue.TypedRateLimitingInterface[reconcile.Request]
-	pending  map[types.NamespacedName]struct{}
-	subs     map[types.NamespacedName]map[chan Snapshot]snapshotVersion
-	journal  *Journal
-	syncMu   sync.Mutex
-	syncWake chan struct{}
+	locks     [64]sync.Mutex
+	mu        sync.Mutex
+	queue     workqueue.TypedRateLimitingInterface[reconcile.Request]
+	pending   map[types.NamespacedName]struct{}
+	subs      map[types.NamespacedName]map[chan Snapshot]snapshotVersion
+	journal   *Journal
+	endpoints map[types.NamespacedName]GuestEndpoint
+	syncMu    sync.Mutex
+	syncWake  chan struct{}
 }
 
 type snapshotVersion struct {
@@ -110,6 +111,7 @@ func (c *Client) lock(key types.NamespacedName) func() {
 func (c *Client) publish(key types.NamespacedName, w *api.ResumablePod, deleted bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.projectEndpoint(key, w, deleted)
 	version := snapshotVersion{deleted: deleted, initialized: true}
 	if w != nil {
 		version.uid = w.UID

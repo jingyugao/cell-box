@@ -399,7 +399,7 @@ func (p *Provider) resume(ctx context.Context, r record, transition string, port
 	if _, err := p.run(ctx, "restore", "--detach", "--bundle="+filepath.Join(p.dir(r.Handle.Name), "bundle"), "--image-path="+p.snapshotPath(r), r.Handle.ID); err != nil {
 		return p.failTransition(r, err)
 	}
-	if err := waitPortsListening(ctx, r.Network.Guest, ports); err != nil {
+	if err := waitPortsListening(ctx, r.Network.Guest, ports, r.Spec.Config.Env[guestapi.InstanceIDEnv]); err != nil {
 		return p.failTransition(r, err)
 	}
 	s, err := p.state(ctx, r.Handle.ID)
@@ -417,7 +417,7 @@ func (p *Provider) resume(ctx context.Context, r record, transition string, port
 	return nil
 }
 
-func waitPortsListening(ctx context.Context, guest string, ports []int) error {
+func waitPortsListening(ctx context.Context, guest string, ports []int, instanceID string) error {
 	values := make(url.Values, 1)
 	portStrings := make([]string, len(ports))
 	for i, port := range ports {
@@ -437,6 +437,9 @@ func waitPortsListening(ctx context.Context, guest string, ports []int) error {
 		if err != nil {
 			return err
 		}
+		if instanceID != "" {
+			req.Header.Set(guestapi.InstanceIDHeader, instanceID)
+		}
 		response, err := client.Do(req)
 		if err == nil {
 			status := response.StatusCode
@@ -446,7 +449,7 @@ func waitPortsListening(ctx context.Context, guest string, ports []int) error {
 				if len(ports) != 1 || ports[0] != guestapi.Port {
 					return fmt.Errorf("%w: restored Guest cannot inspect custom ports", boxprovider.ErrUnsupported)
 				}
-				return unquiesceLegacyGuest(ctx, client, guest)
+				return unquiesceLegacyGuest(ctx, client, guest, instanceID)
 			}
 			if status != http.StatusOK {
 				_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
@@ -482,10 +485,13 @@ func waitPortsListening(ctx context.Context, guest string, ports []int) error {
 	}
 }
 
-func unquiesceLegacyGuest(ctx context.Context, client *http.Client, guest string) error {
+func unquiesceLegacyGuest(ctx context.Context, client *http.Client, guest, instanceID string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://%s:%d/v1/unquiesce", guest, guestapi.Port), nil)
 	if err != nil {
 		return err
+	}
+	if instanceID != "" {
+		req.Header.Set(guestapi.InstanceIDHeader, instanceID)
 	}
 	response, err := client.Do(req)
 	if err != nil {

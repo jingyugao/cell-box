@@ -41,10 +41,10 @@ func (s *Service) internalService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	prefix := "/v1/boxes/" + url.PathEscape(b.Box.ID) + "/services/" + r.PathValue("port")
-	s.proxyService(w, r, ctx, conn, port, "/"+r.PathValue("path"), strings.TrimPrefix(r.URL.EscapedPath(), prefix))
+	s.proxyService(w, r, ctx, conn, b.GuestIdentity, port, "/"+r.PathValue("path"), strings.TrimPrefix(r.URL.EscapedPath(), prefix))
 }
 
-func (s *Service) proxyService(w http.ResponseWriter, r *http.Request, ctx context.Context, conn boxprovider.Connection, port int, tail, escapedTail string) {
+func (s *Service) proxyService(w http.ResponseWriter, r *http.Request, ctx context.Context, conn boxprovider.Connection, instanceID string, port int, tail, escapedTail string) {
 	target, err := url.Parse(conn.URL)
 	if err != nil {
 		fail(w, err)
@@ -61,6 +61,9 @@ func (s *Service) proxyService(w http.ResponseWriter, r *http.Request, ctx conte
 			if strings.HasPrefix(lower, "x-cellbox-") || strings.HasPrefix(lower, "x-forwarded-") || lower == "forwarded" || lower == "proxy-authorization" {
 				p.Out.Header.Del(name)
 			}
+		}
+		if instanceID != "" {
+			p.Out.Header.Set(guestapi.InstanceIDHeader, instanceID)
 		}
 	}, Transport: streamTransport{s.http.Transport}, ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 		fail(w, apiError("UPSTREAM_UNAVAILABLE", "Box service is unavailable"))
