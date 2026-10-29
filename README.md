@@ -67,6 +67,7 @@ No cluster? The [local quick start](docs/local-quickstart.md) runs Cellbox on on
 | [Node installation](docs/node-installation.md) | gVisor build, wrapper, containerd handler |
 | [Local quick start](docs/local-quickstart.md) | Run on one Linux host without Kubernetes |
 | [Deployment](docs/deployment.md) | Image, Helm values, upgrade |
+| [Configuration](docs/configuration.md) | Every flag, configuration field, environment variable and Helm value |
 | [Usage](docs/cellbox-usage.md) | Templates, revisions and the sandbox lifecycle |
 | [REST quick start](docs/rest-quickstart.md) | `curl` examples |
 | [Go SDK](docs/go-sdk.md) | Client usage and examples |
