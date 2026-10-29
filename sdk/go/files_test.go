@@ -12,7 +12,7 @@ import (
 )
 
 func TestFilesPreserveBinaryDataAndEncodeWorkspacePaths(t *testing.T) {
-	name := "folder/工具 #?&.bin"
+	name := "folder/\u5de5\u5177 #?&.bin"
 	data := []byte{0, 255, 128, '\n', '"'}
 	var writes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
