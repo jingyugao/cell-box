@@ -95,4 +95,4 @@ sandbox 的 runtime generation 与模板元数据 generation 是不同概念。�
 
 销毁 sandbox 使用 `POST /v1/boxes/{id}:destroy` 或 SDK `Destroy`，并等待完成。它不会隐式取消正在执行的命令。示例程序会尝试清理自己创建的 sandbox，但保留 template 与 revision；真实业务也应使用独立的清理超时并处理失败。
 
-归档仅支持暂停状态或失败的 Kubernetes sandbox，且必须有持久 HOME、节点归档支持和已配置的 S3 兼容对象存储；不会自动暂停或自动恢复源 sandbox。恢复会创建新的空白暂存 sandbox，配置凭据后由调用方显式激活；恢复失败的候选实例不会自动重试，应由调用方销毁。Docker 不支持归档和恢复。具体请求见 [OpenAPI](../api/openapi.yaml)。历史预热性能数据保存在[性能报告](reports/cellbox-warm-pool-performance-report.md)，该报告描述指定旧版本，不替代当前接口与运行语义。
+归档仅支持暂停状态或失败的 Kubernetes sandbox，且必须有持久 HOME、节点归档支持和已配置的 S3 兼容对象存储；不会自动暂停或自动恢复源 sandbox。恢复会创建新的空白暂存 sandbox，配置凭据后由调用方显式激活；恢复失败的候选实例不会自动重试，应由调用方销毁。Docker 不支持归档和恢复。具体请求见 [OpenAPI](../api/openapi.yaml)。

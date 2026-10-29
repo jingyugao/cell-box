@@ -4,6 +4,9 @@ SHELL := /bin/bash
 
 OUT ?= dist/release
 LOCAL_ARCH ?= $(shell go env GOARCH)
+# Go package roots. Listed explicitly so scratch directories such as tmp/ are never built or tested.
+PKGS := ./api/... ./cmd/... ./internal/... ./test/...
+SRC_DIRS := api cmd internal sdk/go test
 LOCAL_PACKAGE := dist/cellbox-local-runsc-linux-$(LOCAL_ARCH).tar.gz
 
 .PHONY: build check test vet fmt package local-package
@@ -17,20 +20,12 @@ build:
 	module=$$(go list -m)
 	if [[ -n $$(git status --porcelain) ]]; then revision=$$revision-dirty; fi
 	mkdir -p "$$out"
-	for obsolete in cellbox-runtime-config box-service cellbox cellbox-guest cellbox-image cellbox-gateway resumablepod-controller resumablepod-runtime resumablepod-gateway server Dockerfile GatewayDockerfile README.rst cellbox-api cellbox-node-controller; do
-		if [[ -f "$$out/$$obsolete" ]]; then rm -- "$$out/$$obsolete"; fi
-	done
 	ldflags="-s -w -X $$module/internal/version.Version=$$version -X $$module/internal/version.Revision=$$revision"
 	CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags "$$ldflags" -o "$$out/cellbox-server" ./cmd/cellbox-server
 	CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -o "$$out/cellbox-container-agent" ./cmd/cellbox-container-agent
 	CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags "$$ldflags" -o "$$out/cellbox-runsc-wrapper" ./cmd/cellbox-runsc-wrapper
 	cp -r charts examples images "$$out/"
-	rm -f -- "$$out/charts/cellbox/values_local.yaml" "$$out/charts/cellbox/values-k3s.yaml" "$$out/images/controller/install-k8s-node.sh"
-	rm -f -- "$$out/images/cellbox-api.Dockerfile" "$$out/images/controller.Dockerfile"
-	rm -f -- "$$out/charts/cellbox/templates/controller.yaml" "$$out/charts/cellbox/templates/controller-access.yaml"
-	rm -f -- "$$out/charts/cellbox/templates/gateway.yaml" "$$out/charts/cellbox/templates/gateway-access.yaml"
-	rm -f -- "$$out/images/controller/install-k3s-node.sh" "$$out/images/controller/runtime.toml" "$$out/images/controller/install-node.sh" "$$out/images/controller/install-gvisor.sh" "$$out/images/controller/runsc.toml"
-	rm -f -- "$$out/test/scripts/test-node-install.sh" "$$out/test/scripts/e2e-bootstrap.sh"
+	rm -f -- "$$out/charts/cellbox/values_local.yaml"
 	mkdir -p "$$out/test" "$$out/config" "$$out/api"
 	cp -r test/scripts "$$out/test/"
 	cp -r test/fixtures "$$out/test/"
@@ -42,27 +37,22 @@ build:
 	if [[ -d docs ]]; then cp -r docs "$$out/"; fi
 	mkdir -p "$$out/sdk"
 	cp -r sdk/go "$$out/sdk/"
-	# Remove Markdown left by older builds; never publish local scratch notes.
-	docs_out="$$out/tmp/docs"
-	[[ ! -L $$docs_out ]] || { echo "Refusing to replace symlinked documentation directory: $$docs_out" >&2; exit 1; }
-	for old_doc in "$$docs_out"/*.md; do if [[ -f $$old_doc ]]; then rm -- "$$old_doc"; fi; done
-	if [[ -d $$docs_out ]]; then rmdir --ignore-fail-on-non-empty "$$docs_out"; fi
-	if [[ -d $$out/tmp ]]; then rmdir --ignore-fail-on-non-empty "$$out/tmp"; fi
 	printf 'Release directory: %s\n' "$$out"
 
 test:
-	go test -race ./...
+	go test -race $(PKGS)
 	cd sdk/go && go test -race ./...
 
 vet:
-	go vet ./...
+	go vet $(PKGS)
 	cd sdk/go && go vet ./...
 
 check: test vet
+	@unformatted=$$(gofmt -l $(SRC_DIRS)); [[ -z $$unformatted ]] || { echo "gofmt needed:"; echo "$$unformatted"; exit 1; }
 	@for script in test/scripts/*.sh; do bash -n "$$script"; done
 
 fmt:
-	gofmt -w api cmd internal sdk/go test
+	gofmt -w $(SRC_DIRS)
 
 package:
 	@set -u
