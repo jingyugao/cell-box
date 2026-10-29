@@ -154,6 +154,7 @@ func TestEmbeddedResumeDispatchAndCompletionNeedNoKubernetesWatch(t *testing.T) 
 	w.Status.Cycle = 2
 	w.Status.ObservedGeneration = w.Generation
 	w.Status.ObservedTransitionID = "previous"
+	w.Status.ResumePath = api.ResumePathWarmPool
 	if err = local.Status().Update(ctx, w); err != nil {
 		t.Fatal(err)
 	}
@@ -165,6 +166,9 @@ func TestEmbeddedResumeDispatchAndCompletionNeedNoKubernetesWatch(t *testing.T) 
 	if wrongTransition.Phase != "running" || wrongTransition.TransitionID != "resume" || wrongTransition.ObservedTransitionID != "previous" {
 		t.Fatalf("wrong-transition observation = %+v", wrongTransition)
 	}
+	if wrongTransition.ResumePath != "" {
+		t.Fatalf("provider exposed stale resume path %q before transition commit", wrongTransition.ResumePath)
+	}
 	if wrongTransition.ObservedTransitionID == wrongTransition.TransitionID {
 		t.Fatal("test setup did not produce an uncommitted transition")
 	}
@@ -172,6 +176,7 @@ func TestEmbeddedResumeDispatchAndCompletionNeedNoKubernetesWatch(t *testing.T) 
 		t.Fatal(err)
 	}
 	w.Status.ObservedTransitionID = "resume"
+	w.Status.ResumePath = api.ResumePathStandard
 	if err = local.Status().Update(ctx, w); err != nil {
 		t.Fatal(err)
 	}
@@ -181,6 +186,9 @@ func TestEmbeddedResumeDispatchAndCompletionNeedNoKubernetesWatch(t *testing.T) 
 	}
 	if completed.Phase != "running" || completed.ObservedTransitionID != "resume" || completed.ExecutionID != "new-execution" || completed.Generation != 2 {
 		t.Fatalf("wrong committed completion: %+v", completed)
+	}
+	if completed.ResumePath != api.ResumePathStandard {
+		t.Fatalf("provider omitted committed resume path: %+v", completed)
 	}
 	if counted.watchedVersion.Load() != nil || counted.lists.Load() != 0 || counted.gets.Load() != initialReads {
 		t.Fatalf("resume used a watch/LIST/follow-up GET: reads=%d initial=%d lists=%d", counted.gets.Load(), initialReads, counted.lists.Load())

@@ -23,7 +23,11 @@ func (s *Service) launchNodeResume(ctx context.Context, op Operation, b boxRecor
 		// connections whose TCP state belongs to the checkpointed execution.
 		s.http.CloseIdleConnections()
 		s.toolHTTP.CloseIdleConnections()
-		return map[string]string{"boxId": op.TargetID}, nil
+		metadata := map[string]string{"boxId": op.TargetID}
+		if result.ResumePath != "" {
+			metadata["resumePath"] = result.ResumePath
+		}
+		return metadata, nil
 	}, func(tx *storeTx) error {
 		current, err := tx.Box(b.ClientID, op.TargetID)
 		if err != nil {

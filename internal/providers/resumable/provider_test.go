@@ -389,6 +389,45 @@ func TestLifecycleAndGuestIdentity(t *testing.T) {
 	}
 }
 
+func TestInspectReportsResumePathOnlyForObservedTransition(t *testing.T) {
+	p, spec, ctx := fixture(t)
+	h, err := p.Create(ctx, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &api.ResumablePod{}
+	key := client.ObjectKey{Namespace: h.Namespace, Name: h.Name}
+	if err := p.Client.Get(ctx, key, w); err != nil {
+		t.Fatal(err)
+	}
+	w.Spec.DesiredState = "Running"
+	w.Spec.TransitionID = "resume-next"
+	if err := p.Client.Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	w.Status.Phase = "Restoring"
+	w.Status.ObservedTransitionID = "previous"
+	w.Status.ResumePath = api.ResumePathWarmPool
+	if err := p.Client.Status().Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	observation, err := p.Inspect(ctx, h)
+	if err != nil || observation.Phase != "resuming" || observation.ResumePath != "" {
+		t.Fatalf("Inspect exposed a path from an unobserved transition: observation=%+v err=%v", observation, err)
+	}
+	if err := p.Client.Get(ctx, key, w); err != nil {
+		t.Fatal(err)
+	}
+	w.Status.ObservedTransitionID = "resume-next"
+	if err := p.Client.Status().Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	observation, err = p.Inspect(ctx, h)
+	if err != nil || observation.ResumePath != api.ResumePathWarmPool {
+		t.Fatalf("Inspect omitted committed warm resume path: observation=%+v err=%v", observation, err)
+	}
+}
+
 func TestInspectRejectsExecutionSwitchDuringPodRead(t *testing.T) {
 	p, s, ctx := fixture(t)
 	h, err := p.Create(ctx, s)

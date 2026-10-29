@@ -27,6 +27,8 @@ const (
 	SharedMountPath          = "/var/lib/cellbox/shared"
 	ArchiveRequestAnnotation = "cellbox.local/archive-request"
 	ArchiveResultAnnotation  = "cellbox.local/archive-result"
+	ResumePathWarmPool       = "warm_pool"
+	ResumePathStandard       = "standard"
 )
 
 // ArchiveCaptureRequest asks the node controller to export a stopped workspace
@@ -93,6 +95,9 @@ type Status struct {
 	RetryNonce           string           `json:"retryNonce,omitempty"`
 	Since                meta.Time        `json:"since,omitempty"`
 	Conditions           []meta.Condition `json:"conditions,omitempty"`
+	// ResumePath records the execution source selected for this resume.
+	// Empty means no selection has been reported.
+	ResumePath string `json:"resumePath,omitempty"`
 }
 type ResumablePod struct {
 	meta.TypeMeta   `json:",inline"`

@@ -384,6 +384,7 @@ func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (traceResul
 	w.Status.PodName = fmt.Sprintf("cb-%s-%d", string(w.UID)[:8], w.Status.Cycle)
 	w.Status.PodUID = ""
 	w.Status.Execution = nil
+	w.Status.ResumePath = ""
 	if w.Status.Snapshot != "" && r.WarmPool != nil {
 		p, err := r.WarmPool.acquire(ctx, w)
 		if err != nil {
@@ -393,6 +394,7 @@ func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (traceResul
 			warm = p
 			w.Status.PodName = p.Name
 			w.Status.PodUID = string(p.UID)
+			w.Status.ResumePath = api.ResumePathWarmPool
 		}
 		ctrl.LoggerFrom(ctx).Info("warm Pod acquisition finished", "podUID", w.Status.PodUID, "durationMs", time.Since(started).Milliseconds())
 	}
@@ -406,6 +408,9 @@ func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (traceResul
 	phase := "Creating"
 	if w.Status.Snapshot != "" {
 		phase = "Restoring"
+		if warm == nil {
+			w.Status.ResumePath = api.ResumePathStandard
+		}
 	}
 	result, err := r.phase(ctx, w, phase, "Preparing a new Pod execution")
 	ctrl.LoggerFrom(ctx).Info("execution assignment persisted", "podUID", w.Status.PodUID, "durationMs", time.Since(started).Milliseconds())

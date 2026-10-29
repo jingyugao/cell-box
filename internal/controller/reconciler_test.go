@@ -5,6 +5,7 @@ package controller
 import (
 	api "cellbox.local/cellbox/api/v1alpha1"
 	lifecycle "cellbox.local/cellbox/internal/runtime"
+	"cellbox.local/cellbox/internal/warmtemplates"
 	"context"
 	"encoding/json"
 	"errors"
@@ -322,6 +323,38 @@ func TestSuspendResumeAndControllerRestart(t *testing.T) {
 	step(t, r, w)
 	if w.Status.Phase != "Running" || w.Status.Snapshot != "" {
 		t.Fatal("old snapshot must not be replayable after readiness", w.Status)
+	}
+}
+
+func TestResumePathIsStandardWhenConfiguredWarmPoolMisses(t *testing.T) {
+	ctx := context.Background()
+	r, f, w := fixture(t)
+	w.Spec.DesiredState = "Suspended"
+	w.Spec.TransitionID = "before-resume"
+	if err := r.Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	w.Status.Phase = "Suspended"
+	w.Status.Snapshot = "checkpoint-1"
+	w.Status.ObservedTransitionID = "before-resume"
+	w.Status.ResumePath = api.ResumePathWarmPool
+	if err := r.Status().Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	r.Runtime = &localResumeWarmRuntime{fakeRuntime: f, deadline: time.Now().Add(time.Minute)}
+	r.WarmPool = &WarmPool{Reconciler: r, Namespace: w.Namespace, Size: 1,
+		ReadDesired: func(context.Context) ([]warmtemplates.Template, string, error) {
+			return []warmtemplates.Template{{ID: "miss-template", Slots: 1, Spec: w.Spec}}, "miss-hash", nil
+		},
+	}
+	w.Spec.DesiredState = "Running"
+	w.Spec.TransitionID = "resume-next"
+	if err := r.Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	step(t, r, w)
+	if w.Status.Phase != "Restoring" || w.Status.ResumePath != api.ResumePathStandard {
+		t.Fatalf("warm-pool miss did not select standard restore: phase=%s resumePath=%q", w.Status.Phase, w.Status.ResumePath)
 	}
 }
 

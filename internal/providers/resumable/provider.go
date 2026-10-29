@@ -233,6 +233,9 @@ func (p *Provider) Inspect(ctx context.Context, h boxprovider.Handle) (boxprovid
 		return boxprovider.Observation{}, err
 	}
 	obs := boxprovider.Observation{ExecutionID: w.Status.PodUID, Message: w.Status.Message, Generation: uint64(w.Status.Cycle), TransitionID: w.Spec.TransitionID, ObservedTransitionID: w.Status.ObservedTransitionID}
+	if w.Status.ObservedTransitionID == w.Spec.TransitionID {
+		obs.ResumePath = w.Status.ResumePath
+	}
 	if w.DeletionTimestamp != nil {
 		obs.Phase = "deleting"
 		return obs, nil

@@ -239,6 +239,7 @@ func (c *Client) RequestResume(ctx context.Context, h boxprovider.Handle, previo
 	r.Resource.Spec.DesiredState = "Running"
 	r.Resource.Spec.TransitionID = transitionID
 	r.Resource.Spec.WaitPorts = ports
+	r.Resource.Status.ResumePath = ""
 	telemetry.InjectOperation(ctx, r.Resource)
 	r.Resource.Generation++
 	r.Resource.ResourceVersion = localVersion(r.Revision + 1)
@@ -277,6 +278,7 @@ func (c *Client) ClaimWarm(ctx context.Context, w *api.ResumablePod, pod *core.P
 	assignment := w.DeepCopy()
 	assignment.Status.PodName, assignment.Status.PodUID = pod.Name, string(pod.UID)
 	assignment.Status.Phase, assignment.Status.Since = "Restoring", meta.Now()
+	assignment.Status.ResumePath = api.ResumePathWarmPool
 	assignment.ResourceVersion = localVersion(r.Revision + 1)
 	r.Resource = assignment
 	if err := c.getJournal().Save(ctx, r, r.Revision); err != nil {

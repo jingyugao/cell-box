@@ -72,6 +72,7 @@ type Observation struct {
 	ExecutionID          string // immutable runtime identity; changes after Pod replacement
 	TransitionID         string // provider lifecycle transition associated with this observation
 	ObservedTransitionID string // transition token last committed by the runtime controller
+	ResumePath           string // warm_pool or standard; empty when unreported
 	Message              string
 }
 

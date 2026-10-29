@@ -86,6 +86,9 @@ func observationFromResource(w *api.ResumablePod, deleted bool) boxprovider.Obse
 	if w.Status.Cycle > 0 {
 		observation.Generation = uint64(w.Status.Cycle)
 	}
+	if w.Status.ObservedTransitionID == w.Spec.TransitionID {
+		observation.ResumePath = w.Status.ResumePath
+	}
 	if deleted {
 		observation.Phase = "deleted"
 		return observation
