@@ -6,8 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"cellbox.local/cellbox/internal/homevolume"
-	"cellbox.local/cellbox/internal/node"
+	"github.com/jingyugao/cell-box/internal/homevolume"
+	"github.com/jingyugao/cell-box/internal/node"
 )
 
 // bindHome updates the child OCI mounts before its Gofer is created. Deferred

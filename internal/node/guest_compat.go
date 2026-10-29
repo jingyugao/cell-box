@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/image"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/image"
 	cri "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 

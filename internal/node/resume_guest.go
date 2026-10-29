@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/guestapi"
-	"cellbox.local/cellbox/internal/telemetry"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/telemetry"
 	core "k8s.io/api/core/v1"
 )
 

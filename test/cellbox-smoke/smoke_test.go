@@ -15,12 +15,12 @@ import (
 	"testing"
 	"time"
 
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/catalog"
-	"cellbox.local/cellbox/internal/guestapi"
-	"cellbox.local/cellbox/internal/image"
-	"cellbox.local/cellbox/internal/providers/docker"
-	"cellbox.local/cellbox/internal/service"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/catalog"
+	"github.com/jingyugao/cell-box/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/image"
+	"github.com/jingyugao/cell-box/internal/providers/docker"
+	"github.com/jingyugao/cell-box/internal/service"
 )
 
 type localImageBuilder struct {

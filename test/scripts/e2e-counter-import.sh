@@ -86,7 +86,7 @@ def runtime(box):
     namespace = os.environ.get('CELLBOX_K8S_NAMESPACE', 'cell-box')
     def k(*args):
         return json.loads(subprocess.check_output(['kubectl', '--context', context, '-n', namespace, *args, '-o', 'json']))
-    crs = k('get', 'cellboxes', '-l', 'cellbox.local/box-id=' + box)['items']
+    crs = k('get', 'cellboxes', '-l', 'cellbox.jingyugao.github.io/box-id=' + box)['items']
     assert len(crs) == 1
     cr = crs[0]
     pod = k('get', 'pod', cr['status']['podName'])

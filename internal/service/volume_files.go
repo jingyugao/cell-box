@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"cellbox.local/cellbox/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
 	"golang.org/x/sys/unix"
 )
 

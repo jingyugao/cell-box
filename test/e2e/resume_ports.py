@@ -21,7 +21,7 @@ import urllib.request
 
 
 CLIENT_ID = "waitports-e2e-20261029"
-BASE_IMAGE = "192.168.133.1:5001/mybox@sha256:e2aa919642df6fd323da2a5e8136f7b8061ea9bdcfee03f91f9089fa5b52388d"
+BASE_IMAGE = "docker.io/library/alpine:3.20"
 PROFILE_ID = "cocell-k8s-resumable"
 MANAGEMENT_PORT = 40000
 APP_PORT = 8000
@@ -284,7 +284,7 @@ ThreadingHTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
         return json.loads(result.stdout)
 
     def runtime(self, box_id):
-        objects = self.kube("get", "cellboxes", "-l", "cellbox.local/box-id=" + box_id)
+        objects = self.kube("get", "cellboxes", "-l", "cellbox.jingyugao.github.io/box-id=" + box_id)
         rows = objects.get("items", [])
         if len(rows) != 1:
             raise RuntimeError(f"expected one Cellbox CR for {box_id}, got {len(rows)}")
@@ -302,7 +302,7 @@ ThreadingHTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
         last = None
         while time.monotonic() < deadline:
             try:
-                objects = self.kube("get", "cellboxes", "-l", "cellbox.local/box-id=" + box_id)
+                objects = self.kube("get", "cellboxes", "-l", "cellbox.jingyugao.github.io/box-id=" + box_id)
                 cr_rows = objects.get("items", [])
                 if len(cr_rows) != 1:
                     raise RuntimeError(f"expected one Cellbox CR for {box_id}, got {len(cr_rows)}")
@@ -325,13 +325,13 @@ ThreadingHTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
                 # A warm restore keeps its lease outside CR status until the
                 # operation completes. Select only the unique exact-image warm
                 # Pod, and later verify its Guest proxy serves this Box instance.
-                rows = self.kube("get", "pods", "-l", "cellbox.local/warm-pool=true").get("items", [])
+                rows = self.kube("get", "pods", "-l", "cellbox.jingyugao.github.io/warm-pool=true").get("items", [])
                 candidates = [p for p in rows
                               if p.get("metadata", {}).get("uid") != previous_uid
-                              and p.get("metadata", {}).get("labels", {}).get("cellbox.local/owner", "") in ("", cr["metadata"]["uid"])
+                              and p.get("metadata", {}).get("labels", {}).get("cellbox.jingyugao.github.io/owner", "") in ("", cr["metadata"]["uid"])
                               and any(c.get("image") == image for c in p.get("spec", {}).get("containers", []))]
                 owned = [p for p in candidates
-                         if p.get("metadata", {}).get("labels", {}).get("cellbox.local/owner") == cr["metadata"]["uid"]]
+                         if p.get("metadata", {}).get("labels", {}).get("cellbox.jingyugao.github.io/owner") == cr["metadata"]["uid"]]
                 if owned:
                     candidates = owned
                 if len(candidates) > 1:
@@ -482,7 +482,7 @@ ThreadingHTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
             raise RuntimeError("warm verification requires a running or suspended Box")
         self.patch_revision(revision["id"], warmSlots=1)
         pool = self.wait_warm_ready(revision["id"])
-        warm_pods = self.kube("get", "pods", "-l", "cellbox.local/warm-pool=true").get("items", [])
+        warm_pods = self.kube("get", "pods", "-l", "cellbox.jingyugao.github.io/warm-pool=true").get("items", [])
         self.state["evidence"]["warmPoolBeforeResume"] = {
             "status": pool,
             "pods": [{"name": p["metadata"]["name"], "uid": p["metadata"].get("uid"), "nodeName": p.get("spec", {}).get("nodeName")} for p in warm_pods],
@@ -546,7 +546,7 @@ ThreadingHTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
         pod = failed_runtime.get("pod")
         if not pod:
             raise RuntimeError("failed Cellbox has no retained Pod")
-        serving = pod.get("metadata", {}).get("labels", {}).get("cellbox.local/serving")
+        serving = pod.get("metadata", {}).get("labels", {}).get("cellbox.jingyugao.github.io/serving")
         if serving != "false":
             raise RuntimeError("failed Pod should be retained with serving=false: " + repr(serving))
         self.state["evidence"]["healthFailure"] = {
@@ -568,7 +568,7 @@ ThreadingHTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
                 runtime = self.runtime(box_id)
                 cr_phase = runtime["cr"].get("status", {}).get("phase")
                 pod = runtime.get("pod") or {}
-                serving = pod.get("metadata", {}).get("labels", {}).get("cellbox.local/serving")
+                serving = pod.get("metadata", {}).get("labels", {}).get("cellbox.jingyugao.github.io/serving")
                 if box.get("phase") == "failed" and cr_phase == "Failed" and pod and serving == "false":
                     return box, runtime
                 last = {"boxPhase": box.get("phase"), "crPhase": cr_phase, "podName": pod.get("metadata", {}).get("name"), "serving": serving}

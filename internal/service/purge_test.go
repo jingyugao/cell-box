@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"cellbox.local/cellbox/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/guestapi"
 )
 
 func purgeService(store *Store) *Service {

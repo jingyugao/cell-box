@@ -1,9 +1,9 @@
 package telemetry
 
 import (
-	api "cellbox.local/cellbox/api/v1alpha1"
 	"context"
 	"encoding/json"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
 	"go.opentelemetry.io/otel/trace"
 	"testing"
 	"time"

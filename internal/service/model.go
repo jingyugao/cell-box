@@ -1,12 +1,12 @@
 package service
 
 import (
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/catalog"
-	"cellbox.local/cellbox/internal/guestapi"
-	"cellbox.local/cellbox/internal/objectstorage"
-	"cellbox.local/cellbox/internal/volumebackup"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/catalog"
+	"github.com/jingyugao/cell-box/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/objectstorage"
+	"github.com/jingyugao/cell-box/internal/volumebackup"
 	"time"
 )
 

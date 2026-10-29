@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"cellbox.local/cellbox/internal/objectstorage"
+	"github.com/jingyugao/cell-box/internal/objectstorage"
 )
 
 var (

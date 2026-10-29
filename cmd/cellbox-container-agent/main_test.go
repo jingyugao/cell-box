@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"cellbox.local/cellbox/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/guestapi"
 )
 
 func TestProtocolVersionCommand(t *testing.T) {

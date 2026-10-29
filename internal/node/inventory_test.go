@@ -12,8 +12,8 @@ import (
 	"sync"
 	"testing"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/inventory"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/inventory"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -79,7 +79,7 @@ func suspendedInventoryWorkload(owner, snapshot string) *api.ResumablePod {
 	return &api.ResumablePod{
 		ObjectMeta: meta.ObjectMeta{
 			UID:         typesUID(owner),
-			Labels:      map[string]string{"cellbox.local/box-id": "box-one", inventory.ClientLabel: inventory.ClientValue("client-one")},
+			Labels:      map[string]string{"cellbox.jingyugao.github.io/box-id": "box-one", inventory.ClientLabel: inventory.ClientValue("client-one")},
 			Annotations: map[string]string{inventory.Annotation: string(annotation)},
 		},
 		Spec:   api.Spec{DesiredState: "Suspended"},

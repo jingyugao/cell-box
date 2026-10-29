@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/inventory"
-	"cellbox.local/cellbox/internal/objectstorage"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/inventory"
+	"github.com/jingyugao/cell-box/internal/objectstorage"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -186,7 +186,7 @@ func TestSuspendedInventoryPublishesAfterSnapshotAndRepairsAfterRestart(t *testi
 		t.Fatal(err)
 	}
 	workload := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{UID: typesUID(owner), Labels: map[string]string{
-		"cellbox.local/box-id": "box-123", inventory.ClientLabel: inventory.ClientValue("client-one"),
+		"cellbox.jingyugao.github.io/box-id": "box-123", inventory.ClientLabel: inventory.ClientValue("client-one"),
 	}, Annotations: map[string]string{inventory.Annotation: string(annotation)}},
 		Spec: api.Spec{DesiredState: "Suspended"}, Status: api.Status{Phase: "Suspended", Snapshot: snapshot, Cycle: 4}}
 	base := t.TempDir()
@@ -262,7 +262,7 @@ func TestCheckpointingInventoryPublishesBeforeArchiveUpload(t *testing.T) {
 		t.Fatal(err)
 	}
 	workload := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{UID: typesUID(owner), Labels: map[string]string{
-		"cellbox.local/box-id": "box-789", inventory.ClientLabel: inventory.ClientValue("client-three"),
+		"cellbox.jingyugao.github.io/box-id": "box-789", inventory.ClientLabel: inventory.ClientValue("client-three"),
 	}, Annotations: map[string]string{inventory.Annotation: string(annotation)}},
 		Spec: api.Spec{DesiredState: "Suspended"}, Status: api.Status{Phase: "Checkpointing", Snapshot: "checkpoint-9", Cycle: 9}}
 	checkpoints := &memoryCheckpointStore{}

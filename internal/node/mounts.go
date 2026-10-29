@@ -3,8 +3,8 @@ package node
 import (
 	"fmt"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/homevolume"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/homevolume"
 )
 
 func configuredVolumeMounts(r *api.ResumablePod) []VolumeMountAuthorization {

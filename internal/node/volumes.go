@@ -8,9 +8,9 @@ import (
 	"strings"
 	"syscall"
 
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/guestapi"
-	"cellbox.local/cellbox/internal/homevolume"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/homevolume"
 )
 
 // WithStoppedVolume exposes an independent volume's data directory while

@@ -5,7 +5,7 @@ package controller
 import (
 	"time"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
 )
 
 // A warm slot only shortens a checkpoint restore, so demand is derived from the

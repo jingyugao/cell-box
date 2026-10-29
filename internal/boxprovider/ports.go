@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	"cellbox.local/cellbox/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/guestapi"
 )
 
 // NormalizeWaitPorts returns the requested TCP ports in a stable order.

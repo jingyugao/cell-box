@@ -7,8 +7,8 @@ import (
 	"regexp"
 	"time"
 
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/volumebackup"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/volumebackup"
 )
 
 type volumeBackupEngine interface {

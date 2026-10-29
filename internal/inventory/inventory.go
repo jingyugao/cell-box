@@ -1,16 +1,16 @@
 package inventory
 
 import (
-	api "cellbox.local/cellbox/api/v1alpha1"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
 )
 
-const Annotation = "cellbox.local/inventory"
-const ClientLabel = "cellbox.local/client"
+const Annotation = "cellbox.jingyugao.github.io/inventory"
+const ClientLabel = "cellbox.jingyugao.github.io/client"
 
 var ErrNotFound = errors.New("checkpoint inventory not found")
 
@@ -46,7 +46,7 @@ func FromResource(w *api.ResumablePod, phase string) (Record, error) {
 		return r, errors.New("invalid sandbox inventory box")
 	}
 	var id string
-	if json.Unmarshal(box["id"], &id) != nil || id == "" || id != w.Labels["cellbox.local/box-id"] || w.Labels[ClientLabel] != ClientValue(r.ClientID) {
+	if json.Unmarshal(box["id"], &id) != nil || id == "" || id != w.Labels["cellbox.jingyugao.github.io/box-id"] || w.Labels[ClientLabel] != ClientValue(r.ClientID) {
 		return r, errors.New("sandbox inventory ownership mismatch")
 	}
 	box["phase"], _ = json.Marshal(phase)

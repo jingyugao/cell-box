@@ -6,8 +6,8 @@ import (
 	"syscall"
 	"testing"
 
-	"cellbox.local/cellbox/internal/guestapi"
-	"cellbox.local/cellbox/internal/homevolume"
+	"github.com/jingyugao/cell-box/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/homevolume"
 )
 
 func TestVolumeCreationAssignsGuestOwnership(t *testing.T) {

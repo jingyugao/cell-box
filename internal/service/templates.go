@@ -1,10 +1,10 @@
 package service
 
 import (
-	"cellbox.local/cellbox/internal/catalog"
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/jingyugao/cell-box/internal/catalog"
 )
 
 // Template is a runtime projection of an immutable catalog revision. It is not

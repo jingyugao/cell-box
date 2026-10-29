@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/runtimecontrol"
-	"cellbox.local/cellbox/internal/warmtemplates"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/runtimecontrol"
+	"github.com/jingyugao/cell-box/internal/warmtemplates"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -141,7 +141,7 @@ func testWarmResumeImmediate(t *testing.T) {
 	}
 	w := &api.ResumablePod{TypeMeta: meta.TypeMeta{APIVersion: api.GroupVersion.String(), Kind: api.Kind},
 		ObjectMeta: meta.ObjectMeta{Name: "cellbox-local", Namespace: "test", UID: types.UID("box-uid-123"), Finalizers: []string{api.Finalizer},
-			Labels: map[string]string{"cellbox.local/managed": "true", "cellbox.local/box-id": "local"}},
+			Labels: map[string]string{"cellbox.jingyugao.github.io/managed": "true", "cellbox.jingyugao.github.io/box-id": "local"}},
 		Spec: api.Spec{NodeName: "node", DesiredState: "Suspended", TransitionID: "before-resume",
 			Container: core.Container{Name: "server", Image: "image:local", ImagePullPolicy: core.PullNever}},
 		Status: api.Status{Phase: "Suspended", ObservedTransitionID: "before-resume", Snapshot: "checkpoint-7", Cycle: 7}}
@@ -263,7 +263,7 @@ func testWarmResumeRestartWhileRestoring(t *testing.T) {
 	}
 	w := &api.ResumablePod{TypeMeta: meta.TypeMeta{APIVersion: api.GroupVersion.String(), Kind: api.Kind},
 		ObjectMeta: meta.ObjectMeta{Name: "cellbox-restart", Namespace: "test", UID: types.UID("box-restart-123"), Finalizers: []string{api.Finalizer},
-			Labels: map[string]string{"cellbox.local/managed": "true", "cellbox.local/box-id": "restart"}},
+			Labels: map[string]string{"cellbox.jingyugao.github.io/managed": "true", "cellbox.jingyugao.github.io/box-id": "restart"}},
 		Spec: api.Spec{NodeName: "node", DesiredState: "Suspended", TransitionID: "before-resume",
 			Container: core.Container{Name: "server", Image: "image:local", ImagePullPolicy: core.PullNever}},
 		Status: api.Status{Phase: "Suspended", ObservedTransitionID: "before-resume", Snapshot: "checkpoint-7", Cycle: 7}}

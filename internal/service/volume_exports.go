@@ -14,9 +14,9 @@ import (
 	"time"
 	"unicode"
 
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/directoryarchive"
-	"cellbox.local/cellbox/internal/homevolume"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/directoryarchive"
+	"github.com/jingyugao/cell-box/internal/homevolume"
 	"golang.org/x/sys/unix"
 )
 

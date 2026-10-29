@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"cellbox.local/cellbox/internal/archivelimits"
-	"cellbox.local/cellbox/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/archivelimits"
+	"github.com/jingyugao/cell-box/internal/guestapi"
 )
 
 func testConfig(t *testing.T) guestapi.Config {
@@ -603,7 +603,7 @@ func TestRunTimeoutAndOutput(t *testing.T) {
 		t.Skip("builds guest executable")
 	}
 	bin := filepath.Join(t.TempDir(), "cellbox-container-agent")
-	b := exec.Command("go", "build", "-o", bin, "cellbox.local/cellbox/cmd/cellbox-container-agent")
+	b := exec.Command("go", "build", "-o", bin, "github.com/jingyugao/cell-box/cmd/cellbox-container-agent")
 	if out, err := b.CombinedOutput(); err != nil {
 		t.Fatalf("build guest: %v: %s", err, out)
 	}

@@ -167,7 +167,7 @@ sequenceDiagram
 1. **service 接单。** `create` 校验输入，从 SQLite 解析 revision，用同一事务保存 `Box(creating)` 和 operation，再启动 `provision`。请求不等待 Pod 启动。
 2. **provider 创建 CR。** `buildWanted` 把配置转换成 `Cellbox` 自定义资源，固定节点、镜像、资源限制和 agent 入口。`Provider.Create` 返回的 handle 关联 CR UID，不负责直接创建 Pod。源码中的 Go 类型仍叫 `ResumablePod`，实际 Kubernetes Kind 是 `Cellbox`。
 3. **controller 创建 Service 和 Pod。** 为 CR 添加清理 finalizer，创建由它拥有的 Service；`begin` 增加执行 cycle、确定 Pod 名、写入 `Creating`。后续 reconcile 创建同样由 CR 拥有的 Pod，设置 `RuntimeClass=runsc-recoverable`、节点选择器和 `RestartPolicy=Never`。
-4. **准备完成后允许调度。** Pod 最初带 `cellbox.local/prepared` SchedulingGate，调度器暂不调度。controller 得到 Pod UID 后调用 `node.Backend.Prepare`，准备持久 HOME（启用时）和绑定该 Pod 的 ticket；成功后写入 ticket annotation 并移除 gate。此步骤只准备运行条件，不启动容器。
+4. **准备完成后允许调度。** Pod 最初带 `cellbox.jingyugao.github.io/prepared` SchedulingGate，调度器暂不调度。controller 得到 Pod UID 后调用 `node.Backend.Prepare`，准备持久 HOME（启用时）和绑定该 Pod 的 ticket；成功后写入 ticket annotation 并移除 gate。此步骤只准备运行条件，不启动容器。
 
 Service 此时可以已经存在，但没有可服务的运行实例。它通过 CR owner UID 和 `serving` 标签选择当前 Pod，暂停/恢复期间保持自身身份。
 

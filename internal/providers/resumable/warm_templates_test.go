@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/warmtemplates"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/warmtemplates"
 )
 
 func TestBuildAndObserveWarmTemplatesWithoutKubernetesConfigMaps(t *testing.T) {

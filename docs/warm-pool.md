@@ -52,7 +52,7 @@
 
 ## 5. 槽位生命周期
 
-1. 控制器创建带调度门控的 Pod（标签 `cellbox.local/warm-pool=true`，注解里记录兼容指纹）。
+1. 控制器创建带调度门控的 Pod（标签 `cellbox.jingyugao.github.io/warm-pool=true`，注解里记录兼容指纹）。
 2. 节点后端登记租约（`registered`），控制器去掉门控，Pod 被调度。
 3. wrapper 在 root sandbox 的 `start` 里绑定租约（`created`），开始等待（`waiting`），**租约 60 秒**。
 4. 剩余不足 15 秒时先建后继；不足 5 秒视为过期，整个 Pod 被删除并清理 runtime，Pod UID 不复用（`expired` / `retired`）。

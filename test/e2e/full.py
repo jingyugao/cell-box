@@ -195,7 +195,7 @@ class Suite:
         return self.eventually("counter startup", lambda: self.app(box_id, "state"), lambda x: isinstance(x, dict))
 
     def runtime(self, box_id):
-        rows = self.k("get", "cellboxes", "-l", "cellbox.local/box-id=" + box_id)["items"]
+        rows = self.k("get", "cellboxes", "-l", "cellbox.jingyugao.github.io/box-id=" + box_id)["items"]
         self.check(len(rows) == 1, "Expected one sandbox CR: " + box_id)
         cr = rows[0]
         result = {"cr": cr, "pod": None, "service": self.k("get", "service", cr["metadata"]["name"])}
@@ -254,7 +254,7 @@ class Suite:
         # Refuse to restart a server that has any sandbox not owned by this run.
         rows = self.k("get", "cellboxes")["items"]
         owned = set(self.boxes)
-        foreign = [r["metadata"]["name"] for r in rows if r["metadata"].get("labels", {}).get("cellbox.local/box-id") not in owned]
+        foreign = [r["metadata"]["name"] for r in rows if r["metadata"].get("labels", {}).get("cellbox.jingyugao.github.io/box-id") not in owned]
         self.check(not foreign, "Server restart would affect preexisting sandboxes: " + str(foreign))
         before = self.k("get", "pods", "-l", "app=cellbox-server")
         self.save("server-before-restart", before)
@@ -334,7 +334,7 @@ class Suite:
         self.check(self.box(source_id)["phase"] == "suspended", "Suspend did not settle")
         self.request("GET", f"/v1/boxes/{source_id}/files?path=proof.json", status=409, code="CONFLICT")
         self.warm(first["id"])
-        warm_candidates = self.k("get", "pods", "-l", "cellbox.local/warm-pool=true")
+        warm_candidates = self.k("get", "pods", "-l", "cellbox.jingyugao.github.io/warm-pool=true")
         self.save("warm-candidates-before-resume", warm_candidates)
         warm_uids = {p["metadata"]["uid"] for p in warm_candidates["items"] if not p["metadata"].get("ownerReferences")}
         started = time.monotonic()
@@ -344,7 +344,7 @@ class Suite:
         runtime_after = self.runtime(source_id)
         self.save("runtime-after-warm-resume", runtime_after)
         self.check(runtime_after["pod"]["metadata"]["uid"] in warm_uids, "Resume did not adopt an existing warm Pod")
-        self.check(runtime_after["pod"]["metadata"]["labels"].get("cellbox.local/warm-pool") == "true", "Warm adoption label missing")
+        self.check(runtime_after["pod"]["metadata"]["labels"].get("cellbox.jingyugao.github.io/warm-pool") == "true", "Warm adoption label missing")
         self.check(runtime_before["pod"]["metadata"]["uid"] != runtime_after["pod"]["metadata"]["uid"], "Suspend/resume did not replace Pod")
         self.check(runtime_before["service"]["metadata"]["uid"] == runtime_after["service"]["metadata"]["uid"], "Service was replaced")
         self.check(runtime_before["service"]["spec"]["clusterIP"] == runtime_after["service"]["spec"]["clusterIP"], "Service IP changed")
@@ -360,7 +360,7 @@ class Suite:
         self.same_state(state, self.ready(source_id))
         cold_runtime = self.runtime(source_id)
         self.save("runtime-after-cold-resume", cold_runtime)
-        self.check(cold_runtime["pod"]["metadata"].get("labels", {}).get("cellbox.local/warm-pool") != "true", "Cold resume unexpectedly used a warm Pod")
+        self.check(cold_runtime["pod"]["metadata"].get("labels", {}).get("cellbox.jingyugao.github.io/warm-pool") != "true", "Cold resume unexpectedly used a warm Pod")
         self.patch_revision(first["id"], warmSlots=1)
         self.passed("warm demand withdrawal and ordinary checkpoint resume")
 
@@ -527,7 +527,7 @@ class Suite:
             self.check(not self.request("GET", "/v1/archives"), "Run still owns archives")
             if self.revisions:
                 self.warm(self.revisions[0], ready=False)
-            self.eventually("idle warm Pods removed", lambda: self.k("get", "pods", "-l", "cellbox.local/warm-pool=true")["items"],
+            self.eventually("idle warm Pods removed", lambda: self.k("get", "pods", "-l", "cellbox.jingyugao.github.io/warm-pool=true")["items"],
                             lambda rows: not [p for p in rows if not p["metadata"].get("ownerReferences")], 60)
             for resource in ("cellboxes", "pods", "services"):
                 self.save("final-" + resource, self.k("get", resource))

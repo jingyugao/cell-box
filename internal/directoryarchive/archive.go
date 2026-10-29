@@ -16,7 +16,7 @@ import (
 	"sort"
 	"strings"
 
-	"cellbox.local/cellbox/internal/archivelimits"
+	"github.com/jingyugao/cell-box/internal/archivelimits"
 	"golang.org/x/sys/unix"
 )
 

@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"cellbox.local/cellbox/internal/guest"
-	"cellbox.local/cellbox/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/guest"
+	"github.com/jingyugao/cell-box/internal/guestapi"
 )
 
 // Exercise the public API against a real Guest, including its secure file opener.

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"cellbox.local/cellbox/internal/homevolume"
-	"cellbox.local/cellbox/internal/node"
+	"github.com/jingyugao/cell-box/internal/homevolume"
+	"github.com/jingyugao/cell-box/internal/node"
 )
 
 func homeChildFixture(t *testing.T) (Adapter, node.Ticket, string, string, string, map[string]string) {

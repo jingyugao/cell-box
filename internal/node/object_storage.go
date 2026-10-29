@@ -2,10 +2,10 @@
 package node
 
 import (
-	"cellbox.local/cellbox/internal/objectstorage"
-	runtimebackend "cellbox.local/cellbox/internal/runtime"
 	"errors"
 	"fmt"
+	"github.com/jingyugao/cell-box/internal/objectstorage"
+	runtimebackend "github.com/jingyugao/cell-box/internal/runtime"
 )
 
 func retryableStorage(err error) error {

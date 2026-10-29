@@ -1,4 +1,4 @@
-module cellbox.local/cellbox
+module github.com/jingyugao/cell-box
 
 go 1.26.0
 

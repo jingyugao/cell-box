@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/homevolume"
-	"cellbox.local/cellbox/internal/objectstorage"
-	runtimebackend "cellbox.local/cellbox/internal/runtime"
-	"cellbox.local/cellbox/internal/workspacearchive"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/homevolume"
+	"github.com/jingyugao/cell-box/internal/objectstorage"
+	runtimebackend "github.com/jingyugao/cell-box/internal/runtime"
+	"github.com/jingyugao/cell-box/internal/workspacearchive"
 )
 
 // CaptureWorkspaceArchive exports the configured workspace from a stopped

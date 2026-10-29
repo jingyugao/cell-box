@@ -12,10 +12,10 @@ metadata:
   name: cellbox-server
   namespace: {{ .Release.Namespace }}
 rules:
-  - apiGroups: [cellbox.local]
+  - apiGroups: [cellbox.jingyugao.github.io]
     resources: [cellboxes]
     verbs: [get, list, watch, create, update, patch, delete]
-  - apiGroups: [cellbox.local]
+  - apiGroups: [cellbox.jingyugao.github.io]
     resources: [cellboxes/status, cellboxes/finalizers]
     verbs: [get, update, patch]
   - apiGroups: [""]

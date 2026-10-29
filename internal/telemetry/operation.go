@@ -1,9 +1,9 @@
 package telemetry
 
 import (
-	api "cellbox.local/cellbox/api/v1alpha1"
 	"context"
 	"encoding/json"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const operationAnnotation = "cellbox.local/operation-trace"
+const operationAnnotation = "cellbox.jingyugao.github.io/operation-trace"
 
 type operationContext struct {
 	Parent       string    `json:"parent"`

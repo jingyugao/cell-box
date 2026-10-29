@@ -3,8 +3,8 @@
 package adapter
 
 import (
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/node"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/node"
 	"os"
 	"path/filepath"
 	"strings"

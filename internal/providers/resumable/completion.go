@@ -10,9 +10,9 @@ import (
 	"reflect"
 	"strings"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/telemetry"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/telemetry"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -191,7 +191,7 @@ func (p *Provider) RequestResume(ctx context.Context, h boxprovider.Handle, expe
 	if traceValue != "" {
 		// Change only this trace key, preserving unrelated metadata.
 		// Older resources without an annotations map are repaired below.
-		operations = append(operations, jsonPatchOperation{Operation: "add", Path: "/metadata/annotations/cellbox.local~1operation-trace", Value: traceValue})
+		operations = append(operations, jsonPatchOperation{Operation: "add", Path: "/metadata/annotations/cellbox.jingyugao.github.io~1operation-trace", Value: traceValue})
 	}
 	encoded, err := json.Marshal(operations)
 	if err != nil {
@@ -225,7 +225,7 @@ func (p *Provider) RequestResume(ctx context.Context, h boxprovider.Handle, expe
 	if getErr == nil && traceValue != "" && current.Annotations == nil {
 		// JSON Patch cannot add a nested key when its parent is absent.
 		// Repair that legacy shape under an additional resourceVersion fence.
-		operations[len(operations)-1] = jsonPatchOperation{Operation: "add", Path: "/metadata/annotations", Value: map[string]string{"cellbox.local/operation-trace": traceValue}}
+		operations[len(operations)-1] = jsonPatchOperation{Operation: "add", Path: "/metadata/annotations", Value: map[string]string{"cellbox.jingyugao.github.io/operation-trace": traceValue}}
 		operations = append(operations, jsonPatchOperation{Operation: "test", Path: "/metadata/resourceVersion", Value: current.ResourceVersion})
 		encoded, err = json.Marshal(operations)
 		if err != nil {

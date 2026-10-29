@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/inventory"
-	"cellbox.local/cellbox/internal/telemetry"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/inventory"
+	"github.com/jingyugao/cell-box/internal/telemetry"
 	"golang.org/x/sync/errgroup"
 )
 

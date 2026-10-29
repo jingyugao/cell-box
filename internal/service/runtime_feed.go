@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"cellbox.local/cellbox/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
 )
 
 // One stream per Box serves both background projection and lifecycle waiters.

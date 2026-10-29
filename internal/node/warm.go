@@ -9,10 +9,10 @@ import (
 	"reflect"
 	"time"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	backend "cellbox.local/cellbox/internal/runtime"
-	"cellbox.local/cellbox/internal/telemetry"
 	"github.com/fsnotify/fsnotify"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	backend "github.com/jingyugao/cell-box/internal/runtime"
+	"github.com/jingyugao/cell-box/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sys/unix"
 	core "k8s.io/api/core/v1"
