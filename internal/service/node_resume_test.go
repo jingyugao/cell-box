@@ -18,6 +18,7 @@ type resumeTestProvider struct {
 	watches     atomic.Int32
 	inspects    atomic.Int32
 	requestIn   chan struct{}
+	portsIn     chan []int
 	release     chan struct{}
 	holdRequest bool
 	releaseOnce sync.Once
@@ -57,8 +58,15 @@ func (p *resumeTestProvider) WatchObservations(ctx context.Context, _ boxprovide
 	return out, nil
 }
 
-func (p *resumeTestProvider) RequestResume(_ context.Context, _ boxprovider.Handle, _, transitionID string) error {
+func (p *resumeTestProvider) RequestResume(_ context.Context, _ boxprovider.Handle, _, transitionID string, waitPorts ...int) error {
 	p.requests.Add(1)
+	if p.portsIn != nil {
+		ports := append([]int(nil), waitPorts...)
+		select {
+		case p.portsIn <- ports:
+		default:
+		}
+	}
 	if p.requestIn != nil {
 		select {
 		case p.requestIn <- struct{}{}:
@@ -71,7 +79,6 @@ func (p *resumeTestProvider) RequestResume(_ context.Context, _ boxprovider.Hand
 	observation := boxprovider.Observation{
 		Phase: "running", Generation: 2, ExecutionID: "restored-execution",
 		TransitionID: transitionID, ObservedTransitionID: transitionID,
-		GuestReady: false,
 	}
 	if p.result != nil {
 		observation = *p.result
@@ -99,10 +106,10 @@ func newResumeTestBox(t *testing.T, f *coreFixture, id string, p *resumeTestProv
 	return b
 }
 
-func TestNodeResumeWaitsForGuestReadyOnOneStreamWithoutInspectOrGuestProbe(t *testing.T) {
+func TestNodeResumeWaitsForCommittedRunningTransitionOnOneStream(t *testing.T) {
 	f := newCoreFixture(t)
 	defer f.service.Close()
-	p := &resumeTestProvider{fakeCoreProvider: f.provider, stream: make(chan boxprovider.Observation, 8), initial: boxprovider.Observation{Phase: "suspended", Generation: 1}}
+	p := &resumeTestProvider{fakeCoreProvider: f.provider, stream: make(chan boxprovider.Observation, 8), initial: boxprovider.Observation{Phase: "suspended", Generation: 1}, result: &boxprovider.Observation{Phase: "resuming", Generation: 2}}
 	b := newResumeTestBox(t, f, "minimal-resume", p)
 	op, err := f.service.actionContextWithGeneration(context.Background(), b.ClientID, b.Box.ID, "resume", ptrUint64(1))
 	if err != nil {
@@ -113,9 +120,15 @@ func TestNodeResumeWaitsForGuestReadyOnOneStreamWithoutInspectOrGuestProbe(t *te
 	}
 	pending, err := f.service.waitOperation(context.Background(), b.ClientID, op.ID, 40*time.Millisecond)
 	if err != nil || pending.Status != "running" {
-		t.Fatalf("resume completed before GuestReady: %+v, %v", pending, err)
+		t.Fatalf("resume completed before a committed running observation: %+v, %v", pending, err)
 	}
-	p.stream <- boxprovider.Observation{Phase: "running", Generation: 2, ExecutionID: "restored-execution", TransitionID: op.ID, ObservedTransitionID: op.ID, GuestReady: true}
+	// Running is insufficient until the controller commits this transition.
+	p.stream <- boxprovider.Observation{Phase: "running", Generation: 2, ExecutionID: "restored-execution", TransitionID: op.ID, ObservedTransitionID: "before-resume"}
+	pending, err = f.service.waitOperation(context.Background(), b.ClientID, op.ID, 40*time.Millisecond)
+	if err != nil || pending.Status != "running" {
+		t.Fatalf("resume completed before transition commit: %+v, %v", pending, err)
+	}
+	p.stream <- boxprovider.Observation{Phase: "running", Generation: 2, ExecutionID: "restored-execution", TransitionID: op.ID, ObservedTransitionID: op.ID}
 	finished, err := f.service.waitOperation(context.Background(), b.ClientID, op.ID, 2*time.Second)
 	if err != nil || finished.Status != "succeeded" || finished.Box == nil || finished.Box.Generation != 2 || finished.Box.ExecutionID != "restored-execution" {
 		t.Fatalf("resume result: %+v, %v", finished, err)

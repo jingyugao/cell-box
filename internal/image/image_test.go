@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"cellbox.local/cellbox/internal/guestapi"
 )
 
 const baseID = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -35,7 +37,7 @@ func (f *fakeBuilder) Run(ctx context.Context, args []string) ([]byte, error) {
 			return json.Marshal([]any{map[string]any{"Id": baseID}})
 		}
 		if args[2] == f.tag && f.builds > 0 {
-			return json.Marshal([]any{map[string]any{"Id": builtID, "Config": map[string]any{"Labels": map[string]string{ManagedLabel: ImageVersion, IdentityLabel: f.key}}}})
+			return json.Marshal([]any{map[string]any{"Id": builtID, "Config": map[string]any{"Labels": map[string]string{ManagedLabel: ImageVersion, IdentityLabel: f.key, GuestProtocolLabel: GuestProtocolVersion}}}})
 		}
 		return nil, errors.New("No such image")
 	}
@@ -136,6 +138,19 @@ func TestTemporaryBaseTagRemovedAfterBuildFailure(t *testing.T) {
 		t.Fatalf("temporary tag not cleaned: tagged=%v removed=%v bounded=%v", f.baseTags, f.removedTags, f.cleanupDeadline)
 	}
 }
+
+func TestPrepareRejectsLegacyGuestBeforeBuild(t *testing.T) {
+	guest := staticGuestWithProtocol(t, false)
+	f := &fakeBuilder{}
+	_, err := NewWithRunner(f).Prepare(context.Background(), Options{Base: "base:latest", GuestBinary: guest})
+	if err == nil || !strings.Contains(err.Error(), "protocol version") {
+		t.Fatalf("legacy guest was not rejected: %v", err)
+	}
+	if f.builds != 0 {
+		t.Fatalf("legacy guest was tagged as protocol %s: builds=%d", GuestProtocolVersion, f.builds)
+	}
+}
+
 func containsArg(args []string, want string) bool {
 	for _, a := range args {
 		if a == want {
@@ -160,11 +175,19 @@ func TestRejectSymlinkAndInvalidBase(t *testing.T) {
 }
 
 func staticGuest(t *testing.T) string {
+	return staticGuestWithProtocol(t, true)
+}
+
+func staticGuestWithProtocol(t *testing.T, protocol bool) string {
 	t.Helper()
 	dir := t.TempDir()
 	src := filepath.Join(dir, "main.go")
 	binary := filepath.Join(dir, "guest")
-	if err := os.WriteFile(src, []byte("package main\nfunc main() {}\n"), 0600); err != nil {
+	contents := "package main\nfunc main() {}\n"
+	if protocol {
+		contents = "package main\nconst marker = \"" + guestapi.ProtocolMarker + "\"\nfunc main() { println(marker) }\n"
+	}
+	if err := os.WriteFile(src, []byte(contents), 0600); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("go", "build", "-o", binary, src)

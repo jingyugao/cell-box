@@ -101,6 +101,9 @@ func (r *localResumeWarmRuntime) WaitWarmStarted(_ context.Context, _ *api.Resum
 func (*localResumeWarmRuntime) InvalidateSnapshot(context.Context, *api.ResumablePod) error {
 	return nil
 }
+func (*localResumeWarmRuntime) NeedsGuestUnquiesce(context.Context, *api.ResumablePod) (bool, error) {
+	return true, nil
+}
 func (*localResumeWarmRuntime) ResumeGuest(_ context.Context, w *api.ResumablePod, p *core.Pod) error {
 	if w.Status.Execution == nil || w.Status.Execution.PodUID != string(p.UID) {
 		return errors.New("guest execution was not confirmed")
@@ -189,8 +192,8 @@ func testWarmResumeImmediate(t *testing.T) {
 	if localResult.Status.Phase != "Running" || localResult.Spec.DesiredState != "Running" || localResult.Status.PodUID != string(warm.UID) {
 		t.Fatalf("local reconcile did not complete Running: spec=%s phase=%s podUID=%s", localResult.Spec.DesiredState, localResult.Status.Phase, localResult.Status.PodUID)
 	}
-	if localResult.Status.ResumeReadyTransitionID != "resume-7" || localResult.Status.ObservedTransitionID != "resume-7" {
-		t.Fatal("completion preceded guest reopening")
+	if localResult.Status.ObservedTransitionID != "resume-7" {
+		t.Fatal("completion did not observe the resumed transition")
 	}
 	if err := r.WarmPool.removeIdle(ctx, warm); err != nil {
 		t.Fatalf("maintenance reclaimed a locally active slot: %v", err)
@@ -335,8 +338,8 @@ func testWarmResumeRestartWhileRestoring(t *testing.T) {
 	if completed.Status.Phase != "Running" || completed.Status.Cycle != 8 || completed.Status.PodUID != string(warm.UID) {
 		t.Fatalf("restart did not finish the same restore: phase=%s cycle=%d podUID=%s", completed.Status.Phase, completed.Status.Cycle, completed.Status.PodUID)
 	}
-	if completed.Status.ResumeReadyTransitionID != completed.Spec.TransitionID {
-		t.Fatal("restart completed before reopening the guest")
+	if completed.Status.ObservedTransitionID != completed.Spec.TransitionID {
+		t.Fatal("restart completion did not observe the resumed transition")
 	}
 	completedRecord, err := secondClient.LocalRecord(ctx, key)
 	if err != nil || completedRecord == nil || !completedRecord.Complete || completedRecord.Pod == nil || completedRecord.Pod.UID != warm.UID {

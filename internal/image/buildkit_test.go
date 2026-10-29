@@ -40,7 +40,7 @@ func TestPrepareBuildKitReturnsPublishedDigest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(string(dockerfile), "FROM "+base+"\n") || !strings.Contains(string(dockerfile), "COPY product/ /opt/product/") {
+	if !strings.HasPrefix(string(dockerfile), "FROM "+base+"\n") || !strings.Contains(string(dockerfile), "COPY product/ /opt/product/") || !strings.Contains(string(dockerfile), GuestProtocolLabel+"=\""+GuestProtocolVersion+"\"") {
 		t.Fatalf("wrong fixed Dockerfile: %s", dockerfile)
 	}
 	canary := filepath.Join(dir, "host-canary")
@@ -60,7 +60,7 @@ func TestPrepareBuildKitReturnsPublishedDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(dockerfile)), "\n")
-	if len(lines) != 6 || lines[1] != "COPY product/ /opt/product/" || lines[2] != "USER 0:0" || !strings.HasPrefix(lines[4], "LABEL ") || lines[5] != "COPY --chmod=0755 guest /opt/cellbox/bin/cellbox-container-agent" {
+	if len(lines) != 6 || lines[1] != "COPY product/ /opt/product/" || lines[2] != "USER 0:0" || !strings.HasPrefix(lines[4], "LABEL ") || !strings.Contains(lines[4], GuestProtocolLabel+"=\""+GuestProtocolVersion+"\"") || lines[5] != "COPY --chmod=0755 guest /opt/cellbox/bin/cellbox-container-agent" {
 		t.Fatalf("build command escaped its stage or overwrote guest injection: %s", dockerfile)
 	}
 	var argv []string

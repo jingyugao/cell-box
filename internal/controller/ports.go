@@ -89,6 +89,8 @@ func (r *Reconciler) waitListening(ctx context.Context, w *api.ResumablePod, p *
 			return
 		}
 		if execution != nil {
+			slog.Info("resume ports confirmed", "box", workload.Name, "transitionID", workload.Spec.TransitionID,
+				"podUID", execution.PodUID, "ports", workload.Spec.WaitPorts)
 			if notifier, ok := r.Client.(interface{ Notify(types.NamespacedName) }); ok {
 				notifier.Notify(key)
 			}

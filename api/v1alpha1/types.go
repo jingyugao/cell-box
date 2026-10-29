@@ -83,19 +83,16 @@ type Status struct {
 	ObservedGeneration int64  `json:"observedGeneration,omitempty"`
 	// ObservedTransitionID is set with lifecycle phase updates and identifies
 	// the transition whose requested state the controller has observed.
-	ObservedTransitionID string `json:"observedTransitionID,omitempty"`
-	// Deprecated: readiness is represented by Phase and ObservedTransitionID.
-	// This field is ignored and is never serialized.
-	ResumeReadyTransitionID string           `json:"-"`
-	SpecHash                string           `json:"specHash,omitempty"`
-	Cycle                   int64            `json:"cycle,omitempty"`
-	PodName                 string           `json:"podName,omitempty"`
-	PodUID                  string           `json:"podUID,omitempty"`
-	Execution               *Execution       `json:"execution,omitempty"`
-	Snapshot                string           `json:"snapshot,omitempty"`
-	RetryNonce              string           `json:"retryNonce,omitempty"`
-	Since                   meta.Time        `json:"since,omitempty"`
-	Conditions              []meta.Condition `json:"conditions,omitempty"`
+	ObservedTransitionID string           `json:"observedTransitionID,omitempty"`
+	SpecHash             string           `json:"specHash,omitempty"`
+	Cycle                int64            `json:"cycle,omitempty"`
+	PodName              string           `json:"podName,omitempty"`
+	PodUID               string           `json:"podUID,omitempty"`
+	Execution            *Execution       `json:"execution,omitempty"`
+	Snapshot             string           `json:"snapshot,omitempty"`
+	RetryNonce           string           `json:"retryNonce,omitempty"`
+	Since                meta.Time        `json:"since,omitempty"`
+	Conditions           []meta.Condition `json:"conditions,omitempty"`
 }
 type ResumablePod struct {
 	meta.TypeMeta   `json:",inline"`

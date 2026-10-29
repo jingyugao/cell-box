@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"runtime"
 	"strconv"
@@ -35,6 +36,7 @@ var (
 )
 
 type listenEvent struct {
+	timestampNS uint64
 	netnsCookie uint64
 	port        uint16
 }
@@ -225,6 +227,11 @@ func (m *Monitor) WaitPortsListening(ctx context.Context, netnsPath string, port
 				return errors.New("network namespace changed while waiting for ports")
 			}
 			if allListening(current, wanted) {
+				var now unix.Timespec
+				if unix.ClockGettime(unix.CLOCK_MONOTONIC, &now) == nil {
+					slog.Info("TCP listen event confirmed", "netnsCookie", cookie, "ports", ports,
+						"eventToConfirmationUs", (now.Nano()-int64(event.timestampNS))/1000)
+				}
 				return nil
 			}
 		}
@@ -303,6 +310,7 @@ func (m *Monitor) readEvents() {
 		}
 		sample := record.RawSample
 		event := listenEvent{
+			timestampNS: binary.NativeEndian.Uint64(sample[0:8]),
 			netnsCookie: binary.NativeEndian.Uint64(sample[8:16]),
 			port:        uint16(binary.NativeEndian.Uint32(sample[24:28])),
 		}

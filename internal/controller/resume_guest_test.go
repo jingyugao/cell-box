@@ -14,10 +14,18 @@ type guestResumeFakeRuntime struct {
 	*fakeRuntime
 	failure error
 	calls   int
+	needed  bool
+}
+
+func (f *guestResumeFakeRuntime) NeedsGuestUnquiesce(context.Context, *api.ResumablePod) (bool, error) {
+	return f.needed, nil
 }
 
 func (f *guestResumeFakeRuntime) ResumeGuest(context.Context, *api.ResumablePod, *core.Pod) error {
 	f.calls++
+	if f.failure == nil {
+		f.needed = false
+	}
 	return f.failure
 }
 
@@ -40,7 +48,7 @@ func TestStartedPublishesRunningOnlyAfterGuestResumeAndCanRetry(t *testing.T) {
 	if err := r.Get(ctx, client.ObjectKey{Namespace: w.Namespace, Name: w.Status.PodName}, p); err != nil {
 		t.Fatal(err)
 	}
-	node := &guestResumeFakeRuntime{fakeRuntime: runtime, failure: errors.New("Guest not reachable")}
+	node := &guestResumeFakeRuntime{fakeRuntime: runtime, failure: errors.New("Guest not reachable"), needed: true}
 	r.Runtime = node
 	if _, err := r.started(ctx, w, p); err == nil {
 		t.Fatal("published success after Guest failure")
@@ -49,7 +57,7 @@ func TestStartedPublishesRunningOnlyAfterGuestResumeAndCanRetry(t *testing.T) {
 	if err := r.Get(ctx, key, current); err != nil {
 		t.Fatal(err)
 	}
-	if current.Status.Phase != "Restoring" || current.Status.ResumeReadyTransitionID != "" {
+	if current.Status.Phase != "Restoring" || current.Status.ObservedTransitionID == "resume-one" {
 		t.Fatal("Guest failure became terminal Running")
 	}
 	node.failure = nil
@@ -59,7 +67,7 @@ func TestStartedPublishesRunningOnlyAfterGuestResumeAndCanRetry(t *testing.T) {
 	if err := r.Get(ctx, key, current); err != nil {
 		t.Fatal(err)
 	}
-	if current.Status.Phase != "Running" || current.Status.ResumeReadyTransitionID != "resume-one" || current.Status.ObservedTransitionID != "resume-one" {
+	if current.Status.Phase != "Running" || current.Status.ObservedTransitionID != "resume-one" {
 		t.Fatalf("incomplete result: %+v", current.Status)
 	}
 	if _, err := r.started(ctx, current, p); err != nil {
