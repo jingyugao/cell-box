@@ -31,6 +31,8 @@ type Server struct {
 	busy           int
 	proc           *os.Process
 	proxyTransport *http.Transport
+	identityMu     sync.Mutex
+	identity       string
 }
 
 func NewServer(c guestapi.Config, self string, staged bool) (*Server, error) {
@@ -42,17 +44,18 @@ func NewServer(c guestapi.Config, self string, staged bool) (*Server, error) {
 		return nil, errors.New("guest executable path must be absolute")
 	}
 	transport := &http.Transport{Proxy: nil, MaxIdleConns: 64, MaxIdleConnsPerHost: 8, IdleConnTimeout: 30 * time.Second, ResponseHeaderTimeout: 30 * time.Second}
-	return &Server{cfg: c, self: self, tools: tools, staged: staged, proxyTransport: transport}, nil
+	return &Server{cfg: c, self: self, tools: tools, staged: staged, proxyTransport: transport, identity: c.Env[guestapi.InstanceIDEnv]}, nil
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		if instanceID := s.cfg.Env[guestapi.InstanceIDEnv]; instanceID != "" {
+		if instanceID := s.instanceID(); instanceID != "" {
 			w.Header().Set(guestapi.InstanceIDHeader, instanceID)
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("POST /v1/identity", s.identityHandler)
 	mux.HandleFunc("GET /v1/ports/listening", s.portsListeningHandler)
 	mux.HandleFunc("POST /v1/exec", s.execHandler)
 	mux.HandleFunc("GET /v1/files", s.fileHandler)
@@ -69,14 +72,51 @@ func (s *Server) Handler() http.Handler {
 	return s.checkInstanceID(mux)
 }
 
+func (s *Server) instanceID() string {
+	s.identityMu.Lock()
+	defer s.identityMu.Unlock()
+	return s.identity
+}
+
+// identityHandler binds the Guest to a Box once. Repeating the same ID is
+// accepted; a different one is refused, so a bound Guest never changes owner.
+func (s *Server) identityHandler(w http.ResponseWriter, r *http.Request) {
+	var req guestapi.IdentityRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.InstanceID == "" || len(req.InstanceID) > 128 {
+		http.Error(w, "invalid instance ID", http.StatusBadRequest)
+		return
+	}
+	s.identityMu.Lock()
+	defer s.identityMu.Unlock()
+	if s.identity != "" && s.identity != req.InstanceID {
+		w.Header().Set(guestapi.InstanceMismatchHeader, "true")
+		http.Error(w, "box instance mismatch", http.StatusConflict)
+		return
+	}
+	s.identity = req.InstanceID
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (s *Server) checkInstanceID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		want := s.cfg.Env[guestapi.InstanceIDEnv]
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/identity" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		want := s.instanceID()
 		got := r.Header.Get(guestapi.InstanceIDHeader)
 		// Keep unaffiliated health probes usable, while checking any identity
 		// the caller supplies and requiring it for all other routes.
 		if r.URL.Path == "/healthz" && got == "" {
 			next.ServeHTTP(w, r)
+			return
+		}
+		if want == "" && got != "" {
+			w.Header().Set(guestapi.InstanceUnboundHeader, "true")
+			http.Error(w, "box instance not bound", http.StatusConflict)
 			return
 		}
 		if got != want {

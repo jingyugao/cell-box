@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -478,3 +479,32 @@ func TestInspectRejectsExecutionSwitchDuringPodRead(t *testing.T) {
 	}
 }
 func boolPtr(v bool) *bool { return &v }
+
+// The identity belongs in an annotation, never in the command line: two Boxes
+// of one revision must run the same command so one warm slot fits both.
+func TestGuestIdentityStaysOutOfTheCommandLine(t *testing.T) {
+	p, s, ctx := fixture(t)
+	plain, err := buildWanted(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.GuestIdentity = "guest-1"
+	h, err := p.Create(ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &api.ResumablePod{}
+	if err = p.Client.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
+		t.Fatal(err)
+	}
+	if w.Annotations[api.GuestIdentityAnnotation] != "guest-1" {
+		t.Fatalf("identity annotation missing: %v", w.Annotations)
+	}
+	if !reflect.DeepEqual(w.Spec.Container.Args, plain.Spec.Container.Args) {
+		t.Fatalf("identity changed the command line:\n%v\n%v", w.Spec.Container.Args, plain.Spec.Container.Args)
+	}
+	s.GuestIdentity = "guest-2"
+	if _, err = p.Create(ctx, s); err == nil {
+		t.Fatal("an existing Box was adopted under another identity")
+	}
+}

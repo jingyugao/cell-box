@@ -685,3 +685,43 @@ func TestRequestsForAnotherBoxAreRejected(t *testing.T) {
 		t.Fatalf("matching identity was rejected: %d", w.Code)
 	}
 }
+
+// A fresh Guest has no identity. It must say so (so the caller can bind it),
+// bind exactly once, and keep refusing every other Box afterwards.
+func TestGuestIsBoundOnceThroughTheIdentityEndpoint(t *testing.T) {
+	s, err := NewServer(testConfig(t), "/bin/true", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+	call := func(method, path, id, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		if id != "" {
+			r.Header.Set(guestapi.InstanceIDHeader, id)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	if w := call("GET", "/healthz", "", ""); w.Code != 200 {
+		t.Fatalf("anonymous probe of an unbound Guest: %d", w.Code)
+	}
+	if w := call("GET", "/healthz", "guest-1", ""); w.Code != http.StatusConflict || w.Header().Get(guestapi.InstanceUnboundHeader) != "true" {
+		t.Fatalf("an unbound Guest must report that it is unbound: %d %v", w.Code, w.Header())
+	}
+	if w := call("POST", "/v1/identity", "", `{"instanceId":"guest-1"}`); w.Code != 200 {
+		t.Fatalf("bind: %d %s", w.Code, w.Body)
+	}
+	if w := call("POST", "/v1/identity", "", `{"instanceId":"guest-1"}`); w.Code != 200 {
+		t.Fatalf("binding the same ID again must be accepted: %d", w.Code)
+	}
+	if w := call("POST", "/v1/identity", "", `{"instanceId":"guest-2"}`); w.Code != http.StatusConflict {
+		t.Fatalf("a bound Guest changed owner: %d", w.Code)
+	}
+	if w := call("GET", "/healthz", "guest-1", ""); w.Code != 200 || w.Header().Get(guestapi.InstanceIDHeader) != "guest-1" {
+		t.Fatalf("bound health check: %d %v", w.Code, w.Header())
+	}
+	if w := call("GET", "/healthz", "guest-2", ""); w.Code != http.StatusConflict || w.Header().Get(guestapi.InstanceMismatchHeader) != "true" {
+		t.Fatalf("another Box's request after binding: %d %v", w.Code, w.Header())
+	}
+}

@@ -48,7 +48,7 @@ The node does not wait for kubelet Pod status. It confirms the execution through
 
 ### After the resume: routing requests
 
-Requests to a running Box go straight to its Pod IP on port 40000. The server keeps the address of each committed execution in memory, and the Guest rejects any request that carries another Box's identity, so a stale address cannot reach the wrong Box. This does not shorten the resume, but it keeps the first requests after it fast: a request through the API proxy costs about 1.3 ms, against 8-40 ms when every request read Kubernetes.
+Requests to a running Box go straight to its Pod IP on port 40000. The server keeps the address of each committed execution in memory, and the Guest rejects any request that carries another Box's identity, so a stale address cannot reach the wrong Box. The identity is not part of the Guest command line (that would make every Box's warm slot different): the server binds it once through `POST /v1/identity` on the first request to a fresh Guest, and the Guest keeps it in memory, so a checkpoint carries it. This does not shorten the resume, but it keeps the first requests after it fast: a request through the API proxy costs about 1.3 ms, against 8-40 ms when every request read Kubernetes.
 
 ## 4. Where the time goes
 

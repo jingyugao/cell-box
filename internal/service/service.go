@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -429,7 +430,8 @@ func runtimeTiming(boxID, phase string, started time.Time, err error) {
 }
 func runtimeSpec(b boxRecord) boxprovider.Spec {
 	config := b.Profile.Guest
-	if b.GuestIdentity != "" {
+	if b.GuestIdentity != "" && b.Profile.Provider != "resumable-k8s-pod" {
+		// Only providers without warm runtimes carry the ID on the command line.
 		config.Env = maps.Clone(config.Env)
 		if config.Env == nil {
 			config.Env = make(map[string]string)
@@ -440,7 +442,7 @@ func runtimeSpec(b boxRecord) boxprovider.Spec {
 		config.DebugHome = "/home/debug"
 	}
 	metadata, _ := json.Marshal(inventory.Record{ClientID: b.ClientID, Box: mustBoxJSON(b.Box), Staged: b.Staged})
-	return boxprovider.Spec{Inventory: metadata, Mounts: b.VolumeMounts, HomeVolumeUID: b.HomeVolumeUID, BoxID: b.Box.ID, Image: b.Profile.Image, Config: config, CPU: b.Profile.CPU, MemoryMiB: b.Profile.MemoryMiB, Namespace: b.Profile.Namespace, NodeName: b.Profile.NodeName, SharedReadOnlyHostPath: b.Profile.SharedReadOnlyHostPath, DebugReadOnlyHostPath: b.Profile.DebugReadOnlyHostPath, DebugReadWriteHostPath: b.Profile.DebugReadWriteHostPath, PersistentHome: b.Profile.PersistentHome, Staged: b.Staged}
+	return boxprovider.Spec{Inventory: metadata, Mounts: b.VolumeMounts, HomeVolumeUID: b.HomeVolumeUID, BoxID: b.Box.ID, Image: b.Profile.Image, Config: config, GuestIdentity: b.GuestIdentity, CPU: b.Profile.CPU, MemoryMiB: b.Profile.MemoryMiB, Namespace: b.Profile.Namespace, NodeName: b.Profile.NodeName, SharedReadOnlyHostPath: b.Profile.SharedReadOnlyHostPath, DebugReadOnlyHostPath: b.Profile.DebugReadOnlyHostPath, DebugReadWriteHostPath: b.Profile.DebugReadWriteHostPath, PersistentHome: b.Profile.PersistentHome, Staged: b.Staged}
 }
 func (s *Service) rawBox(id string) (boxRecord, error) {
 	return s.store.BoxRecord(id)
@@ -641,7 +643,34 @@ func (s *Service) guestRequestHeaders(client *http.Client, ctx context.Context, 
 	} else {
 		r.Header.Del(guestapi.InstanceIDHeader)
 	}
-	return client.Do(r)
+	res, err := client.Do(r)
+	if err != nil || body != nil || b.GuestIdentity == "" || res.StatusCode != http.StatusConflict ||
+		res.Header.Get(guestapi.InstanceUnboundHeader) != "true" {
+		return res, err
+	}
+	// A fresh Guest process has no identity yet. Bind it and repeat the request,
+	// which is safe because it carries no body. Readiness probes take this path.
+	res.Body.Close()
+	if err = s.bindGuest(ctx, client, conn, b.GuestIdentity); err != nil {
+		return nil, err
+	}
+	retry := r.Clone(ctx)
+	return client.Do(retry)
+}
+
+func (s *Service) bindGuest(ctx context.Context, client *http.Client, conn boxprovider.Connection, id string) error {
+	data, _ := json.Marshal(guestapi.IdentityRequest{InstanceID: id})
+	r, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(conn.URL, "/")+"/v1/identity", bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	r.Header.Set("Content-Type", "application/json")
+	res, err := client.Do(r)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	return guestSuccess(res)
 }
 func guestSuccess(response *http.Response) error {
 	if response.StatusCode >= 200 && response.StatusCode < 300 {
@@ -650,6 +679,9 @@ func guestSuccess(response *http.Response) error {
 	code := "GUEST_REJECTED"
 	message := "Guest rejected the requested operation"
 	if response.StatusCode == 409 {
+		if response.Header.Get(guestapi.InstanceUnboundHeader) == "true" {
+			return apiError("CONFLICT", "Guest has not been bound to this Box yet; retry")
+		}
 		if response.Header.Get(guestapi.InstanceMismatchHeader) == "true" {
 			return apiError("STALE_GENERATION", "Guest belongs to another Box instance")
 		}

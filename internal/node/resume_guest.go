@@ -44,9 +44,12 @@ func (b *Backend) ResumeGuest(ctx context.Context, w *api.ResumablePod, p *core.
 	if err != nil {
 		return fmt.Errorf("create guest resume request")
 	}
-	instanceID, err := guestapi.InstanceIDFromArgs(w.Spec.Container.Args)
-	if err != nil {
-		return err
+	instanceID := w.Annotations[api.GuestIdentityAnnotation]
+	if instanceID == "" { // Boxes created before the identity left the command line.
+		var err error
+		if instanceID, err = guestapi.InstanceIDFromArgs(w.Spec.Container.Args); err != nil {
+			return err
+		}
 	}
 	if instanceID != "" {
 		req.Header.Set(guestapi.InstanceIDHeader, instanceID)
