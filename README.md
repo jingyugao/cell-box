@@ -57,12 +57,15 @@ client / Go SDK
 2. **Deploy.** Build the server image, configure `values.yaml` and install the Helm chart: [Deployment](docs/deployment.md).
 3. **Try it.** Create a template, build a revision, create a sandbox, run a command, then suspend and resume it: [REST quick start](docs/rest-quickstart.md) or [Go SDK guide](docs/go-sdk.md).
 
+No cluster? The [local quick start](docs/local-quickstart.md) runs Cellbox on one Linux host with the `local-runsc` provider. It has no warm pool, so the resume figure above does not apply to it.
+
 ## Documentation
 
 | Guide | Contents |
 | --- | --- |
 | [Concepts](docs/concepts.md) | Terms used everywhere: Box, template, revision, generation, checkpoint, warm pool |
 | [Node installation](docs/node-installation.md) | gVisor build, wrapper, containerd handler |
+| [Local quick start](docs/local-quickstart.md) | Run on one Linux host without Kubernetes |
 | [Deployment](docs/deployment.md) | Image, Helm values, upgrade |
 | [Usage](docs/cellbox-usage.md) | Templates, revisions and the sandbox lifecycle |
 | [REST quick start](docs/rest-quickstart.md) | `curl` examples |
