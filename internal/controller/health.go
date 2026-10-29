@@ -153,16 +153,25 @@ func (h *HealthChecker) recordHealthResult(ctx context.Context, local *runtimeco
 		}
 		return
 	}
+	if w.Status.Phase == "Restoring" && !startupExpired && !errors.Is(err, node.ErrExecutionLost) {
+		// Startup grace is not part of the consecutive failure count. In
+		// particular, failures recorded here must not carry into Running.
+		delete(failures, key)
+		if !errors.Is(err, node.ErrPortsNotListening) {
+			ctrl.LoggerFrom(ctx).Error(err, "cannot inspect execution health", "box", w.Name)
+		}
+		return
+	}
 	if !errors.Is(err, node.ErrExecutionLost) && !errors.Is(err, node.ErrPortsNotListening) {
 		// An unavailable CRI endpoint is not evidence that the application died.
 		ctrl.LoggerFrom(ctx).Error(err, "cannot inspect execution health", "box", w.Name)
-		if w.Status.Phase != "Restoring" || !startupExpired {
+		if w.Status.Phase != "Restoring" {
 			delete(failures, key)
 			return
 		}
 		err = fmt.Errorf("startup timeout: cannot confirm listening ports: %w", err)
 	}
-	identity := fmt.Sprintf("%s/%s/%d/%s", w.UID, w.Spec.TransitionID, w.Status.Cycle, w.Status.PodUID)
+	identity := fmt.Sprintf("%s/%s/%d/%s/%s", w.UID, w.Spec.TransitionID, w.Status.Cycle, w.Status.PodUID, w.Status.Phase)
 	previous := failures[key]
 	if previous.execution != identity {
 		previous = healthFailure{execution: identity}
@@ -170,9 +179,6 @@ func (h *HealthChecker) recordHealthResult(ctx context.Context, local *runtimeco
 	previous.count++
 	failures[key] = previous
 	if !errors.Is(err, node.ErrExecutionLost) {
-		if w.Status.Phase == "Restoring" && !startupExpired {
-			return
-		}
 		if previous.count < 3 {
 			return
 		}

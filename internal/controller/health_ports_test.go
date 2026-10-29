@@ -280,6 +280,144 @@ func TestHealthMarksMissingPortsFailedAndWithdrawsServingPod(t *testing.T) {
 	}
 }
 
+func TestRestoringHealthFailuresDoNotCarryIntoRunning(t *testing.T) {
+	r, _, w := fixture(t)
+	prepareResumeFixture(t, r, w, "Restoring")
+	ctx := context.Background()
+	key := client.ObjectKeyFromObject(w)
+	current := &api.ResumablePod{}
+	if err := r.Get(ctx, key, current); err != nil {
+		t.Fatal(err)
+	}
+	current.Spec.StartupTimeoutSeconds = 30
+	if err := r.Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Since = meta.Now()
+	if err := r.Status().Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	h := &HealthChecker{Reconciler: r}
+	local := runtimecontrol.New(r.Client)
+	failures := make(map[types.NamespacedName]healthFailure)
+	for range 2 {
+		current = &api.ResumablePod{}
+		if err := r.Get(ctx, key, current); err != nil {
+			t.Fatal(err)
+		}
+		h.recordHealthResult(ctx, local, failures, healthResult{resource: current, err: node.ErrPortsNotListening})
+		if _, exists := failures[key]; exists {
+			t.Fatal("startup-grace failures were retained for Running")
+		}
+	}
+	current = &api.ResumablePod{}
+	if err := r.Get(ctx, key, current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Since = meta.NewTime(time.Now().Add(-31 * time.Second))
+	if err := r.Status().Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	for count := 1; count <= 2; count++ {
+		current = &api.ResumablePod{}
+		if err := r.Get(ctx, key, current); err != nil {
+			t.Fatal(err)
+		}
+		h.recordHealthResult(ctx, local, failures, healthResult{resource: current, err: node.ErrPortsNotListening})
+		current = &api.ResumablePod{}
+		if err := r.Get(ctx, key, current); err != nil {
+			t.Fatal(err)
+		}
+		if current.Status.Phase != "Restoring" || failures[key].count != count {
+			t.Fatalf("startup-timeout failure %d was not retained independently: phase=%s failures=%+v", count, current.Status.Phase, failures[key])
+		}
+	}
+
+	current = &api.ResumablePod{}
+	if err := r.Get(ctx, key, current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Phase = "Running"
+	current.Status.Since = meta.Now()
+	if err := r.Status().Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	for count := 1; count <= 3; count++ {
+		current = &api.ResumablePod{}
+		if err := r.Get(ctx, key, current); err != nil {
+			t.Fatal(err)
+		}
+		h.recordHealthResult(ctx, local, failures, healthResult{resource: current, err: node.ErrPortsNotListening})
+		current = &api.ResumablePod{}
+		if err := r.Get(ctx, key, current); err != nil {
+			t.Fatal(err)
+		}
+		if count < 3 && current.Status.Phase != "Running" {
+			t.Fatalf("Running failed after only %d Running health checks: phase=%s", count, current.Status.Phase)
+		}
+		if count == 3 && current.Status.Phase != "Failed" {
+			t.Fatalf("three consecutive Running health failures did not fail execution: phase=%s", current.Status.Phase)
+		}
+	}
+}
+
+func TestRestoringHealthFailuresCountAfterStartupTimeout(t *testing.T) {
+	r, _, w := fixture(t)
+	prepareResumeFixture(t, r, w, "Restoring")
+	ctx := context.Background()
+	key := client.ObjectKeyFromObject(w)
+	current := &api.ResumablePod{}
+	if err := r.Get(ctx, key, current); err != nil {
+		t.Fatal(err)
+	}
+	current.Spec.StartupTimeoutSeconds = 1
+	if err := r.Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Since = meta.Now()
+	if err := r.Status().Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	h := &HealthChecker{Reconciler: r}
+	local := runtimecontrol.New(r.Client)
+	failures := make(map[types.NamespacedName]healthFailure)
+	for range 2 {
+		current = &api.ResumablePod{}
+		if err := r.Get(ctx, key, current); err != nil {
+			t.Fatal(err)
+		}
+		h.recordHealthResult(ctx, local, failures, healthResult{resource: current, err: node.ErrPortsNotListening})
+		if _, exists := failures[key]; exists {
+			t.Fatal("startup-grace failures were retained past the startup timeout")
+		}
+	}
+	current = &api.ResumablePod{}
+	if err := r.Get(ctx, key, current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Since = meta.NewTime(time.Now().Add(-2 * time.Second))
+	if err := r.Status().Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	for count := 1; count <= 3; count++ {
+		current = &api.ResumablePod{}
+		if err := r.Get(ctx, key, current); err != nil {
+			t.Fatal(err)
+		}
+		h.recordHealthResult(ctx, local, failures, healthResult{resource: current, err: node.ErrPortsNotListening})
+		current = &api.ResumablePod{}
+		if err := r.Get(ctx, key, current); err != nil {
+			t.Fatal(err)
+		}
+		if count < 3 && current.Status.Phase != "Restoring" {
+			t.Fatalf("startup timeout failed after only %d consecutive checks: phase=%s", count, current.Status.Phase)
+		}
+		if count == 3 && current.Status.Phase != "Failed" {
+			t.Fatalf("startup timeout did not fail after three consecutive checks: phase=%s", current.Status.Phase)
+		}
+	}
+}
+
 func TestStaleHealthResultCannotOverwriteNewerTransition(t *testing.T) {
 	r, _, w := fixture(t)
 	ctx := context.Background()
