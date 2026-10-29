@@ -776,3 +776,41 @@ func TestGuestMismatchIsReportedAsStaleExecution(t *testing.T) {
 		t.Fatalf("ordinary conflict: %s", got)
 	}
 }
+
+// A fresh Guest process has no identity. The first request must bind it and
+// then succeed, and the ID it binds must be the Box's own.
+func TestBodylessRequestBindsAFreshGuestAndRepeats(t *testing.T) {
+	var bound string
+	var requests int
+	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path == "/v1/identity" {
+			var in guestapi.IdentityRequest
+			_ = json.NewDecoder(r.Body).Decode(&in)
+			bound = in.InstanceID
+			return
+		}
+		if bound == "" {
+			w.Header().Set(guestapi.InstanceUnboundHeader, "true")
+			http.Error(w, "unbound", http.StatusConflict)
+			return
+		}
+		if r.Header.Get(guestapi.InstanceIDHeader) != bound {
+			t.Errorf("request carried %q, guest bound to %q", r.Header.Get(guestapi.InstanceIDHeader), bound)
+		}
+	}))
+	defer guest.Close()
+	provider := &fakeCoreProvider{guestURL: guest.URL, created: true}
+	s := &Service{http: guest.Client(), providers: map[string]boxprovider.Provider{"docker": provider}}
+	b := boxRecord{GuestIdentity: "guest-1"}
+	b.Profile.Provider = "docker"
+	b.Box.Phase = "running"
+	res, err := s.guestRequest(context.Background(), b, "GET", "/healthz", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != 200 || bound != "guest-1" || requests != 3 {
+		t.Fatalf("status %d, bound %q, %d requests (want 200, guest-1, 3)", res.StatusCode, bound, requests)
+	}
+}

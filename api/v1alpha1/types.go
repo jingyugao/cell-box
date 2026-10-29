@@ -15,16 +15,20 @@ import (
 var GroupVersion = schema.GroupVersion{Group: "cellbox.jingyugao.github.io", Version: "v1alpha1"}
 
 const (
-	Kind                     = "Cellbox"
-	Finalizer                = "cellbox.jingyugao.github.io/cleanup"
-	OwnerLabel               = "cellbox.jingyugao.github.io/owner"
-	ServingLabel             = "cellbox.jingyugao.github.io/serving"
-	TicketAnnotation         = "dev.gvisor.internal.recovery.ticket"
-	Gate                     = "cellbox.jingyugao.github.io/prepared"
-	RuntimeClass             = "runsc-recoverable"
-	DebugHostMountPath       = "/var/lib/cellbox/debug/host"
-	DebugHomeMountPath       = "/home/debug"
-	SharedMountPath          = "/var/lib/cellbox/shared"
+	Kind               = "Cellbox"
+	Finalizer          = "cellbox.jingyugao.github.io/cleanup"
+	OwnerLabel         = "cellbox.jingyugao.github.io/owner"
+	ServingLabel       = "cellbox.jingyugao.github.io/serving"
+	TicketAnnotation   = "dev.gvisor.internal.recovery.ticket"
+	Gate               = "cellbox.jingyugao.github.io/prepared"
+	RuntimeClass       = "runsc-recoverable"
+	DebugHostMountPath = "/var/lib/cellbox/debug/host"
+	DebugHomeMountPath = "/home/debug"
+	SharedMountPath    = "/var/lib/cellbox/shared"
+	// GuestIdentityAnnotation holds the Box instance ID the Guest is bound to. It
+	// is not part of the container command line, so warm runtimes stay
+	// interchangeable between Boxes.
+	GuestIdentityAnnotation  = "cellbox.jingyugao.github.io/guest-identity"
 	ArchiveRequestAnnotation = "cellbox.jingyugao.github.io/archive-request"
 	ArchiveResultAnnotation  = "cellbox.jingyugao.github.io/archive-result"
 	ResumePathWarmPool       = "warm_pool"

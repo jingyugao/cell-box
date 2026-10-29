@@ -18,6 +18,16 @@ const InstanceIDEnv = "CELLBOX_INSTANCE_ID"
 const InstanceIDHeader = "X-Cellbox-Instance-ID"
 const InstanceMismatchHeader = "X-Cellbox-Instance-Mismatch"
 
+// InstanceUnboundHeader marks a 409 from a Guest that has no identity yet (a
+// fresh process). The caller binds it with POST /v1/identity and retries.
+const InstanceUnboundHeader = "X-Cellbox-Instance-Unbound"
+
+// IdentityRequest binds a Guest to one Box. The Guest keeps the identity in
+// memory, so a checkpoint carries it and a restored Guest answers as the same Box.
+type IdentityRequest struct {
+	InstanceID string `json:"instanceId"`
+}
+
 type CredentialBatch struct {
 	Slots map[string][]byte `json:"slots"`
 }

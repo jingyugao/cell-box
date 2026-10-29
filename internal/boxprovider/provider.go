@@ -23,6 +23,7 @@ type Spec struct {
 	BoxID                  string
 	Image                  string
 	Config                 guestapi.Config
+	GuestIdentity          string  // Routing identity the Guest is bound to; empty for providers that do not use one.
 	CPU                    float64 // Optional CPU limit; zero leaves it unset.
 	MemoryMiB              int64   // Optional memory limit; zero leaves it unset.
 	NodeName               string

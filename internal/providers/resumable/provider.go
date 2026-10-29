@@ -147,12 +147,18 @@ func buildWanted(spec boxprovider.Spec) (*api.ResumablePod, error) {
 			DebugReadWriteHostPath: spec.DebugReadWriteHostPath, PersistentHome: spec.PersistentHome, HomeVolumeUID: spec.HomeVolumeUID, Mounts: append([]api.VolumeMount(nil), spec.Mounts...),
 			ServicePorts: []core.ServicePort{{Name: "guest", Port: guestapi.Port, TargetPort: intstr.FromInt32(guestapi.Port), Protocol: core.ProtocolTCP}}},
 	}
+	if spec.GuestIdentity != "" {
+		wanted.Annotations = map[string]string{api.GuestIdentityAnnotation: spec.GuestIdentity}
+	}
 	if len(spec.Inventory) > 0 {
 		var record inventory.Record
 		if err = json.Unmarshal(spec.Inventory, &record); err != nil || record.ClientID == "" {
 			return nil, errors.New("invalid inventory metadata")
 		}
-		wanted.Annotations = map[string]string{inventory.Annotation: string(spec.Inventory)}
+		if wanted.Annotations == nil {
+			wanted.Annotations = map[string]string{}
+		}
+		wanted.Annotations[inventory.Annotation] = string(spec.Inventory)
 		wanted.Labels[inventory.ClientLabel] = inventory.ClientValue(record.ClientID)
 	}
 	return wanted, nil
@@ -197,7 +203,7 @@ func (p *Provider) Create(ctx context.Context, spec boxprovider.Spec) (boxprovid
 }
 
 func matchExisting(actual, wanted *api.ResumablePod) error {
-	if actual.UID == "" || actual.DeletionTimestamp != nil || actual.Labels[managedLabel] != "true" || actual.Labels[boxLabel] != wanted.Labels[boxLabel] || actual.Annotations[inventory.Annotation] != wanted.Annotations[inventory.Annotation] || actual.Labels[inventory.ClientLabel] != wanted.Labels[inventory.ClientLabel] || actual.Spec.NodeName != wanted.Spec.NodeName || actual.Spec.SharedReadOnlyHostPath != wanted.Spec.SharedReadOnlyHostPath || actual.Spec.DebugReadOnlyHostPath != wanted.Spec.DebugReadOnlyHostPath || actual.Spec.DebugReadWriteHostPath != wanted.Spec.DebugReadWriteHostPath || actual.Spec.PersistentHome != wanted.Spec.PersistentHome || actual.Spec.HomeVolumeUID != wanted.Spec.HomeVolumeUID || !apiequality.Semantic.DeepEqual(actual.Spec.Mounts, wanted.Spec.Mounts) || !apiequality.Semantic.DeepEqual(actual.Spec.Container, wanted.Spec.Container) || !apiequality.Semantic.DeepEqual(actual.Spec.ServicePorts, wanted.Spec.ServicePorts) {
+	if actual.UID == "" || actual.DeletionTimestamp != nil || actual.Labels[managedLabel] != "true" || actual.Labels[boxLabel] != wanted.Labels[boxLabel] || actual.Annotations[inventory.Annotation] != wanted.Annotations[inventory.Annotation] || actual.Annotations[api.GuestIdentityAnnotation] != wanted.Annotations[api.GuestIdentityAnnotation] || actual.Labels[inventory.ClientLabel] != wanted.Labels[inventory.ClientLabel] || actual.Spec.NodeName != wanted.Spec.NodeName || actual.Spec.SharedReadOnlyHostPath != wanted.Spec.SharedReadOnlyHostPath || actual.Spec.DebugReadOnlyHostPath != wanted.Spec.DebugReadOnlyHostPath || actual.Spec.DebugReadWriteHostPath != wanted.Spec.DebugReadWriteHostPath || actual.Spec.PersistentHome != wanted.Spec.PersistentHome || actual.Spec.HomeVolumeUID != wanted.Spec.HomeVolumeUID || !apiequality.Semantic.DeepEqual(actual.Spec.Mounts, wanted.Spec.Mounts) || !apiequality.Semantic.DeepEqual(actual.Spec.Container, wanted.Spec.Container) || !apiequality.Semantic.DeepEqual(actual.Spec.ServicePorts, wanted.Spec.ServicePorts) {
 		return fmt.Errorf("ResumablePod %s already exists with different ownership or immutable profile", actual.Name)
 	}
 	return nil
