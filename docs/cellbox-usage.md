@@ -1,98 +1,98 @@
-# Cellbox 使用流程与模板语义
+# Cellbox workflow and template semantics
 
-本文介绍当前版本的资源关系和使用边界。安装前先阅读[部署与升级](deployment.md)和[节点安装](node-installation.md)；运行示例见 [Go SDK 使用指南](go-sdk.md)与 [REST 快速开始](rest-quickstart.md)。完整 HTTP 契约以 [OpenAPI](../api/openapi.yaml) 为准。
+This page describes how the resources relate in the current version and where the boundaries of use are. Before installing, read [deployment and upgrade](deployment.md) and [node installation](node-installation.md). For runnable examples see the [Go SDK guide](go-sdk.md) and the [REST quickstart](rest-quickstart.md). For terms, see [Concepts and terminology](concepts.md). The full HTTP contract is the [OpenAPI document](../api/openapi.yaml).
 
-## 资源关系
+## Resource relationships
 
-| 资源 | 作用 |
+| Resource | Purpose |
 | --- | --- |
-| Client 数据命名空间 | 隔离调用方的模板 catalog 和业务记录。`X-Cellbox-Client-ID` 选择命名空间，省略时使用服务端默认值；它不是认证凭据 |
-| Profile | 管理员配置的运行时参数，包括 provider、节点、namespace、CPU、内存和 guest 配置；构建 revision 时保存配置快照 |
-| Template | 模板族，保存名称、描述、`defaultWarmSlots`（兼容字段，不再决定预热）和可选的 `stableRevisionId` |
-| Revision | 一次成功构建生成的版本，固定镜像 digest、构建输入和运行配置；可修改描述、active/retired 状态与 `warmSlots`（兼容字段，不再决定预热） |
-| Warm pool | 按兼容运行配置共享的预热槽位，用于加速 checkpoint 恢复；随节点上现有的 checkpoint 自动创建和回收，不属于某一个业务 sandbox，详见[预热池](warm-pool.md) |
-| Sandbox / Box | 从某个 revision 创建的运行实例，绑定创建时解析到的版本 |
-| Operation | 构建、创建、执行命令、生命周期等异步任务；用 operation ID 跟踪结果 |
-| Execution | 一次有时限的命令执行记录，包括退出码、stdout 和 stderr |
+| Client namespace | Isolates one caller's template catalog and records from another's. The `X-Cellbox-Client-ID` header selects it; if omitted, the server default is used. It is not an authentication credential |
+| Profile | Runtime parameters configured by the administrator: provider, node, Kubernetes namespace, CPU, memory and guest settings. A snapshot is stored when a revision is built |
+| Template | A family of revisions. Holds a name, a description, `defaultWarmSlots` (kept for compatibility; no longer decides warm-pool demand) and an optional `stableRevisionId` |
+| Revision | The result of one successful build. Fixes the image digest, the build inputs and the runtime configuration. Its description, `active`/`retired` status and `warmSlots` (kept for compatibility; no longer decides warm-pool demand) can be changed |
+| Warm pool | Prepared slots shared by compatible runtime configurations, used to speed up checkpoint restore. Created and released automatically based on the checkpoints that exist on the node. It does not belong to any one Box. See [warm pool](warm-pool.md) |
+| Box | A running or suspended instance created from a revision, pinned to the revision resolved when it was created. The SDK calls it a Sandbox |
+| Operation | An asynchronous task: build, create, exec, lifecycle change. Track the result with the Operation ID |
+| Exec | The record of one time-limited command, with exit code, stdout and stderr |
 
-API 不内置客户端身份认证。对外开放时，应由前置 Gateway 校验身份并控制可使用的 Client 数据命名空间。SDK 中的 Token 仅作为 Bearer 请求头发送给前置网关。
+The API has no built-in client authentication. When you expose it, put a gateway in front that verifies identity and controls which client namespaces a caller may use. The token in the SDK is only sent to that gateway, as a Bearer header.
 
-## 单进程运行方式
+## Single-process operation
 
-部署形态是固定到一个 Kubernetes 节点的 `cellbox-server`。HTTP API 与节点运行时在同一进程内通过函数调用协作：API 将 sandbox 变更提交到共享的按 key 排队器，运行时 worker 处理后把完成状态写回，并发布完整状态快照唤醒等待者。这样省去 API 与独立 controller 之间的通知链路。
+Cellbox runs as one `cellbox-server` pinned to a single Kubernetes node. The HTTP API and the node runtime cooperate inside the same process through function calls. The API submits Box changes to a shared keyed queue, a runtime worker processes them and writes the completed state back, and a full state snapshot is published to wake up waiters. This removes the notification path that would otherwise exist between the API and a separate controller.
 
-Kubernetes 中的 Cellbox 自定义资源仍是 sandbox 的持久记录，也是实际 Pod 和 Service 的 owner。进程重启后，server 可按 CR 和 owner 关系继续 reconciliation 与资源清理；这不表示会重放未确认的 API 操作。中断时无法确认结果的 operation 会以 `UNKNOWN_OUTCOME` 失败且不会自动重跑。Pod 调度、Pod 创建/删除、CRI 操作和 checkpoint I/O 仍经过 Kubernetes 与节点运行时。预热池配置、观察状态和镜像缓存请求在单进程路径中直接调用共享运行时组件，不靠 ConfigMap 在 API 与 controller 之间传消息。合并进程减少通知环节，不代表所有创建或恢复耗时都会消失；没有测量数据时不对延迟收益作数值承诺。
+The Cellbox custom resource in Kubernetes remains the durable record of a Box and the owner of its Pod and Service. After a process restart, the server can continue reconciliation and cleanup from the custom resources and their owner references. This does not mean unconfirmed API operations are replayed: an Operation whose outcome cannot be confirmed when the process is interrupted fails with `UNKNOWN_OUTCOME` and is not rerun. Pod scheduling, Pod creation and deletion, CRI operations and checkpoint I/O still go through Kubernetes and the node runtime. Warm-pool configuration, observed state and image cache requests call the shared runtime components directly instead of passing messages through a ConfigMap. Merging the processes removes steps from the notification path, but it does not remove every create or resume cost, and no numeric latency gain is claimed without measurements.
 
-## 从镜像到沙箱
+## From image to Box
 
-1. 创建 template，设置描述。此时没有具体运行镜像，也没有预热池。
-2. 为 template 构建 revision，提供 `userVersion`、`baseImage`、`profileId`，以及可选的 `buildCommand`、`runCommand`。
-3. 等待构建 operation 成功，取得 `result.revisionId`。基础镜像 tag 会解析为 digest，构建会注入 Cellbox guest。
-4. 将 template 的 stable 指针切到它。构建成功不会自动切换 stable。预热不需要单独开启：该 revision 的 sandbox 暂停产生 checkpoint 后，预热池会自动出现。
-5. 使用 `templateId` 创建 sandbox，跟随当时的 stable；或者使用 `revisionId` 固定版本。这两个字段必须且只能传一个。
-6. 等待创建完成，再执行命令、访问文件或管理生命周期；使用完成后显式销毁 sandbox。
+1. Create a template and set its description. There is no runnable image yet and no warm pool.
+2. Build a revision for the template. Provide `userVersion`, `baseImage` and `profileId`, and optionally `buildCommand` and `runCommand`.
+3. Wait for the build Operation to succeed and read `result.revisionId`. The base image tag is resolved to a digest, and the build injects the Cellbox guest.
+4. Point the template's stable pointer at the new revision. A successful build does not move the pointer by itself. Warm pools need no separate switch: once a Box of this revision is suspended and produces a checkpoint, a warm pool appears automatically.
+5. Create a Box with `templateId` to follow the stable revision at that moment, or with `revisionId` to pin a version. Pass exactly one of the two.
+6. Wait for the create to finish, then run commands, access files or manage the lifecycle. Destroy the Box explicitly when you are done.
 
-创建 sandbox 不再接受仅凭 `profileId` 选择镜像的旧流程。`ownerKey` 是业务关联标签，不保证唯一，也不用于去重。重复提交会创建独立请求；请求超时或连接中断时，先查询沙箱和 operation，再由调用方决定是否重试。
+Creating a Box no longer accepts the old flow of choosing an image by `profileId` alone. `ownerKey` is a label tying the Box to your own records; it is not unique and is not used to de-duplicate. Submitting a request again creates an independent request. If a request times out or the connection drops, query the Box and the Operation first, then decide whether to retry.
 
-`buildCommand` 在镜像构建过程中以 root 执行 `/bin/sh -c`，可安装扩展工具，例如 `npm install -g ...`。基础镜像必须提供所需的 shell 和包管理器，工具文件需允许 sandbox 的 agent 用户使用。构建输入会被保存，不要把密码或 token 写入命令。
+`buildCommand` runs during the image build as `/bin/sh -c` with root privileges, and can install extra tools, for example `npm install -g ...`. The base image must provide the shell and package manager you need, and the installed files must be usable by the Box's agent user. Build inputs are stored, so do not put passwords or tokens in the command.
 
-`runCommand` 是用字面 `docker run ...` 语法表达启动命令、环境变量、工作目录和端口的配置输入。服务端解析这些字段，不会真的执行 Docker 命令，也不会据此改写 OCI 镜像的 ENTRYPOINT。它必须引用与 `baseImage` 相同的基础镜像。详细限制见 [SDK 指南](go-sdk.md)。
+`runCommand` is a configuration input written in literal `docker run ...` syntax that expresses the start command, environment variables, working directory and ports. The server parses these fields. It does not run a Docker command and does not rewrite the image's OCI ENTRYPOINT. It must reference the same base image as `baseImage`. For details and limits see the [Go SDK guide](go-sdk.md).
 
-## 版本与 stable
+## Versions and the stable pointer
 
-同一模板族下，业务可以保持 `userVersion=1.01`，每次成功构建生成不同 revision，例如 `1.01-r1`、`1.01-r2`。基础镜像版本没变但工具安装命令变了，应构建新 revision。
+Within one template, the business can keep `userVersion=1.01`, and each successful build produces a different revision, for example `1.01-r1` and `1.01-r2`. If the base image version is unchanged but the tool installation command changed, build a new revision.
 
-已有 sandbox 固定引用其创建时解析到的 revision；切换 stable 不会替换已有实例。模板或 revision 的元数据更新需要 `expectedGeneration`，用于拒绝覆盖并发修改。更新后使用响应中的新 generation。
+An existing Box stays pinned to the revision resolved when it was created; moving the stable pointer does not replace existing instances. Metadata updates to a template or revision require `expectedGeneration`, which rejects overwriting a concurrent change. Use the new generation from the response afterwards.
 
-退休 revision 会阻止新建等需要 active 版本的选择；已有 sandbox 继续运行，其 checkpoint 仍可恢复。退休 stable revision 前，需先切换或清空 stable 指针。当前只允许删除没有任何 revision、也没有活动构建任务的空模板族；尚未提供 revision 删除接口。
+Retiring a revision blocks selections that need an active revision, such as creating new Boxes from it. Existing Boxes keep running and their checkpoints can still be restored. Before retiring the stable revision, switch or clear the stable pointer. Currently only an empty template can be deleted, meaning one with no revisions and no active build. There is no API to delete a revision yet.
 
-## 预热池何时创建与回收
+## When warm pools are created and released
 
-预热池只服务 checkpoint 恢复，需求来自**本节点上现有的 checkpoint**，不再来自 revision 的 `warmSlots`。后台每 500 ms 统计本节点处于 `Suspended` 且有 checkpoint 的 Box，按兼容运行配置分组：每组 1 个槽，checkpoint 达到 3 个时加到 2 个槽。节点总预算由 `controller.warmPoolSize` 限制，默认 2，允许 0–32，轮换时最多额外准备一个空闲槽位。
+The warm pool only serves checkpoint restore. Demand comes from **the checkpoints that exist on this node**, not from a revision's `warmSlots`. Every 500 ms the server counts the Boxes on this node that are `Suspended` and have a checkpoint, and groups them by compatible runtime configuration. Each group gets 1 slot, and 2 slots once it has 3 checkpoints. The node-wide budget is limited by `controller.warmPoolSize`, which defaults to 2 and accepts 0 to 32. During rotation, at most one extra idle slot may be prepared.
 
-| 变化 | 行为 |
+| Change | Behavior |
 | --- | --- |
-| 有 sandbox 暂停产生 checkpoint | 为它的兼容配置创建预热槽位，数秒内就绪 |
-| sandbox 恢复、销毁，或项目归档后 checkpoint 被删除 | 需求下降；某个配置的最后一个 checkpoint 消失后保留 1 个槽 20 分钟再释放 |
-| 修改 `warmSlots` / `defaultWarmSlots` | 不影响预热；`/warm-pool` 里的 `desiredSlots` 只回显配置值，实际需求看 `pool.requestedSlots` |
-| 切换 stable、退休 revision | 不影响预热；预热只看 checkpoint |
-| 多个 revision 的运行配置兼容 | 共享一个池；镜像相同本身不保证兼容 |
-| 要停用预热 | 将 `controller.warmPoolSize` 设为 0 |
+| A Box is suspended and produces a checkpoint | A warm slot is created for its compatible configuration and is ready within seconds |
+| A Box is resumed or destroyed, or its checkpoint is deleted after an archive | Demand drops. After the last checkpoint of a configuration disappears, one slot is kept for 20 minutes and then released |
+| `warmSlots` or `defaultWarmSlots` is changed | No effect on warm-up. `desiredSlots` in `/warm-pool` only echoes the configured value; read `pool.requestedSlots` for the real demand |
+| The stable pointer is moved or a revision is retired | No effect on warm-up. Warm-up depends only on checkpoints |
+| Several revisions have compatible runtime configurations | They share one pool. The same image alone does not guarantee compatibility |
+| You want to turn warm-up off | Set `controller.warmPoolSize` to 0 |
 
-当前预热槽位用于 resumable sandbox 的 checkpoint 恢复，首次冷创建不领取槽位。没有可用或匹配的预热槽位时，走普通 checkpoint 恢复路径。不要把预热就绪视为业务进程已启动。完整语义、槽位生命周期和排查方法见[预热池](warm-pool.md)。
+Warm slots are used to restore resumable Boxes from a checkpoint; a first cold create does not claim a slot. When no matching slot is available, resume takes the standard checkpoint restore path. Do not treat a ready warm slot as proof that the business process has started. For the full semantics, slot lifetime and troubleshooting, see [warm pool](warm-pool.md).
 
-## 查询状态与资源
+## Query state and resources
 
-| 接口 | 数据来源与含义 |
+| Endpoint | Data source and meaning |
 | --- | --- |
-| 模板、revision、构建 operation 和构建日志管理接口 | 服务持久数据目录中的 SQLite 与构建日志；请求不查询 Kubernetes。镜像解析和构建另需访问仓库与 BuildKit |
-| `GET /v1/templates/{id}/runtime` | 每次查询的各 revision 沙箱数量、阶段与最新预热状态 |
-| `GET /v1/template-revisions/{id}/warm-pool` | SQLite 期望配置与 controller 最新预热观察、池容量和资源配置量 |
-| `GET /v1/boxes/{id}` | 已保存的单个 sandbox 状态，不在请求中直接查询 Kubernetes，也不会隐式恢复 |
-| `GET /v1/boxes` | 运行时清单；Kubernetes provider 会查询集群。支持 templateId、revisionId、phase、limit、offset |
+| Template, revision, build Operation and build log endpoints | SQLite and build logs in the server's persistent data directory. These requests do not query Kubernetes. Resolving and building images additionally needs the registry and BuildKit |
+| `GET /v1/templates/{id}/runtime` | Per-revision Box count, phases and latest warm-pool state, queried on every request |
+| `GET /v1/template-revisions/{id}/warm-pool` | Desired configuration from SQLite plus the controller's latest warm-pool observation, pool capacity and resource settings |
+| `GET /v1/boxes/{id}` | The stored state of one Box. It does not query Kubernetes during the request and never resumes the Box implicitly |
+| `GET /v1/boxes` | The runtime inventory. The Kubernetes provider queries the cluster. Supports `templateId`, `revisionId`, `phase`, `limit` and `offset` |
 
-`GET /v1/templates/{id}/runtime` 每次请求都会为 Kubernetes profile 查询当前自定义资源清单，不列出 Pod；Docker 用量从 SQLite 读取。清单查询失败时 `sandboxCount` 为 `null` 并标记 `stale`。其中 `warmPool` 是 controller 最新观察快照，可能滞后。`GET /v1/template-revisions/{id}/warm-pool` 从 SQLite 读取期望 revision 配置，再返回该快照；它不在请求中查询 Kubernetes。使用时检查 `stale`、`observedAt`、`generation` 与 `observedGeneration`；`syncStatus=applied` 表示观察到的需求 hash 与当前 SQLite 期望值一致，不保证槽位已全部就绪，仍要检查池的 `readySlots`。
+For a Kubernetes profile, `GET /v1/templates/{id}/runtime` lists the current custom resources on every request and does not list Pods; Docker usage is read from SQLite. If the listing fails, `sandboxCount` is `null` and the response is marked `stale`. Its `warmPool` is the controller's latest observation and may lag. `GET /v1/template-revisions/{id}/warm-pool` reads the desired revision configuration from SQLite and then returns that observation; it does not query Kubernetes during the request. Check `stale`, `observedAt`, `generation` and `observedGeneration`. `syncStatus=applied` means the observed demand hash matches the current desired value in SQLite. It does not guarantee that all slots are ready, so also check the pool's `readySlots`.
 
-`sandboxCount: null` 或缺少池观察结果表示未知，不能当成 0。warm-pool 的 `observedAt` 是 controller 采集时间，超过约 15 秒会标记为过期；用量接口的 `observedAt` 是本次清单查询时间。池的 `requestedSlots`、`allocatedSlots` 和资源信息是共享池统计，同一个 `poolId` 可能在多个 revision 中出现，汇总时需去重。CPU/内存字段表示空闲 Pod 的 requests/limits 配置量，不是实时利用率；`failedSlots` 包括当前失败 Pod 和运行时循环最近 15 秒记录但已清理的失败。
+`sandboxCount: null`, or a missing pool observation, means unknown, not 0. The warm-pool `observedAt` is the time the controller collected the data, and it is marked stale after about 15 seconds. For the usage endpoint, `observedAt` is the time of this listing. A pool's `requestedSlots`, `allocatedSlots` and resource figures are statistics of the shared pool; the same `poolId` can appear under several revisions, so de-duplicate when you sum. The CPU and memory fields are the configured requests and limits of idle Pods, not live utilization. `failedSlots` includes Pods that are currently failed and failures the runtime loop recorded in the last 15 seconds for Pods that were already cleaned up.
 
-## 执行命令、文件与生命周期
+## Commands, files and lifecycle
 
-SDK 提供 `Commands.Run`、`Files.Read/Write/Open/List`、`Suspend/Resume` 等方法。完整可运行示例位于 [`sdk/go/examples`](../sdk/go/examples)，具体命令见 [SDK 指南](go-sdk.md)。
+The SDK provides `Commands.Run`, `Files.Read/Write/Open/List`, `Suspend/Resume` and more. Runnable examples are in [`sdk/go/examples`](../sdk/go/examples); the commands to run them are in the [Go SDK guide](go-sdk.md).
 
-命令必须有时限，服务端默认 30 秒、上限 5 分钟，当前没有 PTY 或流式输出。Operation 成功表示已获得执行结果，业务命令是否成功还需检查退出码。长驻业务进程应作为 revision 的工作负载启动。
+A command must have a time limit. The server default is 30 seconds and the maximum is 5 minutes. There is no PTY and no streamed output. A successful Operation means an Exec result was obtained; whether the business command succeeded still depends on its exit code. Start a long-running business process as the workload of a revision.
 
-文件路径相对于 profile 的 workspace，禁止绝对路径、父目录穿越和跟随符号链接。写入上限为 16 MiB；SDK `Read` 缓冲上限为 16 MiB，大文件下载使用 `Open` 并关闭返回的流。父目录需先创建，写文件会覆盖原内容，且不是原子操作。文件访问不会自动恢复暂停的 sandbox。
+File paths are relative to the profile's workspace. Absolute paths, parent-directory traversal and following symbolic links are rejected. Writes are limited to 16 MiB, and the SDK `Read` buffer is limited to 16 MiB; download large files with `Open` and close the returned stream. The parent directory must exist first, a write overwrites the existing content, and it is not atomic. File access never resumes a suspended Box.
 
-Kubernetes provider 支持 `running → suspend → suspended → resume → running`，使用同一节点上的 checkpoint 恢复进程状态。Docker provider 只支持基本创建、查询、命令、文件、直接服务代理和销毁；暂停恢复、归档恢复、暂存激活及受保护工具/凭据接口返回 `UNSUPPORTED_CAPABILITY`。运行中的命令可能使生命周期操作返回 `BUSY`。
+The Kubernetes provider supports `running -> suspend -> suspended -> resume -> running`, restoring process state from a checkpoint on the same node. The Docker provider supports only basic create, query, commands, files, direct service proxying and destroy. Suspend and resume, archive restore, activating a staged Box, and the protected tool and credential endpoints return `UNSUPPORTED_CAPABILITY`. A running command can make a lifecycle operation return `BUSY`.
 
-sandbox 的 runtime generation 与模板元数据 generation 是不同概念。恢复后 generation 可能变化：SDK `Resume`、`Activate` 返回新 handle，后续必须使用返回的 handle；REST 调用方应重新读取 sandbox generation。运行时就绪不等于业务健康。
+The Box generation and the template generation are different concepts. The Box generation can change after resume. The SDK's `Resume` and `Activate` return a new handle that you must use from then on; REST callers should read the Box generation again. A runtime that is ready is not necessarily healthy at the business level.
 
-原地升级、同 ID 重建、`ensure-running`、手动 `reconcile`、租约、域名路由注册及旧 `/v1/images*` 接口已删除。升级模板后创建新 sandbox；迁移 workspace 时由上层组合暂停、归档、新建恢复、验证和激活。请求中的 `Idempotency-Key` 不参与处理。
+In-place upgrade, same-ID rebuild, `ensure-running`, manual `reconcile`, leases, domain route registration and the old `/v1/images*` endpoints have been removed. After upgrading a template, create new Boxes. To migrate a workspace, the layer above composes suspend, archive, create-and-restore, verify and activate. The `Idempotency-Key` in a request is ignored.
 
-## 错误恢复与清理
+## Error recovery and cleanup
 
-生命周期、创建、命令和构建请求返回 `202` 只表示受理。保留 operation ID 并查询结果。Cellbox 不承诺请求重放；网络超时不说明请求是否已受理，调用方应先查询状态，不要自动重发命令、构建或归档。服务重启后无法确认的运行任务会以 `UNKNOWN_OUTCOME` 失败，不会自动重跑。取消客户端 context 只停止本地等待；模板构建可通过 operation ID 显式请求取消。
+A `202` from a lifecycle, create, command or build request only means the request was accepted. Keep the Operation ID and query the result. Cellbox does not promise request replay. A network timeout does not tell you whether the request was accepted, so query state first and do not automatically resend a command, build or archive. After a server restart, a runtime Operation whose outcome cannot be confirmed fails with `UNKNOWN_OUTCOME` and is not rerun. Cancelling a client context only stops the local wait; a template build can be cancelled explicitly through its Operation ID.
 
-销毁 sandbox 使用 `POST /v1/boxes/{id}:destroy` 或 SDK `Destroy`，并等待完成。它不会隐式取消正在执行的命令。示例程序会尝试清理自己创建的 sandbox，但保留 template 与 revision；真实业务也应使用独立的清理超时并处理失败。
+Destroy a Box with `POST /v1/boxes/{id}:destroy` or the SDK `Destroy`, and wait for it to finish. It does not implicitly cancel a command that is running. The example programs try to clean up the Boxes they create but keep the template and revision. Real applications should also use a separate cleanup timeout and handle failures.
 
-归档仅支持暂停状态或失败的 Kubernetes sandbox，且必须有持久 HOME、节点归档支持和已配置的 S3 兼容对象存储；不会自动暂停或自动恢复源 sandbox。恢复会创建新的空白暂存 sandbox，配置凭据后由调用方显式激活；恢复失败的候选实例不会自动重试，应由调用方销毁。Docker 不支持归档和恢复。具体请求见 [OpenAPI](../api/openapi.yaml)。
+Archive is supported only for suspended or failed Kubernetes Boxes. It requires a persistent HOME, archive support on the node and a configured S3-compatible object store. It does not suspend or resume the source Box automatically. A restore creates a new blank staged Box, which the caller activates explicitly after credentials are configured. A restore candidate that fails is not retried automatically and should be destroyed by the caller. Docker does not support archive or restore. For the exact requests see the [OpenAPI document](../api/openapi.yaml).
