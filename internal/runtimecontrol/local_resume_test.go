@@ -125,6 +125,10 @@ func TestLocalResumeCompletesWithoutRawKubernetesWrites(t *testing.T) {
 	defer stop()
 	_ = next(t, ch)
 	beginLocalResume(t, baseClient, got, pod)
+	completed, err := baseClient.LocalRecord(t.Context(), client.ObjectKeyFromObject(w))
+	if err != nil || completed == nil || completed.Resource.Status.ResumePath != api.ResumePathWarmPool {
+		t.Fatalf("warm resume path was not retained: record=%#v err=%v", completed, err)
+	}
 	select {
 	case event := <-ch:
 		if event.Resource == nil || event.Resource.Status.Phase != "Running" {
@@ -149,6 +153,28 @@ func TestLocalResumeCompletesWithoutRawKubernetesWrites(t *testing.T) {
 	}
 }
 
+func TestRequestResumeClearsPreviousResumePath(t *testing.T) {
+	_, journal, _ := openTestJournal(t)
+	w, _ := localResumeObjects("new-transition", "uid-new-transition")
+	w.Status.ResumePath = api.ResumePathWarmPool
+	c, _ := localFixture(t, w)
+	configureJournal(t, c, journal)
+	got := &api.ResumablePod{}
+	if err := c.Get(t.Context(), client.ObjectKeyFromObject(w), got); err != nil {
+		t.Fatal("failed to seed local journal")
+	}
+	if err := c.RequestResume(t.Context(), localHandle(w), "previous", "resume-next"); err != nil {
+		t.Fatal(err)
+	}
+	current := &api.ResumablePod{}
+	if err := c.Get(t.Context(), client.ObjectKeyFromObject(w), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.ResumePath != "" {
+		t.Fatalf("new resume retained previous path %q", current.Status.ResumePath)
+	}
+}
+
 func TestLocalResumeRecoversAndSyncsAfterClientRestart(t *testing.T) {
 	db, journal, _ := openTestJournal(t)
 	defer db.Close()
@@ -169,6 +195,9 @@ func TestLocalResumeRecoversAndSyncsAfterClientRestart(t *testing.T) {
 	}
 	if recovered.Status.Phase != "Running" || recovered.Spec.DesiredState != "Running" {
 		t.Fatalf("restart did not recover local Running state: spec=%s phase=%s", recovered.Spec.DesiredState, recovered.Status.Phase)
+	}
+	if recovered.Status.ResumePath != api.ResumePathWarmPool {
+		t.Fatalf("restart lost warm resume path: %q", recovered.Status.ResumePath)
 	}
 	if err := second.Sync(t.Context(), client.ObjectKeyFromObject(w)); err != nil {
 		t.Fatal(err)

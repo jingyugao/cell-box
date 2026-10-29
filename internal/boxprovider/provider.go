@@ -69,10 +69,10 @@ type Handle struct {
 type Observation struct {
 	Generation           uint64 // Provider-owned durable execution cycle, when available.
 	Phase                string // creating, running, freezing, frozen, unfreezing, checkpointing, suspending, suspended, resuming, restoring, staged, deleting, deleted, failed
-	GuestReady           bool   // A guest readiness proof for the current lifecycle transition, when available.
 	ExecutionID          string // immutable runtime identity; changes after Pod replacement
 	TransitionID         string // provider lifecycle transition associated with this observation
 	ObservedTransitionID string // transition token last committed by the runtime controller
+	ResumePath           string // warm_pool or standard; empty when unreported
 	Message              string
 }
 
@@ -159,7 +159,7 @@ type TransitionProvider interface {
 // ResumeRequestProvider commits a resume with a conditional transition token.
 // The request is fenced by the prior observed transition and the CR identity.
 type ResumeRequestProvider interface {
-	RequestResume(context.Context, Handle, string, string) error // expected previous ID, new ID
+	RequestResume(context.Context, Handle, string, string, ...int) error // expected previous ID, new ID, required listening ports
 }
 
 // CompletionObservationProvider streams complete lifecycle snapshots. Unlike

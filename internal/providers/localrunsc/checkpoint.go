@@ -2,12 +2,14 @@ package localrunsc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -175,11 +177,18 @@ func (p *Provider) Action(context.Context, boxprovider.Handle, string) error {
 	return boxprovider.ErrUnsupported
 }
 
-func (p *Provider) RequestResume(ctx context.Context, h boxprovider.Handle, previous, next string) error {
-	return p.ActionTransition(ctx, h, "resume", previous, next)
+func (p *Provider) RequestResume(ctx context.Context, h boxprovider.Handle, previous, next string, ports ...int) error {
+	if len(ports) == 0 {
+		ports = []int{guestapi.Port}
+	}
+	return p.actionTransition(ctx, h, "resume", previous, next, ports)
 }
 
 func (p *Provider) ActionTransition(ctx context.Context, h boxprovider.Handle, action, previous, next string) (result error) {
+	return p.actionTransition(ctx, h, action, previous, next, nil)
+}
+
+func (p *Provider) actionTransition(ctx context.Context, h boxprovider.Handle, action, previous, next string, ports []int) (result error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	defer func() {
@@ -194,27 +203,19 @@ func (p *Provider) ActionTransition(ctx context.Context, h boxprovider.Handle, a
 	if !identifier.MatchString(next) || next == previous || r.TransitionID != previous {
 		return boxprovider.ErrStaleTransition
 	}
+	if action == "resume" {
+		ports, err = boxprovider.NormalizeWaitPorts(ports)
+		if err != nil {
+			return err
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	switch action {
 	case "suspend":
-		err := p.suspend(ctx, r, next)
-		if err != nil {
-			// The caller quiesced the guest before admission. A rejection before
-			// the durable suspending intent must leave that running guest usable.
-			current, loadErr := p.owned(h)
-			if loadErr == nil && current.Phase == "running" && current.TransitionID == previous {
-				undoCtx, undoCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-				undoErr := unquiesce(undoCtx, current.Network.Guest)
-				undoCancel()
-				if undoErr != nil {
-					return p.failTransition(current, errors.Join(err, undoErr))
-				}
-			}
-		}
-		return err
+		return p.suspend(ctx, r, next)
 	case "resume":
-		return p.resume(ctx, r, next)
+		return p.resume(ctx, r, next, ports)
 	default:
 		return boxprovider.ErrUnsupported
 	}
@@ -344,9 +345,12 @@ func (p *Provider) validateSnapshot(r record) error {
 	return nil
 }
 
-func (p *Provider) resume(ctx context.Context, r record, transition string) error {
+func (p *Provider) resume(ctx context.Context, r record, transition string, ports []int) error {
 	if r.Phase != "suspended" || r.Generation == math.MaxUint64 {
 		return boxprovider.ErrNotReady
+	}
+	if r.GuestPortProtocol < 1 && (len(ports) != 1 || ports[0] != guestapi.Port) {
+		return fmt.Errorf("%w: legacy Guest checkpoint cannot inspect custom wait ports", boxprovider.ErrUnsupported)
 	}
 	if err := p.validateSnapshot(r); err != nil {
 		return err
@@ -395,7 +399,7 @@ func (p *Provider) resume(ctx context.Context, r record, transition string) erro
 	if _, err := p.run(ctx, "restore", "--detach", "--bundle="+filepath.Join(p.dir(r.Handle.Name), "bundle"), "--image-path="+p.snapshotPath(r), r.Handle.ID); err != nil {
 		return p.failTransition(r, err)
 	}
-	if err := unquiesce(ctx, r.Network.Guest); err != nil {
+	if err := waitPortsListening(ctx, r.Network.Guest, ports); err != nil {
 		return p.failTransition(r, err)
 	}
 	s, err := p.state(ctx, r.Handle.ID)
@@ -413,40 +417,89 @@ func (p *Provider) resume(ctx context.Context, r record, transition string) erro
 	return nil
 }
 
-func unquiesce(ctx context.Context, guest string) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
+func waitPortsListening(ctx context.Context, guest string, ports []int) error {
+	values := make(url.Values, 1)
+	portStrings := make([]string, len(ports))
+	for i, port := range ports {
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("invalid wait port %d", port)
+		}
+		portStrings[i] = strconv.Itoa(port)
+	}
+	values.Set("ports", strings.Join(portStrings, ","))
 	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true, ResponseHeaderTimeout: time.Second}
 	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: 2 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	request := func(method, path string) error {
-		req, err := http.NewRequestWithContext(ctx, method, fmt.Sprintf("http://%s:%d%s", guest, guestapi.Port, path), nil)
+	client := &http.Client{Transport: transport, Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s:%d/v1/ports/listening?%s", guest, guestapi.Port, values.Encode()), nil)
 		if err != nil {
 			return err
 		}
 		response, err := client.Do(req)
-		if err != nil {
-			return err
-		}
-		defer response.Body.Close()
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-		if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusNoContent {
-			return fmt.Errorf("restored guest %s: HTTP %d", path, response.StatusCode)
-		}
-		return nil
-	}
-	for {
-		if err := request(http.MethodGet, "/healthz"); err == nil {
-			if err := request(http.MethodPost, "/v1/unquiesce"); err != nil {
-				return err
+		if err == nil {
+			status := response.StatusCode
+			if status == http.StatusNotFound {
+				_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+				_ = response.Body.Close()
+				if len(ports) != 1 || ports[0] != guestapi.Port {
+					return fmt.Errorf("%w: restored Guest cannot inspect custom ports", boxprovider.ErrUnsupported)
+				}
+				return unquiesceLegacyGuest(ctx, client, guest)
 			}
-			return request(http.MethodGet, "/healthz")
+			if status != http.StatusOK {
+				_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+				_ = response.Body.Close()
+				return fmt.Errorf("guest port inspection: HTTP %d", status)
+			}
+			var state listeningPorts
+			decodeErr := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&state)
+			_, _ = io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
+			if decodeErr != nil {
+				return fmt.Errorf("decode guest port inspection: %w", decodeErr)
+			}
+			listening := make(map[int]bool, len(state.Listening))
+			for _, port := range state.Listening {
+				listening[port] = true
+			}
+			complete := len(state.Missing) == 0
+			for _, port := range ports {
+				complete = complete && listening[port]
+			}
+			if complete {
+				return nil
+			}
+		} else if ctx.Err() != nil {
+			return fmt.Errorf("wait for guest ports %v: %w", ports, ctx.Err())
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("restored guest readiness: %w", ctx.Err())
-		case <-time.After(100 * time.Millisecond):
+			return fmt.Errorf("wait for guest ports %v: %w", ports, ctx.Err())
+		case <-ticker.C:
 		}
 	}
+}
+
+func unquiesceLegacyGuest(ctx context.Context, client *http.Client, guest string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://%s:%d/v1/unquiesce", guest, guestapi.Port), nil)
+	if err != nil {
+		return err
+	}
+	response, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("reopen legacy Guest admission: %w", err)
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("reopen legacy Guest admission: HTTP %d", response.StatusCode)
+	}
+	return nil
+}
+
+type listeningPorts struct {
+	Listening []int `json:"listening"`
+	Missing   []int `json:"missing"`
 }

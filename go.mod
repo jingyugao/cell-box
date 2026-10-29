@@ -9,6 +9,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.4.12
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.0
 	github.com/aws/smithy-go v1.28.1
+	github.com/cilium/ebpf v0.16.0
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/google/go-containerregistry v0.22.1
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.65.0
@@ -53,7 +55,6 @@ require (
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect
 	github.com/evanphx/json-patch/v5 v5.9.11 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
-	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect

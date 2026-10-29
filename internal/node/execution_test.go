@@ -38,6 +38,12 @@ func TestWarmExecutionRequiresStartedBusinessContainer(t *testing.T) {
 	check(false)
 	c.containers = []*cri.Container{{Id: "child", PodSandboxId: "sandbox", Metadata: &cri.ContainerMetadata{Name: "guest"}, Labels: map[string]string{"io.kubernetes.pod.uid": "uid"}, State: cri.ContainerState_CONTAINER_CREATED}}
 	check(false)
+	// Port readiness observes restored sockets even while CRI still reports
+	// the application container as CREATED.
+	e, err := b.inspectExecution(context.Background(), w, p, "sandbox", false)
+	if err != nil || e == nil {
+		t.Fatalf("restoring execution=%+v error=%v", e, err)
+	}
 	c.containers[0].State = cri.ContainerState_CONTAINER_RUNNING
 	check(true)
 	c.containers[0].Metadata.Attempt = 1

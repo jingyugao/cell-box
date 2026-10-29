@@ -88,7 +88,7 @@ func (b *Backend) ConfirmExecution(ctx context.Context, w *api.ResumablePod, p *
 	if len(sandboxes) != 1 || sandboxes[0] == nil || sandboxes[0].Id == "" {
 		return nil, fmt.Errorf("local guest execution is missing or ambiguous")
 	}
-	actual, err := b.warmExecution(criCtx, w, p, sandboxes[0].Id)
+	actual, err := b.inspectExecution(criCtx, w, p, sandboxes[0].Id, false)
 	if err != nil {
 		return nil, fmt.Errorf("inspect local guest execution")
 	}

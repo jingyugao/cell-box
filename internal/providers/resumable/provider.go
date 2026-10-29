@@ -75,9 +75,6 @@ func buildWanted(spec boxprovider.Spec) (*api.ResumablePod, error) {
 	if spec.HomeVolumeUID != "" && !spec.PersistentHome {
 		return nil, errors.New("homeVolumeUID requires persistentHome")
 	}
-	if spec.PersistentHome && spec.HomeVolumeUID == "" && spec.Mounts == nil {
-		return nil, errors.New("persistentHome requires an independent volume")
-	}
 	if spec.Mounts != nil {
 		if len(spec.Mounts) == 0 {
 			return nil, errors.New("mounts must not be empty when specified")
@@ -165,6 +162,9 @@ func (p *Provider) Create(ctx context.Context, spec boxprovider.Spec) (boxprovid
 	if p == nil || p.Client == nil {
 		return boxprovider.Handle{}, errors.New("Kubernetes client is required")
 	}
+	if spec.PersistentHome && spec.HomeVolumeUID == "" && spec.Mounts == nil {
+		return boxprovider.Handle{}, errors.New("persistentHome requires an independent volume")
+	}
 	wanted, err := buildWanted(spec)
 	if err != nil {
 		return boxprovider.Handle{}, err
@@ -232,8 +232,10 @@ func (p *Provider) Inspect(ctx context.Context, h boxprovider.Handle) (boxprovid
 	if err != nil {
 		return boxprovider.Observation{}, err
 	}
-	obs := boxprovider.Observation{ExecutionID: w.Status.PodUID, Message: w.Status.Message, Generation: uint64(w.Status.Cycle), TransitionID: w.Spec.TransitionID, ObservedTransitionID: w.Status.ObservedTransitionID,
-		GuestReady: w.Spec.TransitionID != "" && w.Status.ResumeReadyTransitionID == w.Spec.TransitionID && w.Status.ObservedTransitionID == w.Spec.TransitionID && w.Status.ObservedGeneration == w.Generation}
+	obs := boxprovider.Observation{ExecutionID: w.Status.PodUID, Message: w.Status.Message, Generation: uint64(w.Status.Cycle), TransitionID: w.Spec.TransitionID, ObservedTransitionID: w.Status.ObservedTransitionID}
+	if w.Status.ObservedTransitionID == w.Spec.TransitionID {
+		obs.ResumePath = w.Status.ResumePath
+	}
 	if w.DeletionTimestamp != nil {
 		obs.Phase = "deleting"
 		return obs, nil
@@ -681,7 +683,7 @@ func (p *Provider) localExecution(ctx context.Context, h boxprovider.Handle, exp
 		return nil, boxprovider.ErrStaleExecution
 	}
 	if !r.Complete || r.Pod == nil || w.DeletionTimestamp != nil || w.Spec.DesiredState != "Running" || w.Status.Phase != "Running" ||
-		w.Status.ObservedGeneration != w.Generation || w.Status.ObservedTransitionID != w.Spec.TransitionID || w.Status.ResumeReadyTransitionID != w.Spec.TransitionID ||
+		w.Status.ObservedGeneration != w.Generation || w.Status.ObservedTransitionID != w.Spec.TransitionID ||
 		w.Status.Execution == nil || p.ConfirmExecutionLocal == nil {
 		return nil, boxprovider.ErrNotReady
 	}

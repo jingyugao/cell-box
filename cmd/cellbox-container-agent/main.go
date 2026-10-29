@@ -23,9 +23,12 @@ func main() {
 
 func mainErr() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: cellbox-container-agent serve|tool")
+		return errors.New("usage: cellbox-container-agent serve|tool|protocol-version")
 	}
 	switch os.Args[1] {
+	case "protocol-version":
+		_, err := fmt.Fprintln(os.Stdout, guestapi.ProtocolMarker)
+		return err
 	case "__child":
 		return guest.RunChild(os.Args[2:])
 	case "tool":

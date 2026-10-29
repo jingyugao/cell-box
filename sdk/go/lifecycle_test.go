@@ -51,6 +51,38 @@ func TestResumeReturnsFreshGenerationWithoutMutatingOriginalHandle(t *testing.T)
 	}
 }
 
+func TestResumeOptionsSerializesWaitPorts(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/boxes/box-1:resume" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL)
+			http.NotFound(w, r)
+			return
+		}
+		requests.Add(1)
+		var body struct {
+			WaitPorts []int `json:"waitPorts"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode resume request: %v", err)
+		} else if len(body.WaitPorts) != 2 || body.WaitPorts[0] != 8080 || body.WaitPorts[1] != 80 {
+			t.Errorf("waitPorts = %v, want caller order [8080 80]", body.WaitPorts)
+		}
+		writeJSONTest(w, Operation{ID: "op-resume", Status: "succeeded", Box: &SandboxInfo{ID: "box-1", Generation: 4, Phase: "running"}})
+	}))
+	defer server.Close()
+	original := testClient(t, server, "").sandbox(SandboxInfo{ID: "box-1", Generation: 3})
+	if _, err := original.Resume(context.Background(), ResumeOptions{WaitPorts: []int{8080, 80}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := original.Resume(context.Background(), ResumeOptions{WaitPorts: []int{}}); err == nil {
+		t.Fatal("explicit empty waitPorts was accepted")
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("resume requests=%d, want 1; empty options should fail before HTTP", requests.Load())
+	}
+}
+
 func TestLifecycleRefreshFailureRetainsOperationAndUnprovisionedBoxCanBeDestroyed(t *testing.T) {
 	var destroyed atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

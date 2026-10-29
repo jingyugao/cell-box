@@ -14,6 +14,7 @@ import (
 	"time"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
+	"cellbox.local/cellbox/internal/boxprovider"
 	"cellbox.local/cellbox/internal/homevolume"
 	"cellbox.local/cellbox/internal/runtime"
 	"cellbox.local/cellbox/internal/runtimecontrol"
@@ -36,6 +37,7 @@ type Reconciler struct {
 	NodeBase     string
 	RuntimeClass string
 	WarmPool     *WarmPool
+	ports        portWaits
 }
 
 func (r *Reconciler) nodeBase() string {
@@ -62,7 +64,8 @@ type executionRuntime interface {
 	WaitWarmStarted(context.Context, *api.ResumablePod, *core.Pod) (*api.Execution, error)
 }
 
-type guestResumeRuntime interface {
+type legacyGuestRuntime interface {
+	NeedsGuestUnquiesce(context.Context, *api.ResumablePod) (bool, error)
 	ResumeGuest(context.Context, *api.ResumablePod, *core.Pod) error
 }
 
@@ -215,6 +218,9 @@ func admittedDebugMount(w *api.ResumablePod, p *core.Pod, nodeBases ...string) b
 	return reflect.DeepEqual(p.Spec.Volumes, wantVolumes) && reflect.DeepEqual(p.Spec.Containers[0].VolumeMounts, wantMounts)
 }
 func validate(w *api.ResumablePod, nodeBases ...string) error {
+	if _, err := boxprovider.NormalizeWaitPorts(w.Spec.WaitPorts); err != nil {
+		return err
+	}
 	nodeBase := homevolume.DefaultBase
 	if len(nodeBases) != 0 && nodeBases[0] != "" {
 		nodeBase = nodeBases[0]
@@ -378,6 +384,7 @@ func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (traceResul
 	w.Status.PodName = fmt.Sprintf("cb-%s-%d", string(w.UID)[:8], w.Status.Cycle)
 	w.Status.PodUID = ""
 	w.Status.Execution = nil
+	w.Status.ResumePath = ""
 	if w.Status.Snapshot != "" && r.WarmPool != nil {
 		p, err := r.WarmPool.acquire(ctx, w)
 		if err != nil {
@@ -387,6 +394,7 @@ func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (traceResul
 			warm = p
 			w.Status.PodName = p.Name
 			w.Status.PodUID = string(p.UID)
+			w.Status.ResumePath = api.ResumePathWarmPool
 		}
 		ctrl.LoggerFrom(ctx).Info("warm Pod acquisition finished", "podUID", w.Status.PodUID, "durationMs", time.Since(started).Milliseconds())
 	}
@@ -400,6 +408,9 @@ func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (traceResul
 	phase := "Creating"
 	if w.Status.Snapshot != "" {
 		phase = "Restoring"
+		if warm == nil {
+			w.Status.ResumePath = api.ResumePathStandard
+		}
 	}
 	result, err := r.phase(ctx, w, phase, "Preparing a new Pod execution")
 	ctrl.LoggerFrom(ctx).Info("execution assignment persisted", "podUID", w.Status.PodUID, "durationMs", time.Since(started).Milliseconds())
@@ -415,6 +426,9 @@ func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (traceResul
 }
 
 func (r *Reconciler) waitWarmStarted(ctx context.Context, w *api.ResumablePod, p *core.Pod) (ctrl.Result, error) {
+	if _, ok := r.Runtime.(listeningRuntime); ok {
+		return r.waitListening(ctx, w, p)
+	}
 	backend, ok := r.Runtime.(executionRuntime)
 	if !ok {
 		return again, nil
@@ -442,8 +456,16 @@ func (r *Reconciler) started(ctx context.Context, w *api.ResumablePod, p *core.P
 	// Replay eligibility is removed durably before either the Service or the
 	// API may connect. Publish Running last so its notification is actionable.
 	w.Status.Snapshot = ""
-	if err := r.resumeGuest(ctx, w, p); err != nil {
-		return again, err
+	if legacy, ok := r.Runtime.(legacyGuestRuntime); ok && w.Spec.TransitionID != "" {
+		needed, err := legacy.NeedsGuestUnquiesce(ctx, w)
+		if err != nil {
+			return again, err
+		}
+		if needed {
+			if err := legacy.ResumeGuest(ctx, w, p); err != nil {
+				return again, err
+			}
+		}
 	}
 	if _, ok := r.Runtime.(snapshotInvalidator); ok {
 		if err := r.serving(ctx, p, true); err != nil {
@@ -455,22 +477,6 @@ func (r *Reconciler) started(ctx context.Context, w *api.ResumablePod, p *core.P
 	return result, err
 }
 
-// Reopen Guest admission before publishing an actionable Running result. The
-// runtime validates the locally known execution; no API-side Pod lookup follows.
-func (r *Reconciler) resumeGuest(ctx context.Context, w *api.ResumablePod, p *core.Pod) error {
-	if w.Spec.TransitionID == "" || w.Status.ResumeReadyTransitionID == w.Spec.TransitionID {
-		return nil
-	}
-	backend, ok := r.Runtime.(guestResumeRuntime)
-	if !ok {
-		return nil // Legacy runtimes leave Guest reopening to the API.
-	}
-	if err := backend.ResumeGuest(ctx, w, p); err != nil {
-		return err
-	}
-	w.Status.ResumeReadyTransitionID = w.Spec.TransitionID
-	return nil
-}
 func (r *Reconciler) service(ctx context.Context, w *api.ResumablePod) (retErr error) {
 	if len(w.Spec.ServicePorts) == 0 {
 		return nil
@@ -556,6 +562,9 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (traceResu
 	if w.Spec.NodeName != r.NodeName {
 		return ctrl.Result{}, nil
 	}
+	if w.DeletionTimestamp != nil || (w.Status.Phase != "Restoring" && w.Status.Phase != "Creating") {
+		r.stopPortWait(req.NamespacedName)
+	}
 	localPending := false
 	if local, ok := r.Client.(*runtimecontrol.Client); ok {
 		record, err := local.LocalRecord(ctx, req.NamespacedName)
@@ -563,7 +572,7 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (traceResu
 			return again, err
 		}
 		localPending = record != nil
-		if record != nil && record.Complete && w.DeletionTimestamp == nil {
+		if record != nil && record.Complete && w.Status.Phase != "Failed" && w.DeletionTimestamp == nil {
 			// Completion is already actionable locally. Publication runs in the
 			// background and must not re-enter the lifecycle while it is pending.
 			return ctrl.Result{}, nil
@@ -631,6 +640,11 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (traceResu
 		}
 		controllerutil.RemoveFinalizer(w, api.Finalizer)
 		return ctrl.Result{}, r.Update(ctx, w)
+	}
+	if w.Status.Phase == "Failed" && p != nil {
+		if err := r.serving(ctx, p, false); err != nil {
+			return again, err
+		}
 	}
 	if w.Status.Phase == "Failing" {
 		if diagnostics, ok := r.Runtime.(failureDiagnostics); ok {
@@ -763,6 +777,11 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (traceResu
 				return fail(fmt.Errorf("unexpected container restart"))
 			}
 		}
+		if w.Status.Phase == "Restoring" {
+			if _, ok := r.Runtime.(listeningRuntime); ok {
+				return r.waitListening(ctx, w, p)
+			}
+		}
 		if api.ExecutionStarted(p, w.Spec.Container.Name) {
 			return r.started(ctx, w, p)
 		}
@@ -791,14 +810,6 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (traceResu
 			}
 			w.Status.Snapshot = fmt.Sprintf("checkpoint-%d", w.Status.Cycle)
 			return r.phase(ctx, w, "Checkpointing", "Service endpoint withdrawn; saving sandbox")
-		}
-		if w.Spec.TransitionID != "" && w.Status.ResumeReadyTransitionID != w.Spec.TransitionID {
-			if _, ok := r.Runtime.(guestResumeRuntime); ok {
-				if err = r.resumeGuest(ctx, w, p); err != nil {
-					return again, err
-				}
-				return r.phase(ctx, w, "Running", "Guest admission reopened for the current execution", ready(p))
-			}
 		}
 		if err = r.serving(ctx, p, api.AvailableExecution(w, p)); err != nil {
 			return again, err

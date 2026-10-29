@@ -128,8 +128,6 @@ func (s *Service) runRuntimeFeed(id string, feed *runtimeFeed) {
 }
 
 func (s *Service) waitNodeResume(ctx context.Context, b boxRecord, transitionID string) (boxprovider.Observation, error) {
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(s.config.StartupTimeoutSeconds)*time.Second)
-	defer cancel()
 	feed := s.ensureRuntimeFeed(b)
 	requestedObserved := false
 	for {
@@ -154,7 +152,7 @@ func (s *Service) waitNodeResume(ctx context.Context, b boxRecord, transitionID 
 			if observation.Phase == "failed" || observation.Phase == "deleted" {
 				return boxprovider.Observation{}, apiError("READINESS_FAILED", "Runtime entered failed state")
 			}
-			if observation.Phase == "running" && observation.GuestReady && observation.ExecutionID != "" {
+			if observation.Phase == "running" && observation.ExecutionID != "" {
 				return observation, nil
 			}
 		}

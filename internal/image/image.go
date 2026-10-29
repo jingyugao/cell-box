@@ -18,12 +18,16 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"cellbox.local/cellbox/internal/guestapi"
 )
 
 const (
-	ManagedLabel  = "cellbox.managed-image"
-	IdentityLabel = "cellbox.image-key"
-	ImageVersion  = "2"
+	ManagedLabel         = "cellbox.managed-image"
+	IdentityLabel        = "cellbox.image-key"
+	GuestProtocolLabel   = "cellbox.guest-protocol"
+	GuestProtocolVersion = guestapi.ProtocolVersion
+	ImageVersion         = "2"
 )
 
 var imageIDPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
@@ -135,12 +139,12 @@ func (b *Builder) Prepare(ctx context.Context, opts Options) (result Result, err
 			return zero, errors.New("product payload already contains manifest.json")
 		}
 	}
-	keyBytes := sha256.Sum256([]byte(strings.Join([]string{ImageVersion, base.ID, opts.Platform, guestHash, productHash, manifestHash}, "\n")))
+	keyBytes := sha256.Sum256([]byte(strings.Join([]string{ImageVersion, GuestProtocolVersion, base.ID, opts.Platform, guestHash, productHash, manifestHash}, "\n")))
 	key := hex.EncodeToString(keyBytes[:])
 	tag := "cellbox-prepared:" + key
 	result = Result{Tag: tag, BaseID: base.ID, Key: key}
 	if cached, err := b.inspect(ctx, tag); err == nil {
-		if cached.Config.Labels[ManagedLabel] != ImageVersion || cached.Config.Labels[IdentityLabel] != key {
+		if cached.Config.Labels[ManagedLabel] != ImageVersion || cached.Config.Labels[IdentityLabel] != key || cached.Config.Labels[GuestProtocolLabel] != GuestProtocolVersion {
 			return zero, errors.New("prepared image tag owned by incompatible image")
 		}
 		result.ImageID = cached.ID
@@ -224,7 +228,7 @@ func (b *Builder) Prepare(ctx context.Context, opts Options) (result Result, err
 		}
 	}()
 	// Fixed instructions prevent payload or base image names from injecting Dockerfile commands.
-	dockerfile := "FROM " + localBaseTag + "\nLABEL " + ManagedLabel + "=\"" + ImageVersion + "\" " + IdentityLabel + "=\"" + key + "\"\nCOPY --chmod=0755 guest /opt/cellbox/bin/cellbox-container-agent\n"
+	dockerfile := "FROM " + localBaseTag + "\nLABEL " + ManagedLabel + "=\"" + ImageVersion + "\" " + IdentityLabel + "=\"" + key + "\" " + GuestProtocolLabel + "=\"" + GuestProtocolVersion + "\"\nCOPY --chmod=0755 guest /opt/cellbox/bin/cellbox-container-agent\n"
 	if opts.ProductDir != "" || opts.Manifest != "" {
 		dockerfile += "COPY product/ /opt/product/\n"
 	}
@@ -243,7 +247,7 @@ func (b *Builder) Prepare(ctx context.Context, opts Options) (result Result, err
 	if err != nil {
 		return zero, err
 	}
-	if built.Config.Labels[ManagedLabel] != ImageVersion || built.Config.Labels[IdentityLabel] != key {
+	if built.Config.Labels[ManagedLabel] != ImageVersion || built.Config.Labels[IdentityLabel] != key || built.Config.Labels[GuestProtocolLabel] != GuestProtocolVersion {
 		return zero, errors.New("built image labels do not match composition")
 	}
 	result.ImageID = built.ID
@@ -314,6 +318,13 @@ func validateGuest(path string) error {
 		if p.Type == elf.PT_INTERP {
 			return errors.New("guest must be statically linked")
 		}
+	}
+	protocol, err := guestapi.BinaryProtocolVersion(path)
+	if err != nil {
+		return fmt.Errorf("inspect guest protocol: %w", err)
+	}
+	if protocol != GuestProtocolVersion {
+		return fmt.Errorf("guest must support protocol version %s", GuestProtocolVersion)
 	}
 	return nil
 }

@@ -11,12 +11,14 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	api "cellbox.local/cellbox/api/v1alpha1"
 	"cellbox.local/cellbox/internal/homevolume"
 	"cellbox.local/cellbox/internal/inventory"
 	"cellbox.local/cellbox/internal/objectstorage"
+	"cellbox.local/cellbox/internal/portwait"
 	"cellbox.local/cellbox/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
@@ -35,6 +37,9 @@ type Backend struct {
 	Runtime            cri.RuntimeServiceClient
 	Images             cri.ImageServiceClient
 	connection         *grpc.ClientConn
+	portsMu            sync.Mutex
+	ports              *portwait.Monitor
+	closed             bool
 	// Objects stores archive payloads. Checkpoint payloads remain on their
 	// assigned node under Base; Checkpoints stores only their inventory records.
 	Objects     objectstorage.Objects
@@ -64,6 +69,12 @@ func New(socket string) (*Backend, error) {
 }
 
 func (b *Backend) Close() error {
+	b.portsMu.Lock()
+	b.closed = true
+	if b.ports != nil {
+		_ = b.ports.Close()
+	}
+	b.portsMu.Unlock()
 	if b.connection != nil {
 		return b.connection.Close()
 	}
@@ -121,7 +132,7 @@ func (b *Backend) sandboxes(ctx context.Context, p *core.Pod) ([]*cri.PodSandbox
 	for _, s := range res.Items {
 		m := s.Metadata
 		if m == nil || m.Uid != string(p.UID) || m.Namespace != p.Namespace || m.Name != p.Name || s.RuntimeHandler != b.runtimeHandler() {
-			return nil, fmt.Errorf("CRI sandbox identity/runtime mismatch")
+			return nil, fmt.Errorf("%w: CRI sandbox identity/runtime mismatch", ErrExecutionLost)
 		}
 		out = append(out, s)
 	}

@@ -153,20 +153,42 @@ func TestEmbeddedResumeDispatchAndCompletionNeedNoKubernetesWatch(t *testing.T) 
 	w.Status.PodUID = "new-execution"
 	w.Status.Cycle = 2
 	w.Status.ObservedGeneration = w.Generation
-	w.Status.ObservedTransitionID = "resume"
-	w.Status.ResumeReadyTransitionID = "resume"
+	w.Status.ObservedTransitionID = "previous"
+	w.Status.ResumePath = api.ResumePathWarmPool
 	if err = local.Status().Update(ctx, w); err != nil {
 		t.Fatal(err)
 	}
 	q.Done(request)
-	for {
-		event := next()
-		if event.Phase == "running" && event.GuestReady {
-			if event.ExecutionID != "new-execution" || event.Generation != 2 || event.TransitionID != "resume" {
-				t.Fatalf("wrong completion: %+v", event)
-			}
-			break
-		}
+	wrongTransition := next()
+	for wrongTransition.Phase != "running" {
+		wrongTransition = next()
+	}
+	if wrongTransition.Phase != "running" || wrongTransition.TransitionID != "resume" || wrongTransition.ObservedTransitionID != "previous" {
+		t.Fatalf("wrong-transition observation = %+v", wrongTransition)
+	}
+	if wrongTransition.ResumePath != "" {
+		t.Fatalf("provider exposed stale resume path %q before transition commit", wrongTransition.ResumePath)
+	}
+	if wrongTransition.ObservedTransitionID == wrongTransition.TransitionID {
+		t.Fatal("test setup did not produce an uncommitted transition")
+	}
+	if err = counted.Client.Get(ctx, request.NamespacedName, w); err != nil {
+		t.Fatal(err)
+	}
+	w.Status.ObservedTransitionID = "resume"
+	w.Status.ResumePath = api.ResumePathStandard
+	if err = local.Status().Update(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	completed := next()
+	for completed.Phase != "running" || completed.ObservedTransitionID != "resume" {
+		completed = next()
+	}
+	if completed.Phase != "running" || completed.ObservedTransitionID != "resume" || completed.ExecutionID != "new-execution" || completed.Generation != 2 {
+		t.Fatalf("wrong committed completion: %+v", completed)
+	}
+	if completed.ResumePath != api.ResumePathStandard {
+		t.Fatalf("provider omitted committed resume path: %+v", completed)
 	}
 	if counted.watchedVersion.Load() != nil || counted.lists.Load() != 0 || counted.gets.Load() != initialReads {
 		t.Fatalf("resume used a watch/LIST/follow-up GET: reads=%d initial=%d lists=%d", counted.gets.Load(), initialReads, counted.lists.Load())
@@ -284,6 +306,24 @@ func TestRequestResumeSameTokenRecoveryDoesNotRestoreAgain(t *testing.T) {
 	}
 	if c.patches.Load() != 0 || c.gets.Load() != 1 {
 		t.Fatal("recovery changed the existing command")
+	}
+}
+
+func TestRequestResumePersistsNormalizedPortsAndRejectsDifferentReplay(t *testing.T) {
+	p, spec, ctx := fixture(t)
+	h := createSuspendedForResume(t, p, spec, ctx, "previous")
+	if err := p.RequestResume(ctx, h, "previous", "resume", 8080, 80, 8080); err != nil {
+		t.Fatal(err)
+	}
+	w := &api.ResumablePod{}
+	if err := p.Client.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, w); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.Spec.WaitPorts) != 2 || w.Spec.WaitPorts[0] != 80 || w.Spec.WaitPorts[1] != 8080 {
+		t.Fatalf("persisted waitPorts=%v, want normalized [80 8080]", w.Spec.WaitPorts)
+	}
+	if err := p.RequestResume(ctx, h, "resume", "resume", 8080); !errors.Is(err, boxprovider.ErrStaleTransition) {
+		t.Fatalf("same transition with different ports error=%v, want stale transition", err)
 	}
 }
 

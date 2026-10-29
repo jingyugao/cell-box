@@ -84,6 +84,10 @@ func (b *Backend) WaitWarmStarted(ctx context.Context, w *api.ResumablePod, p *c
 }
 
 func (b *Backend) warmExecution(ctx context.Context, w *api.ResumablePod, p *core.Pod, sid string) (*api.Execution, error) {
+	return b.inspectExecution(ctx, w, p, sid, true)
+}
+
+func (b *Backend) inspectExecution(ctx context.Context, w *api.ResumablePod, p *core.Pod, sid string, requireRunning bool) (*api.Execution, error) {
 	containers, err := b.Runtime.ListContainers(ctx, &cri.ListContainersRequest{Filter: &cri.ContainerFilter{PodSandboxId: sid}})
 	if err != nil {
 		return nil, err
@@ -92,13 +96,16 @@ func (b *Backend) warmExecution(ctx context.Context, w *api.ResumablePod, p *cor
 		return nil, nil
 	}
 	if len(containers.Containers) != 1 {
-		return nil, fmt.Errorf("ambiguous warm execution containers")
+		return nil, fmt.Errorf("%w: ambiguous warm execution containers", ErrExecutionLost)
 	}
 	c := containers.Containers[0]
 	if c.Metadata == nil || c.Metadata.Name != w.Spec.Container.Name || c.Metadata.Attempt != 0 || c.PodSandboxId != sid || c.Id == "" || c.Labels["io.kubernetes.pod.uid"] != string(p.UID) {
-		return nil, fmt.Errorf("warm container identity changed")
+		return nil, fmt.Errorf("%w: warm container identity changed", ErrExecutionLost)
 	}
-	if c.State != cri.ContainerState_CONTAINER_RUNNING {
+	if c.State == cri.ContainerState_CONTAINER_EXITED || c.State == cri.ContainerState_CONTAINER_UNKNOWN {
+		return nil, ErrExecutionLost
+	}
+	if requireRunning && c.State != cri.ContainerState_CONTAINER_RUNNING {
 		return nil, nil
 	}
 	sandbox, err := b.Runtime.PodSandboxStatus(ctx, &cri.PodSandboxStatusRequest{PodSandboxId: sid})
@@ -107,7 +114,7 @@ func (b *Backend) warmExecution(ctx context.Context, w *api.ResumablePod, p *cor
 	}
 	s := sandbox.Status
 	if s == nil || s.Id != sid || s.Metadata == nil || s.Metadata.Uid != string(p.UID) || s.Metadata.Name != p.Name || s.Metadata.Namespace != p.Namespace || s.Metadata.Attempt != 0 || s.RuntimeHandler != b.runtimeHandler() {
-		return nil, fmt.Errorf("warm sandbox identity changed")
+		return nil, fmt.Errorf("%w: warm sandbox identity changed", ErrExecutionLost)
 	}
 	if s.State != cri.PodSandboxState_SANDBOX_READY || s.Network == nil || net.ParseIP(s.Network.Ip) == nil {
 		return nil, nil

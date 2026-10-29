@@ -27,6 +27,8 @@ const (
 	SharedMountPath          = "/var/lib/cellbox/shared"
 	ArchiveRequestAnnotation = "cellbox.local/archive-request"
 	ArchiveResultAnnotation  = "cellbox.local/archive-result"
+	ResumePathWarmPool       = "warm_pool"
+	ResumePathStandard       = "standard"
 )
 
 // ArchiveCaptureRequest asks the node controller to export a stopped workspace
@@ -55,6 +57,9 @@ type Spec struct {
 	// DesiredState. A newer operation must fence stale workers by supplying the
 	// previously observed transition ID.
 	TransitionID string `json:"transitionID,omitempty"`
+	// WaitPorts is the TCP port set that must be listening for this resume
+	// transition to complete.
+	WaitPorts []int `json:"waitPorts,omitempty"`
 	// Container is immutable. The controller owns optional directory mounts.
 	Container              core.Container     `json:"container"`
 	SharedReadOnlyHostPath string             `json:"sharedReadOnlyHostPath,omitempty"`
@@ -80,19 +85,19 @@ type Status struct {
 	ObservedGeneration int64  `json:"observedGeneration,omitempty"`
 	// ObservedTransitionID is set with lifecycle phase updates and identifies
 	// the transition whose requested state the controller has observed.
-	ObservedTransitionID string `json:"observedTransitionID,omitempty"`
-	// ResumeReadyTransitionID is published only after the node has reopened
-	// Guest admission for this exact transition and execution.
-	ResumeReadyTransitionID string           `json:"resumeReadyTransitionID,omitempty"`
-	SpecHash                string           `json:"specHash,omitempty"`
-	Cycle                   int64            `json:"cycle,omitempty"`
-	PodName                 string           `json:"podName,omitempty"`
-	PodUID                  string           `json:"podUID,omitempty"`
-	Execution               *Execution       `json:"execution,omitempty"`
-	Snapshot                string           `json:"snapshot,omitempty"`
-	RetryNonce              string           `json:"retryNonce,omitempty"`
-	Since                   meta.Time        `json:"since,omitempty"`
-	Conditions              []meta.Condition `json:"conditions,omitempty"`
+	ObservedTransitionID string           `json:"observedTransitionID,omitempty"`
+	SpecHash             string           `json:"specHash,omitempty"`
+	Cycle                int64            `json:"cycle,omitempty"`
+	PodName              string           `json:"podName,omitempty"`
+	PodUID               string           `json:"podUID,omitempty"`
+	Execution            *Execution       `json:"execution,omitempty"`
+	Snapshot             string           `json:"snapshot,omitempty"`
+	RetryNonce           string           `json:"retryNonce,omitempty"`
+	Since                meta.Time        `json:"since,omitempty"`
+	Conditions           []meta.Condition `json:"conditions,omitempty"`
+	// ResumePath records the execution source selected for this resume.
+	// Empty means no selection has been reported.
+	ResumePath string `json:"resumePath,omitempty"`
 }
 type ResumablePod struct {
 	meta.TypeMeta   `json:",inline"`
@@ -122,6 +127,9 @@ func (r *ResumablePod) DeepCopy() *ResumablePod {
 	}
 	if r.Spec.Mounts != nil {
 		out.Spec.Mounts = append([]VolumeMount(nil), r.Spec.Mounts...)
+	}
+	if r.Spec.WaitPorts != nil {
+		out.Spec.WaitPorts = append([]int(nil), r.Spec.WaitPorts...)
 	}
 	out.Status.Conditions = append([]meta.Condition(nil), r.Status.Conditions...)
 	if r.Status.Execution != nil {

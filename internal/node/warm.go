@@ -12,6 +12,7 @@ import (
 	api "cellbox.local/cellbox/api/v1alpha1"
 	backend "cellbox.local/cellbox/internal/runtime"
 	"cellbox.local/cellbox/internal/telemetry"
+	"github.com/fsnotify/fsnotify"
 	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sys/unix"
 	core "k8s.io/api/core/v1"
@@ -127,7 +128,17 @@ func DeferredRestore(base, uid, name, namespace, sid string) (deferred bool, err
 }
 
 func WaitWarm(base, uid, sid string) (Ticket, error) {
-	_, err := warmUpdate(base, uid, false, func(l *WarmLease) error {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return Ticket{}, err
+	}
+	defer watcher.Close()
+	// Watch the directory before publishing waiting: authorization replaces
+	// the lease atomically, so a watch on the old file inode would miss it.
+	if err = watcher.Add(filepath.Join(base, "warm")); err != nil {
+		return Ticket{}, err
+	}
+	initial, err := warmUpdate(base, uid, false, func(l *WarmLease) error {
 		if l.SID != sid || l.Phase != "created" {
 			return fmt.Errorf("warm start already attempted")
 		}
@@ -138,6 +149,8 @@ func WaitWarm(base, uid, sid string) (Ticket, error) {
 	if err != nil {
 		return Ticket{}, err
 	}
+	deadline := time.NewTimer(time.Until(initial.Deadline))
+	defer deadline.Stop()
 	for {
 		l, err := warmUpdate(base, uid, false, func(l *WarmLease) error {
 			if l.Phase == "waiting" && !time.Now().Before(l.Deadline) {
@@ -162,7 +175,23 @@ func WaitWarm(base, uid, sid string) (Ticket, error) {
 		case "restoring":
 			return l.Ticket, nil
 		case "waiting":
-			time.Sleep(10 * time.Millisecond)
+			select {
+			case <-deadline.C:
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return Ticket{}, fmt.Errorf("warm authorization watcher closed")
+				}
+				if event.Name != filepath.Join(base, "warm", uid+".json") {
+					continue
+				}
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return Ticket{}, fmt.Errorf("warm authorization watcher closed")
+				}
+				if err != fsnotify.ErrEventOverflow {
+					return Ticket{}, err
+				}
+			}
 		default:
 			return Ticket{}, fmt.Errorf("warm slot %s", l.Phase)
 		}

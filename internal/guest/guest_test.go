@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -384,7 +385,7 @@ func TestRestoreRejectsTraversal(t *testing.T) {
 	}
 }
 
-func TestQuiesceAndToolArguments(t *testing.T) {
+func TestIdleCheckDoesNotGateExecAndToolArguments(t *testing.T) {
 	c := testConfig(t)
 	c.Tools = []guestapi.Tool{{ID: "safe", Executable: "/opt/cellbox/tools/safe", InputPatterns: []string{`[a-z]+`}}}
 	s, err := NewServer(c, "/bin/true", true)
@@ -403,11 +404,48 @@ func TestQuiesceAndToolArguments(t *testing.T) {
 	if got := request(s.Handler(), "POST", "/v1/quiesce", nil).Code; got != 204 {
 		t.Fatalf("quiesce: %d", got)
 	}
-	if got := request(s.Handler(), "POST", "/v1/exec", strings.NewReader(`{"argv":["/bin/true"]}`)).Code; got != 409 {
-		t.Fatalf("quiesced exec: %d", got)
+	if got := request(s.Handler(), "POST", "/v1/exec", strings.NewReader(`{"argv":["/bin/true"]}`)).Code; got != 200 {
+		t.Fatalf("exec after idle check: %d", got)
 	}
 	if got := request(s.Handler(), "POST", "/v1/unquiesce", nil).Code; got != 204 {
 		t.Fatalf("unquiesce: %d", got)
+	}
+}
+
+func TestPortsListeningEndpoint(t *testing.T) {
+	c := testConfig(t)
+	s, err := NewServer(c, "/bin/true", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	_, portString, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portString)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := request(s.Handler(), "GET", fmt.Sprintf("/v1/ports/listening?ports=%d", port), nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("port inspection status: %d: %s", response.Code, response.Body.String())
+	}
+	var state listeningPorts
+	if err := json.Unmarshal(response.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Listening) != 1 || state.Listening[0] != port || len(state.Missing) != 0 {
+		t.Fatalf("unexpected listening-port result: %+v", state)
+	}
+	for _, path := range []string{"/v1/ports/listening", "/v1/ports/listening?ports=0", "/v1/ports/listening?ports=80,80"} {
+		if got := request(s.Handler(), "GET", path, nil).Code; got != http.StatusBadRequest {
+			t.Errorf("invalid port query %q status: %d", path, got)
+		}
 	}
 }
 

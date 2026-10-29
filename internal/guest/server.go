@@ -28,7 +28,6 @@ type Server struct {
 	mu             sync.Mutex
 	active         bool
 	restoring      bool
-	quiesced       bool
 	busy           int
 	proc           *os.Process
 	proxyTransport *http.Transport
@@ -51,6 +50,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("GET /v1/ports/listening", s.portsListeningHandler)
 	mux.HandleFunc("POST /v1/exec", s.execHandler)
 	mux.HandleFunc("GET /v1/files", s.fileHandler)
 	mux.HandleFunc("PUT /v1/files", s.fileHandler)
@@ -90,10 +90,7 @@ func decodeJSONLimit(w http.ResponseWriter, r *http.Request, v any, limit int64)
 }
 
 func (s *Server) execHandler(w http.ResponseWriter, r *http.Request) {
-	if !s.beginCommand() {
-		http.Error(w, "guest quiesced", 409)
-		return
-	}
+	s.beginCommand()
 	defer s.endCommand()
 	var req guestapi.ExecRequest
 	if !decodeJSON(w, r, &req) {
@@ -114,10 +111,7 @@ func (s *Server) execHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) toolHandler(w http.ResponseWriter, r *http.Request) {
-	if !s.beginCommand() {
-		http.Error(w, "guest quiesced", 409)
-		return
-	}
+	s.beginCommand()
 	defer s.endCommand()
 	t, ok := s.tools[r.PathValue("id")]
 	if !ok {
@@ -137,6 +131,8 @@ func (s *Server) toolHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) credentialHandler(w http.ResponseWriter, r *http.Request) {
+	s.beginCommand()
+	defer s.endCommand()
 	slot := r.PathValue("slot")
 	if !namePattern.MatchString(slot) {
 		http.Error(w, "invalid slot", 400)
@@ -150,10 +146,7 @@ func (s *Server) credentialHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) credentialBatchHandler(w http.ResponseWriter, r *http.Request) {
-	if !s.beginCommand() {
-		http.Error(w, "guest quiesced", 409)
-		return
-	}
+	s.beginCommand()
 	defer s.endCommand()
 	var batch guestapi.CredentialBatch
 	if !decodeJSONLimit(w, r, &batch, 3<<20) {
@@ -235,9 +228,6 @@ func (s *Server) activateHandler(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Activate() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.quiesced {
-		return errors.New("guest quiesced")
-	}
 	if s.active || s.restoring {
 		if s.active {
 			return nil
@@ -278,29 +268,23 @@ func (s *Server) Shutdown() {
 	}
 }
 
-func (s *Server) beginCommand() bool {
+func (s *Server) beginCommand() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.quiesced {
-		return false
-	}
 	s.busy++
-	return true
+	s.mu.Unlock()
 }
 func (s *Server) endCommand() { s.mu.Lock(); s.busy--; s.mu.Unlock() }
 func (s *Server) quiesceHandler(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.busy > 0 {
-		http.Error(w, "commands in flight", 409)
+		http.Error(w, "guest has active commands", 409)
 		return
 	}
-	s.quiesced = true
 	w.WriteHeader(http.StatusNoContent)
 }
 func (s *Server) unquiesceHandler(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	s.quiesced = false
-	s.mu.Unlock()
+	// Keep this endpoint for clients that still send it after restoring older
+	// checkpoints. Readiness does not depend on this request.
 	w.WriteHeader(http.StatusNoContent)
 }

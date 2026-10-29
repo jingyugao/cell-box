@@ -44,3 +44,19 @@ func TestBuildAndObserveWarmTemplatesWithoutKubernetesConfigMaps(t *testing.T) {
 		t.Fatalf("empty observed pool was not distinguishable from missing: %#v err=%v", observed, err)
 	}
 }
+
+func TestPersistentHomeWarmTemplateHasNoBoxVolume(t *testing.T) {
+	p, spec, ctx := fixture(t)
+	spec.PersistentHome = true
+	templates, _, err := BuildWarmTemplates(spec.Namespace, []boxprovider.WarmTemplate{{ID: "revision-home", Slots: 1, Spec: spec}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := templates[0].Spec
+	if !got.PersistentHome || got.HomeVolumeUID != "" || len(got.Mounts) != 0 {
+		t.Fatalf("warm template must retain HOME mode without attaching a Box volume: %#v", got)
+	}
+	if _, err := p.Create(ctx, spec); err == nil {
+		t.Fatal("created a persistent Box without an independent volume")
+	}
+}

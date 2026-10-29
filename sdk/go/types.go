@@ -23,6 +23,12 @@ type CreateOptions struct {
 	Staged bool `json:"staged,omitempty"`
 }
 
+// ResumeOptions selects the TCP ports that must be listening before resume
+// returns. A nil slice uses the server default.
+type ResumeOptions struct {
+	WaitPorts []int
+}
+
 // SandboxInfo is a lifecycle snapshot. Running does not imply application health.
 type SandboxInfo struct {
 	ID              string       `json:"id"`

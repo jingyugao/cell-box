@@ -128,7 +128,6 @@ func makeLocalCompletedResume(t *testing.T) (*Provider, boxprovider.Handle, cont
 	w.Status.Phase = "Running"
 	w.Status.ObservedGeneration = int64(w.Generation)
 	w.Status.ObservedTransitionID = w.Spec.TransitionID
-	w.Status.ResumeReadyTransitionID = w.Spec.TransitionID
 	w.Status.Execution = execution
 	if err := local.Status().Update(ctx, w); err != nil {
 		t.Fatal(err)

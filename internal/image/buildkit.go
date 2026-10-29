@@ -118,7 +118,7 @@ func PrepareBuildKit(ctx context.Context, opts BuildKitOptions) (BuildKitResult,
 			return zero, errors.New("product payload already contains manifest.json")
 		}
 	}
-	keyParts := []string{ImageVersion, opts.Base, opts.Platform, guestHash, productHash, manifestHash}
+	keyParts := []string{ImageVersion, GuestProtocolVersion, opts.Base, opts.Platform, guestHash, productHash, manifestHash}
 	if opts.BuildCommand != "" {
 		commandHash := sha256.Sum256([]byte(opts.BuildCommand))
 		keyParts = append(keyParts, hex.EncodeToString(commandHash[:]))
@@ -200,7 +200,7 @@ func PrepareBuildKit(ctx context.Context, opts BuildKitOptions) (BuildKitResult,
 		}
 		dockerfile += "USER 0:0\nRUN " + string(command) + "\n"
 	}
-	dockerfile += "LABEL " + ManagedLabel + "=\"" + ImageVersion + "\" " + IdentityLabel + "=\"" + key + "\"\nCOPY --chmod=0755 guest /opt/cellbox/bin/cellbox-container-agent\n"
+	dockerfile += "LABEL " + ManagedLabel + "=\"" + ImageVersion + "\" " + IdentityLabel + "=\"" + key + "\" " + GuestProtocolLabel + "=\"" + GuestProtocolVersion + "\"\nCOPY --chmod=0755 guest /opt/cellbox/bin/cellbox-container-agent\n"
 	if product && opts.BuildCommand == "" {
 		dockerfile += "COPY product/ /opt/product/\n"
 	}

@@ -127,6 +127,6 @@ func (s *Sandbox) Info(ctx context.Context) (*SandboxInfo, error) {
 
 // Destroy waits for resource destruction. Active commands may cause BUSY.
 func (s *Sandbox) Destroy(ctx context.Context) error {
-	_, err := s.action(ctx, "destroy")
+	_, err := s.action(ctx, "destroy", nil)
 	return err
 }
