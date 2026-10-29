@@ -67,6 +67,14 @@ The pool's Pod template is taken from the Boxes themselves (with HOME and mounts
 
 The budget counts Pods; it does not look at CPU or memory. Each slot has a full container configuration, and the Pod's requests and limits equal those of the revision it serves. Slots are replaced about every 45 seconds (the 60-second lease, with a successor created when under 15 seconds remain), so a larger budget means more continuous `runsc` and containerd work. Size it as the number of images with checkpoints times slots per group, and do not raise it without a reason.
 
+### Resource cost of idle slots
+
+- **Declared resources.** A slot's container copies the Box configuration, so its limits equal the revision's limits, but its CPU and memory **requests are 0**. An idle slot reserves nothing from the scheduler, and the limits only cap what a Box may use after it claims the slot. The `resources` fields in the warm-pool status report these configured values; they are not usage.
+- **Memory.** An idle slot holds no business program and no checkpoint data. Measured on one slot (2026-10-29, deferred mode, gVisor `cellbox-gvisor-20261029`), the processes belonging to it (containerd shim, the gVisor sandbox process and the waiting `runsc` process) used about 21-28 MiB of proportional set size, whatever the Box's memory limit. That is one sample on one machine; expect tens of MiB per slot, not hundreds.
+- **CPU.** An idle slot used no measurable CPU over a 20-second window. The cost is in creating and retiring slots: each slot is replaced about every 45 seconds, which runs `runsc create` and containerd calls continuously. Keep the budget small.
+- **Pod and IP.** Each slot is a real Pod and takes one Pod IP and one place under the node's Pod limit. During rotation the idle count can reach the budget plus one.
+- **Disk.** Slots add no checkpoint or HOME data. Those are written when a Box suspends, not when a slot is created.
+
 ## 5. Slot lifecycle
 
 1. The controller creates a Pod with a scheduling gate (`cellbox.jingyugao.github.io/prepared`), the label `cellbox.jingyugao.github.io/warm-pool=true`, and an annotation holding the compatibility fingerprint.
