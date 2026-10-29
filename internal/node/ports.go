@@ -17,6 +17,10 @@ import (
 )
 
 var ErrExecutionLost = errors.New("execution exited or was replaced")
+
+// ErrForeignRuntime reports a sandbox that exists in CRI under a runtime handler
+// other than this backend's. It always wraps ErrExecutionLost as well.
+var ErrForeignRuntime = errors.New("sandbox belongs to another runtime handler")
 var ErrPortsNotListening = errors.New("required ports are not listening")
 
 func requestedPorts(w *api.ResumablePod) []int {

@@ -131,8 +131,11 @@ func (b *Backend) sandboxes(ctx context.Context, p *core.Pod) ([]*cri.PodSandbox
 	var out []*cri.PodSandbox
 	for _, s := range res.Items {
 		m := s.Metadata
-		if m == nil || m.Uid != string(p.UID) || m.Namespace != p.Namespace || m.Name != p.Name || s.RuntimeHandler != b.runtimeHandler() {
-			return nil, fmt.Errorf("%w: CRI sandbox identity/runtime mismatch", ErrExecutionLost)
+		if m == nil || m.Uid != string(p.UID) || m.Namespace != p.Namespace || m.Name != p.Name {
+			return nil, fmt.Errorf("%w: CRI sandbox identity mismatch", ErrExecutionLost)
+		}
+		if s.RuntimeHandler != b.runtimeHandler() {
+			return nil, fmt.Errorf("%w: %w (handler %q)", ErrExecutionLost, ErrForeignRuntime, s.RuntimeHandler)
 		}
 		out = append(out, s)
 	}
@@ -390,6 +393,12 @@ func (b *Backend) persistentHome(r *api.ResumablePod, initialize bool) (string, 
 func (b *Backend) Cleanup(ctx context.Context, p *core.Pod) error {
 	if p.UID == "" {
 		return nil
+	}
+	// Look before touching anything. A sandbox that CRI holds under another
+	// runtime handler is not ours: retiring its lease or revoking its ticket would
+	// damage the owner, and stopping it is not our call.
+	if _, err := b.sandboxes(ctx, p); errors.Is(err, ErrForeignRuntime) {
+		return err
 	}
 	// Retire a warm lease before revoking tickets or touching the runtime.
 	if err := RetireWarm(b.Base, string(p.UID)); err != nil {
