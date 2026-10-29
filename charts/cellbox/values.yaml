@@ -30,7 +30,7 @@ storage:
 server:
   # The combined API and node runtime is pinned to this one machine.
   nodeName: ""
-  image: gaojingyu628/cellbox-server:0.1.0
+  image: ghcr.io/jingyugao/cellbox-server:0.1.0
   imagePullPolicy: IfNotPresent
   resources:
     requests:

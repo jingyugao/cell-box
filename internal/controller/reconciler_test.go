@@ -3,12 +3,12 @@
 package controller
 
 import (
-	api "cellbox.local/cellbox/api/v1alpha1"
-	lifecycle "cellbox.local/cellbox/internal/runtime"
-	"cellbox.local/cellbox/internal/warmtemplates"
 	"context"
 	"encoding/json"
 	"errors"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	lifecycle "github.com/jingyugao/cell-box/internal/runtime"
+	"github.com/jingyugao/cell-box/internal/warmtemplates"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"

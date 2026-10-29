@@ -1,10 +1,10 @@
 package service
 
 import (
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/inventory"
 	"context"
 	"errors"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/inventory"
 	"net/http"
 	"testing"
 	"time"

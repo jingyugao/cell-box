@@ -1,4 +1,4 @@
-apiVersion: cellbox.local/v1alpha1
+apiVersion: cellbox.jingyugao.github.io/v1alpha1
 kind: Cellbox
 metadata:
   name: counter

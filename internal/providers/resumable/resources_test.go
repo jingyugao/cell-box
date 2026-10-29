@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"cellbox.local/cellbox/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
 	core "k8s.io/api/core/v1"
 )
 

@@ -18,10 +18,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"cellbox.local/cellbox/internal/archivelimits"
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/guestapi"
-	"cellbox.local/cellbox/internal/objectstorage"
+	"github.com/jingyugao/cell-box/internal/archivelimits"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/objectstorage"
 )
 
 type archiveTestEntry struct {

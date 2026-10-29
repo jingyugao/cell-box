@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"cellbox.local/cellbox/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/guestapi"
 	"golang.org/x/sys/unix"
 )
 

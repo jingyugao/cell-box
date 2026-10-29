@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
 	core "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"

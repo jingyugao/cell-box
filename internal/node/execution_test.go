@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
 	"google.golang.org/grpc"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"

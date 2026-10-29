@@ -12,8 +12,8 @@ import (
 	"strconv"
 	"strings"
 
-	"cellbox.local/cellbox/internal/archivelimits"
-	"cellbox.local/cellbox/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/archivelimits"
+	"github.com/jingyugao/cell-box/internal/guestapi"
 	"golang.org/x/sys/unix"
 )
 

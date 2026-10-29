@@ -1,12 +1,12 @@
 package service
 
 import (
-	"cellbox.local/cellbox/internal/objectstorage"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/jingyugao/cell-box/internal/objectstorage"
 	"io"
 	"net/http"
 	"os"
@@ -18,9 +18,9 @@ import (
 	"strings"
 	"time"
 
-	"cellbox.local/cellbox/internal/archivelimits"
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/workspacearchive"
+	"github.com/jingyugao/cell-box/internal/archivelimits"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/workspacearchive"
 	"golang.org/x/sys/unix"
 )
 

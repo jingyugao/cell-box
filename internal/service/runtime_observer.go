@@ -1,7 +1,7 @@
 package service
 
 import (
-	"cellbox.local/cellbox/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
 	"time"
 )
 

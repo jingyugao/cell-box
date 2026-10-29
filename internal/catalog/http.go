@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"cellbox.local/cellbox/internal/image"
+	"github.com/jingyugao/cell-box/internal/image"
 )
 
 var namePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$`)

@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 

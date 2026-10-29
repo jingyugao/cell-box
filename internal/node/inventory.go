@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/inventory"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/inventory"
 )
 
 // SyncInventory maintains the API's lightweight checkpoint lifecycle index.

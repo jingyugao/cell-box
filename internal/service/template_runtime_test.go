@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/catalog"
-	"cellbox.local/cellbox/internal/inventory"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/catalog"
+	"github.com/jingyugao/cell-box/internal/inventory"
 )
 
 type warmRuntimeProbe struct {

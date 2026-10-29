@@ -1,12 +1,12 @@
 package service
 
 import (
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/inventory"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/inventory"
 	"net/http"
 	"sort"
 	"strconv"

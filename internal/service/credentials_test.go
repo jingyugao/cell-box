@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"cellbox.local/cellbox/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/guestapi"
 )
 
 func TestCredentialBatchAdmissionAndGenerationFence(t *testing.T) {

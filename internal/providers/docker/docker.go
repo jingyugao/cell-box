@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/guestapi"
-	"cellbox.local/cellbox/internal/image"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/image"
 )
 
 const (

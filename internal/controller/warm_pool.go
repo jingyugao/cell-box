@@ -10,11 +10,11 @@ import (
 	"sync"
 	"time"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/homevolume"
-	"cellbox.local/cellbox/internal/runtimecontrol"
-	"cellbox.local/cellbox/internal/warmtemplates"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/homevolume"
+	"github.com/jingyugao/cell-box/internal/runtimecontrol"
+	"github.com/jingyugao/cell-box/internal/warmtemplates"
 	core "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,8 +24,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-const warmLabel = "cellbox.local/warm-pool"
-const warmSpec = "cellbox.local/warm-spec"
+const warmLabel = "cellbox.jingyugao.github.io/warm-pool"
+const warmSpec = "cellbox.jingyugao.github.io/warm-spec"
 
 type warmRuntime interface {
 	RegisterWarm(context.Context, *core.Pod, string) error

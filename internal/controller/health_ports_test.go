@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/node"
-	"cellbox.local/cellbox/internal/runtimecontrol"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/node"
+	"github.com/jingyugao/cell-box/internal/runtimecontrol"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"

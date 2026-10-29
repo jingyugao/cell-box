@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/homevolume"
-	"cellbox.local/cellbox/internal/node"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/homevolume"
+	"github.com/jingyugao/cell-box/internal/node"
 )
 
 // Exercise real disk identities behind the HTTP service, while the

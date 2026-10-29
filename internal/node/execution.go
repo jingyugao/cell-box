@@ -6,8 +6,8 @@ import (
 	"net"
 	"time"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/telemetry"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/telemetry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"

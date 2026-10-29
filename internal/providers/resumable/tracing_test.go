@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/telemetry"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/telemetry"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -70,7 +70,7 @@ func TestResumePropagatesRuntimeTransitionAsControllerParent(t *testing.T) {
 	if len(spans) != 1 || spans[0].Name != "cellbox.runtime.transition" {
 		t.Fatalf("resume dispatch created an extra or orphan span: %#v", spans)
 	}
-	if w.Spec.DesiredState != "Running" || w.Annotations["cellbox.local/operation-trace"] == "" {
+	if w.Spec.DesiredState != "Running" || w.Annotations["cellbox.jingyugao.github.io/operation-trace"] == "" {
 		t.Fatal("resume did not patch desired state with its operation trace")
 	}
 }

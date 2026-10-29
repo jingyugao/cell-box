@@ -9,7 +9,7 @@ import (
 	"io"
 	"time"
 
-	"cellbox.local/cellbox/internal/image"
+	"github.com/jingyugao/cell-box/internal/image"
 )
 
 type Template struct {

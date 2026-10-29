@@ -1,11 +1,11 @@
 package service
 
 import (
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/catalog"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/catalog"
 	"net/http"
 	"time"
 )

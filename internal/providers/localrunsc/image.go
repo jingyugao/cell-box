@@ -13,11 +13,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/guestapi"
-	"cellbox.local/cellbox/internal/homevolume"
-	"cellbox.local/cellbox/internal/image"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/homevolume"
+	"github.com/jingyugao/cell-box/internal/image"
 )
 
 // Cache only immutable OCI blobs. Each execution gets a separate writable unpack.
@@ -246,7 +246,7 @@ func (p *Provider) configure(ctx context.Context, r record) error {
 		mounts = append(mounts, map[string]any{"destination": m.MountPath, "type": "bind", "source": source, "options": options})
 	}
 	spec["mounts"] = mounts
-	spec["annotations"] = map[string]string{"cellbox.local/execution": r.Handle.ID, "cellbox.local/spec": r.Fingerprint}
+	spec["annotations"] = map[string]string{"cellbox.jingyugao.github.io/execution": r.Handle.ID, "cellbox.jingyugao.github.io/spec": r.Fingerprint}
 	delete(spec, "hooks")
 	b, err = json.Marshal(spec)
 	if err != nil {

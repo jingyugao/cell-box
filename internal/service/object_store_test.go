@@ -2,11 +2,11 @@ package service
 
 import (
 	"bytes"
-	"cellbox.local/cellbox/internal/objectstorage"
 	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/jingyugao/cell-box/internal/objectstorage"
 	"io"
 	"sort"
 	"strings"

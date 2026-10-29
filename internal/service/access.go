@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/guestapi"
 )
 
 // Internal product connections use their live stream as the lifecycle fence;

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"cellbox.local/cellbox/internal/service"
+	"github.com/jingyugao/cell-box/internal/service"
 )
 
 func TestServerRejectsProfilesAssignedToAnotherRuntime(t *testing.T) {

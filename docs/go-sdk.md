@@ -7,7 +7,7 @@ Go SDK 位于 [`sdk/go`](../sdk/go)，使用 Go 1.22，模块路径为 `github.c
 在应用的 Go module 目录中，将 SDK 替换为本地绝对路径，再添加依赖：
 
 ```sh
-go mod edit -replace=github.com/jingyugao/cell-box/sdk/go=/home/wsl/Code/cell-box/sdk/go
+go mod edit -replace=github.com/jingyugao/cell-box/sdk/go=/path/to/cell-box/sdk/go
 go get github.com/jingyugao/cell-box/sdk/go@v0.0.0
 ```
 

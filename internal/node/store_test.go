@@ -3,8 +3,8 @@
 package node
 
 import (
-	api "cellbox.local/cellbox/api/v1alpha1"
 	"context"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"os"
 	"path/filepath"

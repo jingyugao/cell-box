@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/boxprovider"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -58,7 +58,7 @@ func localResumeObjects(name string, uid types.UID) (*api.ResumablePod, *core.Po
 	w := &api.ResumablePod{ObjectMeta: meta.ObjectMeta{Name: name, Namespace: "test", UID: uid},
 		Spec:   api.Spec{DesiredState: "Suspended", NodeName: "node", TransitionID: "previous"},
 		Status: api.Status{Phase: "Suspended", ObservedTransitionID: "previous"}}
-	w.Labels = map[string]string{"cellbox.local/managed": "true", "cellbox.local/box-id": name}
+	w.Labels = map[string]string{"cellbox.jingyugao.github.io/managed": "true", "cellbox.jingyugao.github.io/box-id": name}
 	pod := &core.Pod{ObjectMeta: meta.ObjectMeta{Name: "warm-" + name, Namespace: "test", UID: types.UID("pod-" + name),
 		Labels: map[string]string{api.ServingLabel: "false"}},
 		Spec: core.PodSpec{NodeName: "node"}}

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"cellbox.local/cellbox/internal/objectstorage"
+	"github.com/jingyugao/cell-box/internal/objectstorage"
 )
 
 func TestS3IntegrationArchivePayloadSurvivesServiceRestart(t *testing.T) {

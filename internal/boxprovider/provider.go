@@ -2,12 +2,12 @@
 package boxprovider
 
 import (
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/guestapi"
-	"cellbox.local/cellbox/internal/inventory"
 	"context"
 	"encoding/json"
 	"errors"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/inventory"
 	"time"
 )
 

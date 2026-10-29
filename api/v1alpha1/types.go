@@ -12,21 +12,21 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-var GroupVersion = schema.GroupVersion{Group: "cellbox.local", Version: "v1alpha1"}
+var GroupVersion = schema.GroupVersion{Group: "cellbox.jingyugao.github.io", Version: "v1alpha1"}
 
 const (
 	Kind                     = "Cellbox"
-	Finalizer                = "cellbox.local/cleanup"
-	OwnerLabel               = "cellbox.local/owner"
-	ServingLabel             = "cellbox.local/serving"
+	Finalizer                = "cellbox.jingyugao.github.io/cleanup"
+	OwnerLabel               = "cellbox.jingyugao.github.io/owner"
+	ServingLabel             = "cellbox.jingyugao.github.io/serving"
 	TicketAnnotation         = "dev.gvisor.internal.recovery.ticket"
-	Gate                     = "cellbox.local/prepared"
+	Gate                     = "cellbox.jingyugao.github.io/prepared"
 	RuntimeClass             = "runsc-recoverable"
 	DebugHostMountPath       = "/var/lib/cellbox/debug/host"
 	DebugHomeMountPath       = "/home/debug"
 	SharedMountPath          = "/var/lib/cellbox/shared"
-	ArchiveRequestAnnotation = "cellbox.local/archive-request"
-	ArchiveResultAnnotation  = "cellbox.local/archive-result"
+	ArchiveRequestAnnotation = "cellbox.jingyugao.github.io/archive-request"
+	ArchiveResultAnnotation  = "cellbox.jingyugao.github.io/archive-result"
 	ResumePathWarmPool       = "warm_pool"
 	ResumePathStandard       = "standard"
 )

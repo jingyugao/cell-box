@@ -15,14 +15,14 @@ import (
 	"sync"
 	"time"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/guestapi"
-	"cellbox.local/cellbox/internal/homevolume"
-	"cellbox.local/cellbox/internal/inventory"
-	"cellbox.local/cellbox/internal/runtimecontrol"
-	"cellbox.local/cellbox/internal/telemetry"
-	"cellbox.local/cellbox/internal/warmtemplates"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/homevolume"
+	"github.com/jingyugao/cell-box/internal/inventory"
+	"github.com/jingyugao/cell-box/internal/runtimecontrol"
+	"github.com/jingyugao/cell-box/internal/telemetry"
+	"github.com/jingyugao/cell-box/internal/warmtemplates"
 	core "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -33,8 +33,8 @@ import (
 )
 
 const name = "resumable-k8s-pod"
-const managedLabel = "cellbox.local/managed"
-const boxLabel = "cellbox.local/box-id"
+const managedLabel = "cellbox.jingyugao.github.io/managed"
+const boxLabel = "cellbox.jingyugao.github.io/box-id"
 
 var validBoxID = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 var validImage = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}$`)

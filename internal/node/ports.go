@@ -8,9 +8,9 @@ import (
 	"os"
 	"strings"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/guestapi"
-	"cellbox.local/cellbox/internal/portwait"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/portwait"
 	core "k8s.io/api/core/v1"
 	cri "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
@@ -65,7 +65,7 @@ func (b *Backend) portExecution(ctx context.Context, w *api.ResumablePod, p *cor
 		return nil, nil, ErrExecutionLost
 	}
 	sid := sandboxes[0].Id
-	if p.Labels["cellbox.local/warm-pool"] == "true" {
+	if p.Labels["cellbox.jingyugao.github.io/warm-pool"] == "true" {
 		lease, err := b.WarmStatus(ctx, p)
 		if err != nil {
 			return nil, nil, err

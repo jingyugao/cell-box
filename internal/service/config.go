@@ -1,11 +1,11 @@
 package service
 
 import (
-	"cellbox.local/cellbox/internal/guestapi"
-	"cellbox.local/cellbox/internal/image"
-	"cellbox.local/cellbox/internal/objectstorage"
 	"encoding/json"
 	"fmt"
+	"github.com/jingyugao/cell-box/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/image"
+	"github.com/jingyugao/cell-box/internal/objectstorage"
 	"io"
 	"math"
 	"path"

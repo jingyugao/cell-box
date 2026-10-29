@@ -1,8 +1,8 @@
 package service
 
 import (
-	api "cellbox.local/cellbox/api/v1alpha1"
 	"encoding/json"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
 	"maps"
 	"slices"
 	"strings"

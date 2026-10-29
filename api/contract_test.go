@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"cellbox.local/cellbox/internal/catalog"
-	"cellbox.local/cellbox/internal/guestapi"
-	"cellbox.local/cellbox/internal/service"
+	"github.com/jingyugao/cell-box/internal/catalog"
+	"github.com/jingyugao/cell-box/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/service"
 	"sigs.k8s.io/yaml"
 )
 

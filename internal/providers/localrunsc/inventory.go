@@ -7,9 +7,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/inventory"
-	"cellbox.local/cellbox/internal/objectstorage"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/inventory"
+	"github.com/jingyugao/cell-box/internal/objectstorage"
 )
 
 var (

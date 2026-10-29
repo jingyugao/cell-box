@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"cellbox.local/cellbox/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/guestapi"
 )
 
 const baseID = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"

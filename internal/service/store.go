@@ -1,13 +1,13 @@
 package service
 
 import (
-	"cellbox.local/cellbox/internal/guestapi"
-	"cellbox.local/cellbox/internal/telemetry"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/jingyugao/cell-box/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/telemetry"
 	"net/url"
 	"os"
 	"path/filepath"

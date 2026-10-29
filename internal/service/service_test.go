@@ -15,12 +15,12 @@ import (
 	"testing"
 	"time"
 
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/catalog"
-	"cellbox.local/cellbox/internal/guestapi"
-	"cellbox.local/cellbox/internal/image"
 	"crypto/sha256"
 	"encoding/hex"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/catalog"
+	"github.com/jingyugao/cell-box/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/image"
 )
 
 const testClientToken = "client-a-secret-abcdefghijklmnopqrstuvwxyz"

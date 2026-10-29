@@ -16,10 +16,10 @@ import (
 	"strings"
 	"time"
 
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/guestapi"
-	"cellbox.local/cellbox/internal/homevolume"
-	"cellbox.local/cellbox/internal/inventory"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/homevolume"
+	"github.com/jingyugao/cell-box/internal/inventory"
 	"golang.org/x/sys/unix"
 )
 

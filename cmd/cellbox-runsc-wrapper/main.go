@@ -3,9 +3,9 @@
 package main
 
 import (
-	"cellbox.local/cellbox/internal/adapter"
-	"cellbox.local/cellbox/internal/version"
 	"fmt"
+	"github.com/jingyugao/cell-box/internal/adapter"
+	"github.com/jingyugao/cell-box/internal/version"
 	"os"
 )
 

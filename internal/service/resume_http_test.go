@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"cellbox.local/cellbox/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
 )
 
 func TestResumeHTTPReturnsAcceptedAndSecondPendingRequestIsBusy(t *testing.T) {

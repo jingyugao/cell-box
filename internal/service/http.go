@@ -2,10 +2,10 @@ package service
 
 import (
 	"bytes"
-	"cellbox.local/cellbox/internal/guestapi"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/jingyugao/cell-box/internal/guestapi"
 	"io"
 	"net/http"
 	"net/url"

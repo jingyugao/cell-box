@@ -12,9 +12,9 @@ import (
 	"syscall"
 	"time"
 
-	"cellbox.local/cellbox/internal/adapter"
-	"cellbox.local/cellbox/internal/homevolume"
-	"cellbox.local/cellbox/internal/node"
+	"github.com/jingyugao/cell-box/internal/adapter"
+	"github.com/jingyugao/cell-box/internal/homevolume"
+	"github.com/jingyugao/cell-box/internal/node"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"

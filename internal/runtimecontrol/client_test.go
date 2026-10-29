@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"

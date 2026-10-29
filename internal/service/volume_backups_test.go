@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/homevolume"
-	"cellbox.local/cellbox/internal/node"
-	"cellbox.local/cellbox/internal/objectstorage"
-	"cellbox.local/cellbox/internal/volumebackup"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/homevolume"
+	"github.com/jingyugao/cell-box/internal/node"
+	"github.com/jingyugao/cell-box/internal/objectstorage"
+	"github.com/jingyugao/cell-box/internal/volumebackup"
 )
 
 func (p *diskCoreProvider) WithStoppedVolume(ctx context.Context, spec boxprovider.VolumeSpec, work func(string) error) error {

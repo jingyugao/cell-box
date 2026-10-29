@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/guestapi"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/guestapi"
 )
 
 func TestApplyImageConfigurationAutoTrustsExactImageAndClonesProfile(t *testing.T) {

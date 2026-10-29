@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"cellbox.local/cellbox/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/guestapi"
 )
 
 const (

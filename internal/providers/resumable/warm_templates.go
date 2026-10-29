@@ -9,8 +9,8 @@ import (
 	"sort"
 	"time"
 
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/warmtemplates"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/warmtemplates"
 )
 
 // BuildWarmTemplates converts catalog revisions into the exact runtime specs

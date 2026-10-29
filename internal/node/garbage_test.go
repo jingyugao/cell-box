@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"cellbox.local/cellbox/internal/inventory"
+	"github.com/jingyugao/cell-box/internal/inventory"
 )
 
 func TestSnapshotCleanupSurvivesRestartAndPreservesNextCheckpoint(t *testing.T) {

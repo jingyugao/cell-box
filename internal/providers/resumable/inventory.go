@@ -1,11 +1,11 @@
 package resumable
 
 import (
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/inventory"
 	"context"
 	"errors"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/inventory"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -102,9 +102,9 @@ func (p *Provider) list(ctx context.Context, namespace, clientID string, verifyP
 		if record.ClientID != clientID {
 			return nil, errors.New("inventory client label mismatch")
 		}
-		if record.Staged && phase == "running" && w.Annotations["cellbox.local/restore-stage"] != "running" {
+		if record.Staged && phase == "running" && w.Annotations["cellbox.jingyugao.github.io/restore-stage"] != "running" {
 			stage := "restoring"
-			if w.Annotations["cellbox.local/restore-stage"] == "staged" {
+			if w.Annotations["cellbox.jingyugao.github.io/restore-stage"] == "staged" {
 				stage = "staged"
 			}
 			record, err = inventory.FromResource(&w, stage)
@@ -126,6 +126,6 @@ func (p *Provider) SetInventoryStage(ctx context.Context, h boxprovider.Handle, 
 	if w.Annotations == nil {
 		w.Annotations = map[string]string{}
 	}
-	w.Annotations["cellbox.local/restore-stage"] = stage
+	w.Annotations["cellbox.jingyugao.github.io/restore-stage"] = stage
 	return p.Client.Patch(ctx, w, client.MergeFrom(old))
 }

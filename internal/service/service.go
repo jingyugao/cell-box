@@ -1,14 +1,6 @@
 package service
 
 import (
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/catalog"
-	"cellbox.local/cellbox/internal/guestapi"
-	"cellbox.local/cellbox/internal/inventory"
-	"cellbox.local/cellbox/internal/objectstorage"
-	"cellbox.local/cellbox/internal/runtimecontrol"
-	"cellbox.local/cellbox/internal/telemetry"
-	"cellbox.local/cellbox/internal/volumebackup"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -17,6 +9,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/catalog"
+	"github.com/jingyugao/cell-box/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/inventory"
+	"github.com/jingyugao/cell-box/internal/objectstorage"
+	"github.com/jingyugao/cell-box/internal/runtimecontrol"
+	"github.com/jingyugao/cell-box/internal/telemetry"
+	"github.com/jingyugao/cell-box/internal/volumebackup"
 	"io"
 	"log/slog"
 	"net/http"
@@ -26,7 +26,7 @@ import (
 	"sync"
 	"time"
 
-	"cellbox.local/cellbox/internal/image"
+	"github.com/jingyugao/cell-box/internal/image"
 
 	"go.opentelemetry.io/otel/codes"
 )

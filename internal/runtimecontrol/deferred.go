@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/telemetry"
 	jsonpatch "github.com/evanphx/json-patch/v5"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/telemetry"
 	core "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -222,7 +222,7 @@ func (c *Client) RequestResume(ctx context.Context, h boxprovider.Handle, previo
 	}
 	w := r.Resource
 	if transitionID == "" || string(w.UID) != h.ID || w.Spec.NodeName != h.NodeName || w.DeletionTimestamp != nil ||
-		w.Labels["cellbox.local/managed"] != "true" || w.Labels["cellbox.local/box-id"] != strings.TrimPrefix(h.Name, "cellbox-") {
+		w.Labels["cellbox.jingyugao.github.io/managed"] != "true" || w.Labels["cellbox.jingyugao.github.io/box-id"] != strings.TrimPrefix(h.Name, "cellbox-") {
 		return boxprovider.ErrStaleTransition
 	}
 	if w.Spec.TransitionID == transitionID && w.Spec.DesiredState == "Running" {
@@ -486,10 +486,10 @@ func (c *Client) syncIntent(ctx context.Context, r *Record) (*api.ResumablePod, 
 		if current.Annotations == nil {
 			current.Annotations = map[string]string{}
 		}
-		if trace := r.Resource.Annotations["cellbox.local/operation-trace"]; trace != "" {
-			current.Annotations["cellbox.local/operation-trace"] = trace
+		if trace := r.Resource.Annotations["cellbox.jingyugao.github.io/operation-trace"]; trace != "" {
+			current.Annotations["cellbox.jingyugao.github.io/operation-trace"] = trace
 		} else {
-			delete(current.Annotations, "cellbox.local/operation-trace")
+			delete(current.Annotations, "cellbox.jingyugao.github.io/operation-trace")
 		}
 		if err := c.Client.Patch(ctx, current, client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{})); err != nil {
 			return nil, err

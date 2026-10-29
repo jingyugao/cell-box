@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
 	core "k8s.io/api/core/v1"
 	cri "k8s.io/cri-api/pkg/apis/runtime/v1"
 )

@@ -10,10 +10,10 @@ import (
 	"regexp"
 	"strings"
 
-	api "cellbox.local/cellbox/api/v1alpha1"
-	"cellbox.local/cellbox/internal/guestapi"
-	"cellbox.local/cellbox/internal/homevolume"
-	"cellbox.local/cellbox/internal/workspacearchive"
+	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/guestapi"
+	"github.com/jingyugao/cell-box/internal/homevolume"
+	"github.com/jingyugao/cell-box/internal/workspacearchive"
 )
 
 const (

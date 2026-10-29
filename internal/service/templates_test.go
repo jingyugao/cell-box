@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"testing"
 
-	"cellbox.local/cellbox/internal/boxprovider"
-	"cellbox.local/cellbox/internal/catalog"
+	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/catalog"
 )
 
 type catalogRuntimeProbe struct {
