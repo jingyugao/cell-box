@@ -645,3 +645,43 @@ func TestRunTimeoutAndOutput(t *testing.T) {
 		}
 	}
 }
+
+// A request meant for another Box must never run here, even if the address was
+// reused. Only an unaffiliated health probe may omit the identity.
+func TestRequestsForAnotherBoxAreRejected(t *testing.T) {
+	c := testConfig(t)
+	c.Env = map[string]string{guestapi.InstanceIDEnv: "guest-1"}
+	s, err := NewServer(c, "/bin/true", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+	call := func(method, path, id string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, nil)
+		if id != "" {
+			r.Header.Set(guestapi.InstanceIDHeader, id)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	if w := call("GET", "/healthz", ""); w.Code != 200 || w.Header().Get(guestapi.InstanceIDHeader) != "guest-1" {
+		t.Fatalf("anonymous probe must work and advertise the identity: %d %v", w.Code, w.Header())
+	}
+	if w := call("GET", "/healthz", "guest-1"); w.Code != 200 {
+		t.Fatalf("matching health check: %d", w.Code)
+	}
+	for _, tc := range []struct{ path, id string }{
+		{"/healthz", "guest-2"},
+		{"/v1/ports/listening?ports=1", ""},
+		{"/v1/ports/listening?ports=1", "guest-2"},
+	} {
+		w := call("GET", tc.path, tc.id)
+		if w.Code != http.StatusConflict || w.Header().Get(guestapi.InstanceMismatchHeader) != "true" {
+			t.Fatalf("%s as %q: %d %v", tc.path, tc.id, w.Code, w.Header())
+		}
+	}
+	if w := call("GET", "/v1/ports/listening?ports=1", "guest-1"); w.Code == http.StatusConflict {
+		t.Fatalf("matching identity was rejected: %d", w.Code)
+	}
+}
