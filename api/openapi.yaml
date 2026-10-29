@@ -1891,7 +1891,7 @@ paths:
           $ref: '#/components/responses/Error'
     patch:
       operationId: updateTemplate
-      summary: Update template metadata, default warm target, or stable revision
+      summary: Update template metadata, default warm value (compatibility), or stable revision
       description: Metadata only; does not query Kubernetes. expectedGeneration prevents lost updates.
       requestBody:
         required: true
@@ -2000,8 +2000,8 @@ paths:
           $ref: '#/components/responses/Error'
     patch:
       operationId: updateTemplateRevision
-      summary: Update revision description, status, or persisted warm target
-      description: warmSlots changes the desired warm-pool target; background synchronization publishes changes and retries failures. expectedGeneration is required.
+      summary: Update revision description, status, or the compatibility warm value
+      description: warmSlots is kept for compatibility and no longer creates warm-pool demand; demand is derived from the checkpoints that exist on the node. The value is only reported back as desiredSlots. expectedGeneration is required.
       requestBody:
         required: true
         content:
