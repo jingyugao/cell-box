@@ -20,7 +20,7 @@ How a slot waits depends on the environment the node's wrapper script sets (see 
 | Environment | `CELLBOX_NO_ROOT_CONTAINER=true` and `CELLBOX_DEFER_CHECKPOINT=true` | Neither variable set |
 | Root sandbox start | Starts immediately with `runsc restore --defer-checkpoint --background --detach` and no checkpoint | The wrapper blocks in the root sandbox `start` until a Box claims the slot |
 | Business container | Created ahead of time without Box-specific mounts; its `start` waits for assignment (`WaitWarm`, 60 s lease) | Not started before the claim |
-| After a claim | The wrapper verifies and consumes the checkpoint, binds HOME, then restores with `--background --background-load=<mode>` | The wrapper verifies and consumes the checkpoint, binds HOME, then restores with the same flags |
+| After a claim | The wrapper verifies and consumes the checkpoint, binds HOME, gives the container the claiming Box's command line (the slot was built from another Box, and gVisor refuses a restore whose arguments differ from the checkpoint's), then restores with `--background --background-load=<mode>` | The wrapper verifies and consumes the checkpoint, binds HOME, then restores with the same flags |
 
 Deferred mode is the one the warm pool is validated with. Run the standard mode only if you have validated it yourself. In our tests without these variables, warm-slot Pods failed to start (see the troubleshooting table in [node installation](node-installation.md)).
 

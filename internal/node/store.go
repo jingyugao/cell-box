@@ -58,6 +58,12 @@ type Ticket struct {
 	PodName       string                     `json:"podName"`
 	Snapshot      string                     `json:"snapshot"`
 	SpecHash      string                     `json:"specHash"`
+	// GuestArgv is the full command line of the Box's Guest container, as it was
+	// when the Box was checkpointed. A warm slot is built from another Box with
+	// the same runtime profile, so its pre-created container carries that Box's
+	// instance marker; the wrapper swaps this in before the restore, because
+	// gVisor rejects a restore whose arguments differ from the checkpoint's.
+	GuestArgv []string `json:"guestArgv,omitempty"`
 }
 
 func SnapshotPath(base, owner, snapshot string) (string, error) {

@@ -255,7 +255,8 @@ func (b *Backend) ActivateWarm(ctx context.Context, w *api.ResumablePod, p *core
 }
 
 func warmTicket(w *api.ResumablePod, p *core.Pod, mounts []VolumeMountAuthorization) Ticket {
-	t := Ticket{OwnerUID: string(w.UID), NodeName: w.Spec.NodeName, HomeVolumeUID: w.Spec.HomeVolumeUID, PodUID: string(p.UID), Namespace: p.Namespace, PodName: p.Name, Snapshot: w.Status.Snapshot, SpecHash: w.Status.SpecHash}
+	t := Ticket{OwnerUID: string(w.UID), NodeName: w.Spec.NodeName, HomeVolumeUID: w.Spec.HomeVolumeUID, PodUID: string(p.UID), Namespace: p.Namespace, PodName: p.Name, Snapshot: w.Status.Snapshot, SpecHash: w.Status.SpecHash,
+		GuestArgv: append(append([]string(nil), w.Spec.Container.Command...), w.Spec.Container.Args...)}
 	if w.Spec.Mounts != nil {
 		t.Mounts = mounts
 	} else if len(mounts) > 0 {
