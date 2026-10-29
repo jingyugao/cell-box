@@ -75,3 +75,18 @@ func TestChildIdentityDoesNotUseStateOrAllowColdRootStart(t *testing.T) {
 		t.Fatal("revoked child accepted")
 	}
 }
+
+func TestBackgroundLoadDefaultsToLazyAndRejectsUnknownModes(t *testing.T) {
+	if got := (Adapter{}).backgroundLoadFlag(); got != "--background-load=lazy" {
+		t.Fatalf("default flag = %q", got)
+	}
+	t.Setenv("CELLBOX_BACKGROUND_LOAD", "eager")
+	a, err := adapterFromEnv()
+	if err != nil || a.backgroundLoadFlag() != "--background-load=eager" {
+		t.Fatalf("eager override: %q %v", a.backgroundLoadFlag(), err)
+	}
+	t.Setenv("CELLBOX_BACKGROUND_LOAD", "fast")
+	if _, err = adapterFromEnv(); err == nil {
+		t.Fatal("unknown mode accepted")
+	}
+}
