@@ -23,11 +23,29 @@ import (
 
 var sandboxID = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
+// Background load modes for runsc restore --background-load.
+const (
+	BackgroundLoadLazy  = "lazy"
+	BackgroundLoadEager = "eager"
+)
+
 type Adapter struct {
 	Base, Runsc     string
 	DeferCheckpoint bool
 	NoRootContainer bool
 	PodUIDAuth      bool
+	// BackgroundLoad selects how checkpoint pages are read after restore. The
+	// zero value means lazy: pages load when the application faults on them.
+	BackgroundLoad string
+}
+
+// backgroundLoadFlag returns the runsc flag for restores that bind a
+// checkpoint. The deferred root restore carries no checkpoint, so it needs none.
+func (a Adapter) backgroundLoadFlag() string {
+	if a.BackgroundLoad == "" {
+		return "--background-load=" + BackgroundLoadLazy
+	}
+	return "--background-load=" + a.BackgroundLoad
 }
 
 func argValue(args []string, key string) string {
@@ -232,7 +250,7 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 			}
 			// Resume execution as soon as kernel state is restored. Memory pages
 			// load in the background; callers must check application readiness.
-			return append(append([]string{}, args[:idx]...), "restore", "--background", "--detach", "--image-path="+path, id), nil
+			return append(append([]string{}, args[:idx]...), "restore", "--background", a.backgroundLoadFlag(), "--detach", "--image-path="+path, id), nil
 		}
 		if err = a.claimHome(t); err != nil {
 			return nil, err
@@ -393,6 +411,12 @@ func adapterFromEnv() (Adapter, error) {
 			return a, fmt.Errorf("invalid CELLBOX_NO_ROOT_CONTAINER: %w", err)
 		}
 		a.NoRootContainer = noRoot
+	}
+	if value := os.Getenv("CELLBOX_BACKGROUND_LOAD"); value != "" {
+		if value != BackgroundLoadLazy && value != BackgroundLoadEager {
+			return a, fmt.Errorf("invalid CELLBOX_BACKGROUND_LOAD %q: want %s or %s", value, BackgroundLoadLazy, BackgroundLoadEager)
+		}
+		a.BackgroundLoad = value
 	}
 	if value := os.Getenv("CELLBOX_POD_UID_AUTH"); value != "" {
 		authorizedByUID, err := strconv.ParseBool(value)
@@ -588,7 +612,7 @@ func (a Adapter) childStartArgs(args []string, idx int, id string) ([]string, er
 		return nil, err
 	}
 	if c.DeferredRestore {
-		return append(append([]string{}, args[:idx]...), "restore", "--background", "--detach", "--image-path="+restorePath, id), nil
+		return append(append([]string{}, args[:idx]...), "restore", "--background", a.backgroundLoadFlag(), "--detach", "--image-path="+restorePath, id), nil
 	}
 	return args, nil
 }
