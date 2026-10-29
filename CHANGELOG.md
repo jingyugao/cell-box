@@ -12,6 +12,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Boxes on Kubernetes and local-runsc profiles now carry an instance identity. The server sends it with every request to the Guest, and the Guest rejects requests meant for another Box. **Revisions built before this change contain a Guest that cannot confirm the identity, so creating a Box from them fails with "Guest cannot confirm Box identity"; rebuild those templates.** Existing Boxes are not affected.
 
 ### Changed
+
 - Requests to a running Box are routed with an in-process cache of the committed execution's address instead of reading Kubernetes on every request. The identity check above makes a stale entry harmless.
 - Restores that bind a checkpoint now load pages lazily by default (`--background-load=lazy`). Set `CELLBOX_BACKGROUND_LOAD=eager` in the wrapper script to restore the previous behavior.
 - Resume completes when the process listens on its ports, and health is monitored independently.
