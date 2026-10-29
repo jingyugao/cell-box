@@ -14,7 +14,7 @@ Restoring a gVisor checkpoint normally means creating a Pod, setting up its netw
 - **Deferred checkpoint.** A warm sandbox starts without a checkpoint; the checkpoint and the persistent HOME are bound only when a sandbox claims the slot.
 - **Lazy checkpoint load.** After restore, memory pages are read when the application touches them, not in one pass up front.
 
-With a warm-pool hit, a suspended sandbox is running again and serving requests in about **200 ms**. The figure applies to a resume on the same node that finds a ready warm slot. A resume that misses the pool falls back to a normal checkpoint restore, which keeps process memory but takes longer. How the number is measured, and how it breaks down, is described in the resume guide (in preparation); the warm pool is explained in [warm pool](docs/warm-pool.md).
+With a warm-pool hit, a suspended sandbox is running again and serving requests in about **200 ms**. The figure applies to a resume on the same node that finds a ready warm slot. A resume that misses the pool falls back to a normal checkpoint restore, which keeps process memory but takes longer. How the number is measured and where the time goes is described in [Resume on Kubernetes](docs/resume-on-kubernetes.md); the warm pool is explained in [warm pool](docs/warm-pool.md).
 
 ## What you can do
 
@@ -67,6 +67,7 @@ client / Go SDK
 | [Usage](docs/cellbox-usage.md) | Templates, revisions and the sandbox lifecycle |
 | [REST quick start](docs/rest-quickstart.md) | `curl` examples |
 | [Go SDK](docs/go-sdk.md) | Client usage and examples |
+| [Resume on Kubernetes](docs/resume-on-kubernetes.md) | What the 200 ms figure means, how it is achieved, measurements and limits |
 | [Warm pool](docs/warm-pool.md) | How warm slots are sized, claimed and reclaimed |
 | [Architecture](docs/architecture.md) | Components and the create and resume flows |
 | [End-to-end validation](docs/e2e-validation.md) | The acceptance suite and what it proves |
