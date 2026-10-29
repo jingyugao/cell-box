@@ -74,7 +74,9 @@ func (b *Backend) ResumeGuest(ctx context.Context, w *api.ResumablePod, p *core.
 
 // ConfirmExecution verifies the supplied Pod execution against local CRI state
 // without making a request to the guest.
-func (b *Backend) ConfirmExecution(ctx context.Context, w *api.ResumablePod, p *core.Pod) (*api.Execution, error) {
+func (b *Backend) ConfirmExecution(ctx context.Context, w *api.ResumablePod, p *core.Pod) (execution *api.Execution, resultErr error) {
+	ctx, span := telemetry.Start(ctx, "node.execution.confirm")
+	defer func() { telemetry.End(span, resultErr) }()
 	if w == nil || p == nil || b == nil || b.Runtime == nil {
 		return nil, fmt.Errorf("execution confirmation requires workload, Pod, and CRI runtime")
 	}

@@ -3,10 +3,12 @@
 package adapter
 
 import (
+	"encoding/json"
 	api "github.com/jingyugao/cell-box/api/v1alpha1"
 	"github.com/jingyugao/cell-box/internal/node"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -88,5 +90,46 @@ func TestBackgroundLoadDefaultsToLazyAndRejectsUnknownModes(t *testing.T) {
 	t.Setenv("CELLBOX_BACKGROUND_LOAD", "fast")
 	if _, err = adapterFromEnv(); err == nil {
 		t.Fatal("unknown mode accepted")
+	}
+}
+
+// Timing marks are for measurement runs only: they must not appear unless asked
+// for, and they must never turn a failed write into a failed sandbox start.
+func TestTimingMarksAreOptInAndNeverFailTheStart(t *testing.T) {
+	base := t.TempDir()
+	Adapter{Base: base}.mark("sb", "pod", "child_start_enter")
+	if _, err := os.Stat(filepath.Join(base, "timings.log")); !os.IsNotExist(err) {
+		t.Fatalf("a mark was written while tracing is off: %v", err)
+	}
+	a := Adapter{Base: base, TraceTimings: true}
+	a.mark("sb", "pod", "child_start_enter")
+	a.mark("sb", "pod", "exec_restore")
+	data, err := os.ReadFile(filepath.Join(base, "timings.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []string
+	var last int64
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var m struct {
+			TS      int64  `json:"ts_ns"`
+			Sandbox string `json:"sandbox"`
+			PodUID  string `json:"pod_uid"`
+			Event   string `json:"event"`
+		}
+		if err := json.Unmarshal([]byte(line), &m); err != nil || m.Sandbox != "sb" || m.PodUID != "pod" || m.TS < last {
+			t.Fatalf("bad line %q: %v", line, err)
+		}
+		last = m.TS
+		events = append(events, m.Event)
+	}
+	if !reflect.DeepEqual(events, []string{"child_start_enter", "exec_restore"}) {
+		t.Fatalf("events: %v", events)
+	}
+	// An unwritable directory must be ignored, not reported.
+	Adapter{Base: filepath.Join(base, "missing", "dir"), TraceTimings: true}.mark("sb", "pod", "x")
+	t.Setenv("CELLBOX_TRACE_TIMINGS", "maybe")
+	if _, err := adapterFromEnv(); err == nil {
+		t.Fatal("invalid CELLBOX_TRACE_TIMINGS accepted")
 	}
 }

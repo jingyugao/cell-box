@@ -11,6 +11,7 @@ import (
 	api "github.com/jingyugao/cell-box/api/v1alpha1"
 	"github.com/jingyugao/cell-box/internal/guestapi"
 	"github.com/jingyugao/cell-box/internal/portwait"
+	"github.com/jingyugao/cell-box/internal/telemetry"
 	core "k8s.io/api/core/v1"
 	cri "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
@@ -131,7 +132,10 @@ func (b *Backend) WaitPortsListening(ctx context.Context, w *api.ResumablePod, p
 		return nil, err
 	}
 	defer ns.Close()
-	if err = monitor.WaitPortsListening(ctx, fmt.Sprintf("/proc/self/fd/%d", ns.Fd()), requestedPorts(w)); err != nil {
+	_, waitSpan := telemetry.Start(ctx, "node.ports.wait")
+	err = monitor.WaitPortsListening(ctx, fmt.Sprintf("/proc/self/fd/%d", ns.Fd()), requestedPorts(w))
+	telemetry.End(waitSpan, err)
+	if err != nil {
 		return nil, err
 	}
 	// A namespace can outlive its execution. Reconfirm identity after the wait.

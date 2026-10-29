@@ -7,6 +7,7 @@ import (
 	"time"
 
 	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/telemetry"
 	core "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -74,7 +75,9 @@ func (r *Reconciler) waitListening(ctx context.Context, w *api.ResumablePod, p *
 	workload, pod := w.DeepCopy(), p.DeepCopy()
 	go func() {
 		defer cancel()
-		execution, err := backend.WaitPortsListening(waitCtx, workload, pod)
+		spanCtx, span := telemetry.Start(waitCtx, "controller.resume.wait_listening", telemetry.String("pod.uid", string(pod.UID)))
+		execution, err := backend.WaitPortsListening(spanCtx, workload, pod)
+		telemetry.End(span, err)
 		r.ports.mu.Lock()
 		current := r.ports.pending[key] == waiting
 		if current {

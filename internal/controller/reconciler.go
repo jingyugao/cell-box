@@ -383,7 +383,11 @@ func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (traceResul
 	w.Status.Execution = nil
 	w.Status.ResumePath = ""
 	if w.Status.Snapshot != "" && r.WarmPool != nil {
-		p, err := r.WarmPool.acquire(ctx, w)
+		var p *core.Pod
+		err := traced(ctx, "controller.resume.acquire", func(ctx context.Context) (e error) {
+			p, e = r.WarmPool.acquire(ctx, w)
+			return e
+		})
 		if err != nil {
 			return again, err
 		}
@@ -409,11 +413,18 @@ func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (traceResul
 			w.Status.ResumePath = api.ResumePathStandard
 		}
 	}
-	result, err := r.phase(ctx, w, phase, "Preparing a new Pod execution")
+	var result ctrl.Result
+	err := traced(ctx, "controller.resume.persist_assignment", func(ctx context.Context) (e error) {
+		result, e = r.phase(ctx, w, phase, "Preparing a new Pod execution")
+		return e
+	})
 	ctrl.LoggerFrom(ctx).Info("execution assignment persisted", "podUID", w.Status.PodUID, "durationMs", time.Since(started).Milliseconds())
 	if err == nil && warm != nil {
 		if backend, ok := r.Runtime.(warmRuntime); ok {
-			_, err = backend.ActivateWarm(ctx, w, warm)
+			err = traced(ctx, "controller.resume.activate_warm", func(ctx context.Context) error {
+				_, e := backend.ActivateWarm(ctx, w, warm)
+				return e
+			})
 		}
 		if err == nil {
 			return r.waitWarmStarted(ctx, w, warm)
@@ -486,11 +497,15 @@ func (r *Reconciler) started(ctx context.Context, w *api.ResumablePod, p *core.P
 		}
 	}
 	if _, ok := r.Runtime.(snapshotInvalidator); ok {
-		if err := r.serving(ctx, p, true); err != nil {
+		if err := traced(ctx, "controller.resume.serving", func(ctx context.Context) error { return r.serving(ctx, p, true) }); err != nil {
 			return again, err
 		}
 	}
-	result, err := r.phase(ctx, w, "Running", "Container started; previous snapshot cannot be replayed", ready(p))
+	var result ctrl.Result
+	err := traced(ctx, "controller.resume.commit_running", func(ctx context.Context) (e error) {
+		result, e = r.phase(ctx, w, "Running", "Container started; previous snapshot cannot be replayed", ready(p))
+		return e
+	})
 	ctrl.LoggerFrom(ctx).Info("execution started", "podUID", w.Status.PodUID, "podReady", ready(p))
 	return result, err
 }

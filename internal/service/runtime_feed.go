@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/jingyugao/cell-box/internal/boxprovider"
+	"github.com/jingyugao/cell-box/internal/telemetry"
 )
 
 // One stream per Box serves both background projection and lifecycle waiters.
@@ -127,7 +128,9 @@ func (s *Service) runRuntimeFeed(id string, feed *runtimeFeed) {
 	}
 }
 
-func (s *Service) waitNodeResume(ctx context.Context, b boxRecord, transitionID string) (boxprovider.Observation, error) {
+func (s *Service) waitNodeResume(ctx context.Context, b boxRecord, transitionID string) (result boxprovider.Observation, resultErr error) {
+	ctx, span := telemetry.Start(ctx, "service.resume.wait_feed")
+	defer func() { telemetry.End(span, resultErr) }()
 	feed := s.ensureRuntimeFeed(b)
 	requestedObserved := false
 	for {
