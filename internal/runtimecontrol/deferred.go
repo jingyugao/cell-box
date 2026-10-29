@@ -44,9 +44,7 @@ func (c *Client) SetJournal(ctx context.Context, journal *Journal) error {
 		unlock := c.lock(key)
 		latest, err := journal.Load(ctx, key)
 		if err == nil && latest != nil {
-			if latest.Pending {
-				c.publish(key, latest.Resource, false)
-			}
+			c.publish(key, latest.Resource, false)
 			c.Notify(key)
 		}
 		unlock()

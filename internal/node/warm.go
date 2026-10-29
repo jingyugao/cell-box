@@ -222,10 +222,7 @@ func (b *Backend) ActivateWarm(ctx context.Context, w *api.ResumablePod, p *core
 	if l.Phase == "expired" || (l.Phase == "waiting" && !time.Now().Before(l.Deadline)) {
 		return true, backend.ErrWarmExpired
 	}
-	warmSpec := w.DeepCopy()
-	warmSpec.Spec.HomeVolumeUID = ""
-	warmSpec.Spec.Mounts = nil
-	if l.SpecHash != api.SpecFingerprint(warmSpec) || w.Status.Snapshot == "" {
+	if l.SpecHash != api.WarmSpecFingerprint(w) || w.Status.Snapshot == "" {
 		return true, fmt.Errorf("incompatible warm restore")
 	}
 	mounts, err := b.prepareVolumeMounts(w, w.Status.Cycle == 1 && w.Status.Snapshot == "")

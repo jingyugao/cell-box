@@ -19,6 +19,7 @@ import (
 	"github.com/jingyugao/cell-box/internal/volumebackup"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"path"
 	"slices"
@@ -428,6 +429,13 @@ func runtimeTiming(boxID, phase string, started time.Time, err error) {
 }
 func runtimeSpec(b boxRecord) boxprovider.Spec {
 	config := b.Profile.Guest
+	if b.GuestIdentity != "" {
+		config.Env = maps.Clone(config.Env)
+		if config.Env == nil {
+			config.Env = make(map[string]string)
+		}
+		config.Env[guestapi.InstanceIDEnv] = b.GuestIdentity
+	}
 	if b.Profile.DebugReadWriteHostPath != "" {
 		config.DebugHome = "/home/debug"
 	}
@@ -567,6 +575,13 @@ func projectRuntimeObservation(ctx context.Context, current *boxRecord, ob boxpr
 
 func (s *Service) connection(ctx context.Context, b boxRecord) (boxprovider.Connection, error) {
 	p := s.providers[b.Profile.Provider]
+	if cached, ok := p.(boxprovider.CachedGuestProvider); ok && b.GuestIdentity != "" {
+		conn, err := cached.CachedGuestForExecution(ctx, b.Handle, b.ExecutionID)
+		if errors.Is(err, boxprovider.ErrStaleExecution) {
+			return boxprovider.Connection{}, apiError("STALE_GENERATION", "Runtime changed; fetch the box and inspect its generation")
+		}
+		return conn, err
+	}
 	if fenced, ok := p.(boxprovider.FencedGuestProvider); ok {
 		conn, err := fenced.GuestForExecution(ctx, b.Handle, b.ExecutionID)
 		if errors.Is(err, boxprovider.ErrStaleExecution) {
@@ -621,6 +636,11 @@ func (s *Service) guestRequestHeaders(client *http.Client, ctx context.Context, 
 	if r.Header.Get("Content-Type") == "" {
 		r.Header.Set("Content-Type", "application/json")
 	}
+	if b.GuestIdentity != "" {
+		r.Header.Set(guestapi.InstanceIDHeader, b.GuestIdentity)
+	} else {
+		r.Header.Del(guestapi.InstanceIDHeader)
+	}
 	return client.Do(r)
 }
 func guestSuccess(response *http.Response) error {
@@ -630,6 +650,9 @@ func guestSuccess(response *http.Response) error {
 	code := "GUEST_REJECTED"
 	message := "Guest rejected the requested operation"
 	if response.StatusCode == 409 {
+		if response.Header.Get(guestapi.InstanceMismatchHeader) == "true" {
+			return apiError("STALE_GENERATION", "Guest belongs to another Box instance")
+		}
 		code = "BUSY"
 		message = "Guest has active work or is quiesced"
 	}
@@ -690,6 +713,10 @@ func (s *Service) waitStateTransition(ctx context.Context, id, want string, chec
 				res.Body.Close()
 				probeCancel()
 				if res.StatusCode == 200 {
+					if _, cached := s.providers[updated.Profile.Provider].(boxprovider.CachedGuestProvider); cached &&
+						updated.GuestIdentity != "" && res.Header.Get(guestapi.InstanceIDHeader) != updated.GuestIdentity {
+						return Box{}, apiError("UNSUPPORTED_CAPABILITY", "Guest cannot confirm Box identity; rebuild the template with the current Guest")
+					}
 					return box, nil
 				}
 			} else {
@@ -860,6 +887,9 @@ func (s *Service) create(client string, input createRequest, archiveID string, a
 			OwnerKey: input.OwnerKey, ProfileID: profile.ID, Phase: phase, Version: 1, Image: profile.Image, Workspace: profile.Guest.Workspace,
 			Capabilities: profileCapabilities(profile), OperationID: op.ID, CreatedAt: time.Now().UTC()},
 			ClientID: client, Profile: profile, Staged: archiveID != "" || input.Staged, RestoreComplete: input.Staged && archiveID == "", RestoreArchiveID: archiveID, AcceptImageChange: acceptImageChange}
+		if profile.Provider == "resumable-k8s-pod" || profile.Provider == "local-runsc" {
+			b.GuestIdentity = randomID("guest-")
+		}
 		if err := s.admitBoxMounts(tx, &b, input.Mounts, input.HomeVolumeID); err != nil {
 			return err
 		}

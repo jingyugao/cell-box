@@ -48,6 +48,9 @@ func NewServer(c guestapi.Config, self string, staged bool) (*Server, error) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		if instanceID := s.cfg.Env[guestapi.InstanceIDEnv]; instanceID != "" {
+			w.Header().Set(guestapi.InstanceIDHeader, instanceID)
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("GET /v1/ports/listening", s.portsListeningHandler)
@@ -63,7 +66,26 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/credentials", s.credentialBatchHandler)
 	mux.HandleFunc("POST /v1/tools/{id}", s.toolHandler)
 	mux.HandleFunc("/proxy/", s.proxyHandler)
-	return mux
+	return s.checkInstanceID(mux)
+}
+
+func (s *Server) checkInstanceID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		want := s.cfg.Env[guestapi.InstanceIDEnv]
+		got := r.Header.Get(guestapi.InstanceIDHeader)
+		// Keep unaffiliated health probes usable, while checking any identity
+		// the caller supplies and requiring it for all other routes.
+		if r.URL.Path == "/healthz" && got == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if got != want {
+			w.Header().Set(guestapi.InstanceMismatchHeader, "true")
+			http.Error(w, "box instance mismatch", http.StatusConflict)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

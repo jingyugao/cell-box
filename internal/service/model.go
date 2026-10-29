@@ -109,6 +109,7 @@ type Box struct {
 	CreatedAt       time.Time    `json:"createdAt"`
 }
 type boxRecord struct {
+	GuestIdentity        string             `json:"guestIdentity,omitempty"`
 	VolumeMounts         []api.VolumeMount  `json:"volumeMounts,omitempty"`
 	HomeVolumeUID        string             `json:"homeVolumeUID,omitempty"`
 	Box                  Box                `json:"box"`

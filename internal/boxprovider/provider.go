@@ -145,6 +145,12 @@ type FencedGuestProvider interface {
 	GuestForExecution(context.Context, Handle, string) (Connection, error)
 }
 
+// CachedGuestProvider resolves an already committed execution without runtime
+// RPCs. Transport failures are returned to the caller without rediscovery.
+type CachedGuestProvider interface {
+	CachedGuestForExecution(context.Context, Handle, string) (Connection, error)
+}
+
 // ChangeProvider wakes lifecycle waiters when the runtime resource changes.
 type ChangeProvider interface {
 	WatchChanges(context.Context, Handle) (<-chan struct{}, error)

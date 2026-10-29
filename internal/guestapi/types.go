@@ -14,6 +14,10 @@ const Binary = "/opt/cellbox/bin/cellbox-container-agent"
 const MaxCredentialBytes = 1 << 20
 const MaxCredentialBatchBytes = 2 << 20
 
+const InstanceIDEnv = "CELLBOX_INSTANCE_ID"
+const InstanceIDHeader = "X-Cellbox-Instance-ID"
+const InstanceMismatchHeader = "X-Cellbox-Instance-Mismatch"
+
 type CredentialBatch struct {
 	Slots map[string][]byte `json:"slots"`
 }

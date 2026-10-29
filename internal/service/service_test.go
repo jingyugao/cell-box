@@ -755,3 +755,24 @@ func TestRemovedAPIsAreNotExposed(t *testing.T) {
 		wantStatus(t, status, http.StatusNotFound, body)
 	}
 }
+
+// A request that reached a different Box's guest must surface as a stale
+// execution, not as the "busy" answer a quiesced guest gives.
+func TestGuestMismatchIsReportedAsStaleExecution(t *testing.T) {
+	code := func(response *http.Response) string {
+		var apiErr *APIError
+		if err := guestSuccess(response); !errors.As(err, &apiErr) {
+			t.Fatalf("status %d produced %v", response.StatusCode, err)
+		} else {
+			return apiErr.Code
+		}
+		return ""
+	}
+	mismatch := &http.Response{StatusCode: http.StatusConflict, Header: http.Header{guestapi.InstanceMismatchHeader: {"true"}}}
+	if got := code(mismatch); got != "STALE_GENERATION" {
+		t.Fatalf("mismatch: %s", got)
+	}
+	if got := code(&http.Response{StatusCode: http.StatusConflict, Header: http.Header{}}); got != "BUSY" {
+		t.Fatalf("ordinary conflict: %s", got)
+	}
+}

@@ -5,8 +5,23 @@ import (
 	"encoding/hex"
 	"encoding/json"
 
+	"github.com/jingyugao/cell-box/internal/guestapi"
+
 	core "k8s.io/api/core/v1"
 )
+
+// WarmSpecFingerprint omits the Box's volume selection and routing marker;
+// neither changes the empty warm sandbox that will receive its checkpoint.
+func WarmSpecFingerprint(w *ResumablePod) string {
+	if w == nil {
+		return ""
+	}
+	copy := w.DeepCopy()
+	copy.Spec.HomeVolumeUID = ""
+	copy.Spec.Mounts = nil
+	copy.Spec.Container.Args = guestapi.WithoutInstanceID(copy.Spec.Container.Args)
+	return SpecFingerprint(copy)
+}
 
 // SpecFingerprint hashes the immutable runtime profile. Its legacy encoding is
 // intentionally stable: optional fields wrap the old encoding only when set.

@@ -121,10 +121,7 @@ func fingerprint(w *api.ResumablePod) string {
 // warmFingerprint ignores the selected HOME volume so one warm runtime profile
 // can serve Boxes that attach different volumes.
 func warmFingerprint(w *api.ResumablePod) string {
-	copy := w.DeepCopy()
-	copy.Spec.HomeVolumeUID = ""
-	copy.Spec.Mounts = nil
-	return api.SpecFingerprint(copy)
+	return api.WarmSpecFingerprint(w)
 }
 func debugHostVolumes(w *api.ResumablePod) []core.Volume {
 	if w.Spec.DebugReadWriteHostPath != "" {
@@ -447,7 +444,28 @@ func (r *Reconciler) waitWarmStarted(ctx context.Context, w *api.ResumablePod, p
 	return r.started(ctx, w, p)
 }
 
+func (r *Reconciler) confirmExecution(ctx context.Context, w *api.ResumablePod, p *core.Pod) error {
+	backend, ok := r.Runtime.(interface {
+		ConfirmExecution(context.Context, *api.ResumablePod, *core.Pod) (*api.Execution, error)
+	})
+	if !ok || w.Status.Execution != nil {
+		return nil
+	}
+	execution, err := backend.ConfirmExecution(ctx, w, p)
+	if err != nil {
+		return err
+	}
+	if execution == nil || execution.PodUID != w.Status.PodUID {
+		return fmt.Errorf("runtime reported another execution")
+	}
+	w.Status.Execution = execution
+	return nil
+}
+
 func (r *Reconciler) started(ctx context.Context, w *api.ResumablePod, p *core.Pod) (traceResult ctrl.Result, retErr error) {
+	if err := r.confirmExecution(ctx, w, p); err != nil {
+		return again, err
+	}
 	if backend, ok := r.Runtime.(snapshotInvalidator); ok && w.Status.Snapshot != "" {
 		if err := backend.InvalidateSnapshot(ctx, w); err != nil {
 			return again, err
@@ -798,6 +816,16 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (traceResu
 	case "Running":
 		if p == nil || p.DeletionTimestamp != nil || p.Status.Phase == core.PodFailed || p.Status.Phase == core.PodSucceeded {
 			return fail(fmt.Errorf("active execution lost; no automatic rollback or cold start"))
+		}
+		// Older cold-start records lack the address. Populate it once in the
+		// controller so restored service requests never discover it on demand.
+		if w.Status.Execution == nil && w.Spec.DesiredState == "Running" {
+			if err := r.confirmExecution(ctx, w, p); err != nil {
+				return again, err
+			}
+			if w.Status.Execution != nil {
+				return again, r.Status().Update(ctx, w)
+			}
 		}
 		if _, asyncCleanup := r.Runtime.(snapshotInvalidator); !asyncCleanup {
 			if err = r.Runtime.Forget(ctx, w); err != nil {
