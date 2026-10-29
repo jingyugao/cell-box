@@ -225,15 +225,22 @@ func (b *Backend) ActivateWarm(ctx context.Context, w *api.ResumablePod, p *core
 	if l.SpecHash != api.WarmSpecFingerprint(w) || w.Status.Snapshot == "" {
 		return true, fmt.Errorf("incompatible warm restore")
 	}
+	_, mountSpan := telemetry.Start(ctx, "node.warm.activate.mounts")
 	mounts, err := b.prepareVolumeMounts(w, w.Status.Cycle == 1 && w.Status.Snapshot == "")
+	telemetry.End(mountSpan, err)
 	if err != nil {
 		return true, err
 	}
 	t := warmTicket(w, p, mounts)
-	if err = b.prepareSnapshot(ctx, w); err != nil {
+	snapshotCtx, snapshotSpan := telemetry.Start(ctx, "node.warm.activate.snapshot")
+	err = b.prepareSnapshot(snapshotCtx, w)
+	telemetry.End(snapshotSpan, err)
+	if err != nil {
 		return true, err
 	}
-	_, err = warmUpdateContext(ctx, b.Base, string(p.UID), false, func(l *WarmLease) error {
+	leaseCtx, leaseSpan := telemetry.Start(ctx, "node.warm.activate.ticket_lease")
+	defer func() { telemetry.End(leaseSpan, resultErr) }()
+	_, err = warmUpdateContext(leaseCtx, b.Base, string(p.UID), false, func(l *WarmLease) error {
 		if l.Phase != "waiting" || !time.Now().Before(l.Deadline) {
 			return backend.ErrWarmExpired
 		}

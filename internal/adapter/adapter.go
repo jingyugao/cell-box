@@ -37,6 +37,28 @@ type Adapter struct {
 	// BackgroundLoad selects how checkpoint pages are read after restore. The
 	// zero value means lazy: pages load when the application faults on them.
 	BackgroundLoad string
+	// TraceTimings appends one line per step of a warm start to
+	// <Base>/timings.log, so the time the wrapper spends outside runsc can be
+	// compared with the server's trace. Off by default.
+	TraceTimings bool
+}
+
+// mark records that a step of the sandbox start finished. It never fails the
+// start: timing data is optional and a write error is dropped.
+func (a Adapter) mark(sandbox, podUID, event string) {
+	if !a.TraceTimings {
+		return
+	}
+	line, err := json.Marshal(map[string]any{"ts_ns": time.Now().UnixNano(), "sandbox": sandbox, "pod_uid": podUID, "event": event})
+	if err != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(a.Base, "timings.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.Write(append(line, '\n'))
 }
 
 // backgroundLoadFlag returns the runsc flag for restores that bind a
@@ -418,6 +440,13 @@ func adapterFromEnv() (Adapter, error) {
 		}
 		a.BackgroundLoad = value
 	}
+	if value := os.Getenv("CELLBOX_TRACE_TIMINGS"); value != "" {
+		trace, err := strconv.ParseBool(value)
+		if err != nil {
+			return a, fmt.Errorf("invalid CELLBOX_TRACE_TIMINGS: %w", err)
+		}
+		a.TraceTimings = trace
+	}
 	if value := os.Getenv("CELLBOX_POD_UID_AUTH"); value != "" {
 		authorizedByUID, err := strconv.ParseBool(value)
 		if err != nil {
@@ -533,6 +562,7 @@ func (a Adapter) childStartArgs(args []string, idx int, id string) ([]string, er
 	if err := node.ReadJSON(filepath.Join(a.Base, "children", id+".json"), &c); err != nil {
 		return nil, fmt.Errorf("missing container identity: %w", err)
 	}
+	a.mark(c.SandboxID, c.Ticket.PodUID, "child_start_enter")
 	if c.DeferredRestore {
 		t, err := node.WaitWarm(a.Base, c.Ticket.PodUID, c.SandboxID)
 		if err != nil {
@@ -545,6 +575,7 @@ func (a Adapter) childStartArgs(args []string, idx int, id string) ([]string, er
 		if err = node.AtomicJSON(filepath.Join(a.Base, "requests", c.SandboxID+".json"), t); err != nil {
 			return nil, err
 		}
+		a.mark(c.SandboxID, c.Ticket.PodUID, "warm_released")
 	}
 	var live, parent node.Ticket
 	if err := node.ReadJSON(filepath.Join(a.Base, "tickets", c.Ticket.PodUID+".json"), &live); err != nil {
@@ -556,6 +587,7 @@ func (a Adapter) childStartArgs(args []string, idx int, id string) ([]string, er
 	if !reflect.DeepEqual(live, c.Ticket) || !reflect.DeepEqual(parent, c.Ticket) {
 		return nil, fmt.Errorf("child sandbox revoked")
 	}
+	a.mark(c.SandboxID, c.Ticket.PodUID, "ticket_checked")
 	var restorePath string
 	if c.DeferredRestore {
 		if c.Ticket.Snapshot == "" {
@@ -573,12 +605,15 @@ func (a Adapter) childStartArgs(args []string, idx int, id string) ([]string, er
 		if err = verifyTicketManifest(c.Ticket, manifest); err != nil {
 			return nil, err
 		}
+		a.mark(c.SandboxID, c.Ticket.PodUID, "snapshot_verified")
 		if err = node.ConsumeSnapshot(a.Base, c.Ticket.OwnerUID, c.Ticket.Snapshot); err != nil {
 			return nil, fmt.Errorf("refusing snapshot replay: %w", err)
 		}
+		a.mark(c.SandboxID, c.Ticket.PodUID, "snapshot_consumed")
 		if err = a.claimHome(c.Ticket); err != nil {
 			return nil, err
 		}
+		a.mark(c.SandboxID, c.Ticket.PodUID, "home_claimed")
 	}
 	if len(ticketMounts(c.Ticket)) > 0 {
 		if err := a.verifyVolumeIdentities(c.Ticket); err != nil {
@@ -591,6 +626,7 @@ func (a Adapter) childStartArgs(args []string, idx int, id string) ([]string, er
 			return nil, err
 		}
 	}
+	a.mark(c.SandboxID, c.Ticket.PodUID, "volumes_verified")
 	if c.DeferredRestore {
 		if err := a.bindHome(c.BundleDir, c.Ticket); err != nil {
 			return nil, err
@@ -598,6 +634,7 @@ func (a Adapter) childStartArgs(args []string, idx int, id string) ([]string, er
 		if err := node.AtomicJSON(filepath.Join(a.Base, "children", id+".json"), c); err != nil {
 			return nil, err
 		}
+		a.mark(c.SandboxID, c.Ticket.PodUID, "home_bound")
 	}
 	path := filepath.Join(a.Base, "children", id+".json.started")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
@@ -611,7 +648,9 @@ func (a Adapter) childStartArgs(args []string, idx int, id string) ([]string, er
 	if err = node.SyncDir(filepath.Dir(path)); err != nil {
 		return nil, err
 	}
+	a.mark(c.SandboxID, c.Ticket.PodUID, "started_marker")
 	if c.DeferredRestore {
+		a.mark(c.SandboxID, c.Ticket.PodUID, "exec_restore")
 		return append(append([]string{}, args[:idx]...), "restore", "--background", a.backgroundLoadFlag(), "--detach", "--image-path="+restorePath, id), nil
 	}
 	return args, nil
