@@ -83,7 +83,7 @@ func (s *Service) createVolumeExport(client, id string, input createVolumeExport
 		if volume.Volume.Phase != "available" {
 			return apiError("CONFLICT", "Export requires an available Volume")
 		}
-		if err := requireIdleVolumeBoxes(tx, client, id, false); err != nil {
+		if err := requireStoppedVolumeBoxes(tx, client, id); err != nil {
 			return err
 		}
 		// The same durable reservation is checked by Box create/resume/activate,
@@ -297,7 +297,8 @@ func (s *Service) cleanupVolumeExports() error {
 		return nil
 	}
 	if err := removeRegularTemps(s.exportDir, func(name string) bool {
-		return strings.HasPrefix(name, ".export-") || strings.HasSuffix(name, ".tar.gz") && volumeExportIDPattern.MatchString(strings.TrimSuffix(name, ".tar.gz"))
+		return strings.HasPrefix(name, ".export-") || strings.HasPrefix(name, ".backup-export-") ||
+			strings.HasSuffix(name, ".tar.gz") && volumeExportIDPattern.MatchString(strings.TrimSuffix(name, ".tar.gz"))
 	}); err != nil {
 		return err
 	}
