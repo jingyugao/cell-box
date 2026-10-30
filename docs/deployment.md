@@ -33,7 +33,7 @@ Use [`charts/cellbox/values.yaml`](../charts/cellbox/values.yaml) as the referen
 | `server.nodeName` | Required. The name of the Kubernetes node. The single `cellbox-server` process is pinned to it. |
 | `server.image` | The server image. Set it to the image you built. |
 | `api.replicas` | Keep at 1. Single-node operation does not scale out; a Kubernetes Lease selects the one active process. |
-| `storage.hostPath` | The single durable data directory, default `/var/lib/cellbox-data`. Holds `cellbox.db`, build logs and temporary files used to validate archive downloads. |
+| `storage.hostPath` | The single durable data directory, default `/var/lib/cellbox-data`. Holds `cellbox.db`, `runtime-journal.log` (recent resume state not yet written to the database), build logs and temporary files used to validate archive downloads. |
 | `storage.existingClaim` | Optional. If you provide an existing PVC, the data directory uses it instead of `storage.hostPath`. |
 | `api.config.dataDir` | Keep `/var/lib/cellbox-data`. It is the only service data directory; do not override it with another container path. |
 | `objectStorage.endpoint`, `bucket`, `region`, `prefix`, `pathStyle` | S3-compatible archive storage. Without it, archive capture, download, restore and delete return `UNSUPPORTED_CAPABILITY`. Template and operation metadata is always stored in SQLite. |
