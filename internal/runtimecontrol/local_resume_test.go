@@ -547,7 +547,12 @@ func TestSyncPublishesNothingBeforeTheJournalIsDurable(t *testing.T) {
 	durable.Close()
 	w, pod := localResumeObjects("barrier", "barrier-uid")
 	c, raw := localFixture(t, w, pod)
-	configureJournal(t, c, NewRelaxedJournal(db, durable))
+	journal, err := OpenRelaxedJournal(t.Context(), db, durable, filepath.Join(t.TempDir(), "journal.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close(context.Background())
+	configureJournal(t, c, journal)
 	beginLocalResume(t, c, w, pod)
 	if err := c.Sync(t.Context(), client.ObjectKeyFromObject(w)); err == nil {
 		t.Fatal("Sync succeeded although the journal could not be made durable")

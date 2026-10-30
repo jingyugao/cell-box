@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	api "github.com/jingyugao/cell-box/api/v1alpha1"
 	core "k8s.io/api/core/v1"
@@ -152,5 +154,60 @@ func TestJournalReleasesPodClaimWhenPendingCleared(t *testing.T) {
 	}
 	if len(list) != 1 || list[0].Resource.Name != "two" {
 		t.Fatalf("pending records = %#v, want only second record", list)
+	}
+}
+
+func TestWriteBehindRecoversCommitsAfterProcessCrash(t *testing.T) {
+	ctx := context.Background()
+	db, _, _ := openTestJournal(t)
+	log := filepath.Join(t.TempDir(), "journal.log")
+	// The flusher never runs during the test, as if the process died first.
+	crashed, err := openRelaxedJournal(ctx, db, db, log, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, removed := journalRecord("kept"), journalRecord("removed")
+	if err := crashed.Save(ctx, removed, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := crashed.Delete(ctx, client.ObjectKeyFromObject(removed.Resource), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := crashed.Save(ctx, kept, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := crashed.Save(ctx, kept, 1); err != nil {
+		t.Fatal(err)
+	}
+	if stored, err := NewJournal(db).Load(ctx, client.ObjectKeyFromObject(kept.Resource)); err != nil || stored != nil {
+		t.Fatalf("commit reached SQLite before the flush: %#v err=%v", stored, err)
+	}
+	// A crash during an append leaves a partial line.
+	f, err := os.OpenFile(log, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("deadbeef {\"id\":"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	recovered, err := openRelaxedJournal(ctx, db, db, log, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close(ctx)
+	stored := NewJournal(db)
+	for _, j := range []*Journal{recovered, stored} {
+		loaded, err := j.Load(ctx, client.ObjectKeyFromObject(kept.Resource))
+		if err != nil || loaded == nil || loaded.Revision != 2 {
+			t.Fatalf("kept record = %#v err=%v", loaded, err)
+		}
+		if gone, err := j.Load(ctx, client.ObjectKeyFromObject(removed.Resource)); err != nil || gone != nil {
+			t.Fatalf("removed record = %#v err=%v", gone, err)
+		}
+	}
+	if info, err := os.Stat(log); err != nil || info.Size() != 0 {
+		t.Fatalf("log was not emptied after recovery: %v err=%v", info, err)
 	}
 }
