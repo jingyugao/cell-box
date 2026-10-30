@@ -20,6 +20,7 @@ import (
 
 // Store owns the single local database. Operations read and write only their records.
 type Store struct {
+	relaxed  *sql.DB
 	db       *sql.DB
 	dir      string
 	lock     *os.File
@@ -96,6 +97,23 @@ func OpenStore(dir string) (*Store, error) {
 	if _, err = db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		return nil, err
 	}
+	// Resume commits use this pool and do not wait for the disk. They survive a
+	// process crash. WAL is sequential, so power loss drops only the newest ones
+	// and any later commit through db makes all earlier commits durable too.
+	query.Set("_pragma", "busy_timeout(5000)")
+	query.Add("_pragma", "foreign_keys(1)")
+	query.Add("_pragma", "synchronous(NORMAL)")
+	uri.RawQuery = query.Encode()
+	relaxed, err := sql.Open("sqlite", uri.String())
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if failed {
+			relaxed.Close()
+		}
+	}()
+	relaxed.SetMaxOpenConns(4)
 	if err = os.Chmod(name, 0600); err != nil {
 		return nil, err
 	}
@@ -118,13 +136,13 @@ func OpenStore(dir string) (*Store, error) {
 		return nil, err
 	}
 	failed = false
-	return &Store{db: db, dir: dir, lock: lock}, nil
+	return &Store{db: db, relaxed: relaxed, dir: dir, lock: lock}, nil
 }
 
 func (s *Store) Close() error {
 	s.writerMu.Lock()
 	defer s.writerMu.Unlock()
-	err := s.db.Close()
+	err := errors.Join(s.relaxed.Close(), s.db.Close())
 	if s.lock != nil {
 		err = errors.Join(err, s.lock.Close())
 		s.lock = nil
@@ -144,12 +162,22 @@ type storeTx struct {
 	changed bool
 }
 
-func (s *Store) Write(ctx context.Context, fn func(*storeTx) error) (retErr error) {
+func (s *Store) Write(ctx context.Context, fn func(*storeTx) error) error {
+	return s.write(ctx, s.db, fn)
+}
+
+// WriteRelaxed is for records that a consumed checkpoint marker already fences
+// after power loss. Volumes, suspends and other durable facts must use Write.
+func (s *Store) WriteRelaxed(ctx context.Context, fn func(*storeTx) error) error {
+	return s.write(ctx, s.relaxed, fn)
+}
+
+func (s *Store) write(ctx context.Context, db *sql.DB, fn func(*storeTx) error) (retErr error) {
 	ctx, span := telemetry.Start(ctx, "cellbox.storage.transaction", telemetry.String("storage.backend", "sqlite"))
 	defer func() { telemetry.End(span, retErr) }()
 	s.writerMu.Lock()
 	defer s.writerMu.Unlock()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}

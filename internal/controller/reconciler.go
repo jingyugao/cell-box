@@ -87,6 +87,8 @@ func (r *Reconciler) syncInventoryPhase(ctx context.Context, w *api.ResumablePod
 	return syncer.SyncInventory(ctx, resource)
 }
 
+const assignmentMessage = "Preparing a new Pod execution"
+
 var again = ctrl.Result{RequeueAfter: time.Second}
 var errServiceCollision = stderrors.New("Service name is already owned by another workload")
 var pullableImage = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}$`)
@@ -96,6 +98,11 @@ func (r *Reconciler) phase(ctx context.Context, w *api.ResumablePod, phase, mess
 	if err := r.syncInventoryPhase(ctx, w, phase); err != nil {
 		return again, err
 	}
+	markPhase(w, phase, message, podReady...)
+	return again, r.Status().Update(ctx, w)
+}
+
+func markPhase(w *api.ResumablePod, phase, message string, podReady ...bool) {
 	if w.Status.Phase != phase {
 		w.Status.Since = meta.Now()
 	}
@@ -112,7 +119,6 @@ func (r *Reconciler) phase(ctx context.Context, w *api.ResumablePod, phase, mess
 		}
 	}
 	apimeta.SetStatusCondition(&w.Status.Conditions, meta.Condition{Type: "Ready", Status: ready, Reason: phase, Message: message, ObservedGeneration: w.Generation})
-	return again, r.Status().Update(ctx, w)
 }
 func fingerprint(w *api.ResumablePod) string {
 	return api.SpecFingerprint(w)
@@ -377,6 +383,7 @@ func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (traceResul
 		ctrl.LoggerFrom(ctx).Info("execution preparation finished", "podUID", w.Status.PodUID, "durationMs", time.Since(started).Milliseconds())
 	}()
 	var warm *core.Pod
+	version := w.ResourceVersion
 	w.Status.Cycle++
 	w.Status.PodName = fmt.Sprintf("cb-%s-%d", string(w.UID)[:8], w.Status.Cycle)
 	w.Status.PodUID = ""
@@ -414,10 +421,14 @@ func (r *Reconciler) begin(ctx context.Context, w *api.ResumablePod) (traceResul
 		}
 	}
 	var result ctrl.Result
-	err := traced(ctx, "controller.resume.persist_assignment", func(ctx context.Context) (e error) {
-		result, e = r.phase(ctx, w, phase, "Preparing a new Pod execution")
-		return e
-	})
+	var err error
+	// A local claim has already committed this assignment.
+	if warm == nil || w.ResourceVersion == version {
+		err = traced(ctx, "controller.resume.persist_assignment", func(ctx context.Context) (e error) {
+			result, e = r.phase(ctx, w, phase, assignmentMessage)
+			return e
+		})
+	}
 	ctrl.LoggerFrom(ctx).Info("execution assignment persisted", "podUID", w.Status.PodUID, "durationMs", time.Since(started).Milliseconds())
 	if err == nil && warm != nil {
 		if backend, ok := r.Runtime.(warmRuntime); ok {
@@ -474,11 +485,11 @@ func (r *Reconciler) confirmExecution(ctx context.Context, w *api.ResumablePod, 
 }
 
 func (r *Reconciler) started(ctx context.Context, w *api.ResumablePod, p *core.Pod) (traceResult ctrl.Result, retErr error) {
-	if err := r.confirmExecution(ctx, w, p); err != nil {
+	if err := traced(ctx, "controller.resume.confirm_execution", func(ctx context.Context) error { return r.confirmExecution(ctx, w, p) }); err != nil {
 		return again, err
 	}
 	if backend, ok := r.Runtime.(snapshotInvalidator); ok && w.Status.Snapshot != "" {
-		if err := backend.InvalidateSnapshot(ctx, w); err != nil {
+		if err := traced(ctx, "controller.resume.invalidate_snapshot", func(ctx context.Context) error { return backend.InvalidateSnapshot(ctx, w) }); err != nil {
 			return again, err
 		}
 	}

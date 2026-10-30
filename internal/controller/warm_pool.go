@@ -613,6 +613,7 @@ func (p *WarmPool) acquire(ctx context.Context, w *api.ResumablePod) (result *co
 		}
 		if !owned(w, pod) {
 			if localMode {
+				markPhase(w, "Restoring", assignmentMessage)
 				_, err := local.ClaimWarm(ctx, w, pod)
 				if errors.Is(err, runtimecontrol.ErrPodClaimed) {
 					continue

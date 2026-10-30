@@ -70,7 +70,7 @@ func (s *Service) CheckpointStore() inventory.CheckpointStore { return s.store }
 // RuntimeJournal borrows the same durable database as operations and metadata.
 // Stop the runtime synchronizer before closing the service.
 func (s *Service) RuntimeJournal() *runtimecontrol.Journal {
-	return runtimecontrol.NewJournal(s.store.db)
+	return runtimecontrol.NewRelaxedJournal(s.store.relaxed, s.store.db)
 }
 
 func NewContext(parent context.Context, config Config, providers map[string]boxprovider.Provider) (*Service, error) {
@@ -292,7 +292,11 @@ func (s *Service) prepareOperationContext(ctx context.Context, client, kind, tar
 		}
 	}
 	op := Operation{ID: randomID("op-"), Kind: kind, TargetID: target, Status: "running", Version: 1, CreatedAt: time.Now().UTC()}
-	err := s.store.Write(ctx, func(tx *storeTx) error {
+	write := s.store.Write
+	if kind == "resume" {
+		write = s.store.WriteRelaxed
+	}
+	err := write(ctx, func(tx *storeTx) error {
 		if err := prepare(tx, &op); err != nil {
 			return err
 		}
@@ -318,7 +322,11 @@ func (s *Service) launchWithCommitContext(request context.Context, op Operation,
 		}
 		persist, cancelPersist := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancelPersist()
-		saveErr := s.store.Write(persist, func(tx *storeTx) error {
+		write := s.store.Write
+		if op.Kind == "resume" {
+			write = s.store.WriteRelaxed
+		}
+		saveErr := write(persist, func(tx *storeTx) error {
 			record, err := tx.Operation(op.ID)
 			if err != nil {
 				return err

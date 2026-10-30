@@ -34,9 +34,28 @@ type Record struct {
 
 // Journal stores resume records in the service's shared runtime_records table.
 // It keeps no process-local copy, so every operation observes SQLite state.
-type Journal struct{ db *sql.DB }
+type Journal struct {
+	db      *sql.DB
+	durable *sql.DB
+}
 
 func NewJournal(db *sql.DB) *Journal { return &Journal{db: db} }
+
+// NewRelaxedJournal commits through db without waiting for the disk. Barrier
+// uses durable, a connection to the same WAL database with synchronous=FULL.
+func NewRelaxedJournal(db, durable *sql.DB) *Journal { return &Journal{db: db, durable: durable} }
+
+// Barrier makes every earlier commit survive power loss, because a FULL commit
+// syncs the whole WAL. Call it before publishing local state outside this node.
+func (j *Journal) Barrier(ctx context.Context) error {
+	if j.durable == nil {
+		return nil
+	}
+	if _, err := j.durable.ExecContext(ctx, `INSERT OR REPLACE INTO runtime_records(kind,id,record) VALUES('runtime_barrier','wal','{}')`); err != nil {
+		return fmt.Errorf("sync runtime control journal: %w", err)
+	}
+	return nil
+}
 
 func journalID(key client.ObjectKey) string { return key.Namespace + "/" + key.Name }
 

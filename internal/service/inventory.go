@@ -210,7 +210,17 @@ func (s *Store) GetCheckpoint(ctx context.Context, id string) (inventory.Record,
 	return record, err
 }
 func (s *Store) DeleteCheckpoint(ctx context.Context, id, snapshot string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	return s.deleteCheckpoint(ctx, s.db, id, snapshot)
+}
+
+// InvalidateCheckpoint removes a checkpoint whose consumed marker is on disk.
+// That marker refuses a replay even if power loss brings this record back.
+func (s *Store) InvalidateCheckpoint(ctx context.Context, id, snapshot string) error {
+	return s.deleteCheckpoint(ctx, s.relaxed, id, snapshot)
+}
+
+func (s *Store) deleteCheckpoint(ctx context.Context, db *sql.DB, id, snapshot string) error {
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}

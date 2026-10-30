@@ -205,6 +205,11 @@ func testWarmResumeImmediate(t *testing.T) {
 	if err != nil || localRecord == nil || !localRecord.Complete {
 		t.Fatalf("local completion record missing: record=%#v err=%v", localRecord, err)
 	}
+	// Baseline, request, claim, serving and Running: the claim is the only
+	// assignment commit.
+	if localRecord.Revision != 5 {
+		t.Fatalf("journal revision = %d, want 5", localRecord.Revision)
+	}
 	localPod := localRecord.Pod
 	if localPod == nil {
 		t.Fatal("local completion record lost its warm Pod")

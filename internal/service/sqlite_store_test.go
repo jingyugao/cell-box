@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"github.com/jingyugao/cell-box/internal/boxprovider"
 	"github.com/jingyugao/cell-box/internal/guestapi"
@@ -197,5 +198,29 @@ func TestSQLiteStoreConcurrentBoxWritesDoNotLoseUpdates(t *testing.T) {
 		if err != nil || box.Box.Generation != 7+updates {
 			t.Fatalf("box %s generation=%d err=%v", id, box.Box.Generation, err)
 		}
+	}
+}
+
+func TestSQLiteStoreRelaxesOnlyTheResumePool(t *testing.T) {
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for _, pool := range []struct {
+		db   *sql.DB
+		want int
+	}{{store.db, 2}, {store.relaxed, 1}} {
+		var level int
+		if err := pool.db.QueryRow("PRAGMA synchronous").Scan(&level); err != nil {
+			t.Fatal(err)
+		}
+		if level != pool.want {
+			t.Fatalf("synchronous = %d, want %d", level, pool.want)
+		}
+	}
+	var mode string
+	if err := store.relaxed.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil || mode != "wal" {
+		t.Fatalf("relaxed journal mode = %q err=%v", mode, err)
 	}
 }

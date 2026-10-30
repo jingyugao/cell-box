@@ -508,6 +508,10 @@ func (c *Client) Sync(ctx context.Context, key client.ObjectKey) error {
 	if !r.Complete {
 		return boxprovider.ErrNotReady
 	}
+	// Kubernetes must never be newer than the journal after power loss.
+	if err := c.getJournal().Barrier(ctx); err != nil {
+		return err
+	}
 	current, err := c.syncIntent(ctx, r)
 	if err != nil {
 		return err
