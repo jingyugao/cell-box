@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jingyugao/cell-box/internal/directoryarchive"
 	"github.com/jingyugao/cell-box/internal/objectstorage"
 )
 
@@ -32,6 +33,7 @@ var (
 	ErrBusy           = errors.New("restic repository is busy")
 	ErrUnknownOutcome = errors.New("restic mutation outcome is unknown")
 	ErrOutputTooBig   = errors.New("restic output exceeded limit")
+	ErrArchiveTooBig  = errors.New("volume backup export exceeded archive limits")
 )
 
 const (
@@ -310,6 +312,148 @@ func (e *Engine) ReadFile(ctx context.Context, clientID, volumeID, snapshotID, r
 		return nil, ErrNotFound
 	}
 	return contents, err
+}
+
+// ExportDirectory writes a bounded tar.gz of a directory from a completed
+// snapshot. It reads the retained repository directly and does not require the
+// source Volume record or filesystem to remain present.
+func (e *Engine) ExportDirectory(ctx context.Context, clientID, volumeID, snapshotID, rel string, output io.Writer) (directoryarchive.Result, error) {
+	if err := e.ready(clientID, volumeID); err != nil {
+		return directoryarchive.Result{}, err
+	}
+	if !snapshotIDPattern.MatchString(snapshotID) || !safeSnapshotDirectoryPath(rel) || output == nil {
+		return directoryarchive.Result{}, fmt.Errorf("%w: full snapshot ID, clean directory path, and output are required", ErrInvalid)
+	}
+	items, err := e.listSnapshots(ctx, clientID, volumeID)
+	if err != nil {
+		return directoryarchive.Result{}, err
+	}
+	completed := false
+	for _, item := range items {
+		if strings.EqualFold(item.ID, snapshotID) && contains(item.Tags, completeTag) {
+			completed = true
+			break
+		}
+	}
+	if !completed {
+		return directoryarchive.Result{}, ErrNotFound
+	}
+	if err := e.requireSnapshotDirectory(ctx, clientID, volumeID, snapshotID, rel); err != nil {
+		return directoryarchive.Result{}, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	commandCtx, cancel := context.WithTimeout(ctx, commandMaxRuntime)
+	defer cancel()
+	args := append(e.baseArgs(clientID, volumeID), "dump", "--archive", "tar", "--")
+	snapshotPath := snapshotID + ":/"
+	if rel != "." {
+		snapshotPath += rel
+	}
+	args = append(args, snapshotPath, "/")
+	cmd := exec.CommandContext(commandCtx, e.config.Binary, args...)
+	cmd.WaitDelay = 2 * time.Second
+	cmd.Stdin = nil
+	cmd.Env = e.commandEnv()
+	stderr := &boundedBuffer{limit: stderrLimit}
+	cmd.Stderr = stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return directoryarchive.Result{}, fmt.Errorf("%w: unable to read snapshot export", ErrCommand)
+	}
+	if err := cmd.Start(); err != nil {
+		return directoryarchive.Result{}, fmt.Errorf("%w: unable to start snapshot export", ErrCommand)
+	}
+	result, archiveErr := directoryarchive.WriteTar(commandCtx, stdout, output)
+	if archiveErr != nil {
+		cancel()
+		_ = stdout.Close()
+	}
+	commandErr := cmd.Wait()
+	if stderr.exceeded {
+		return directoryarchive.Result{}, ErrOutputTooBig
+	}
+	// A bound violation cancels the producer, so its expected nonzero exit
+	// must not hide the archive-limit error returned by the parser.
+	if errors.Is(archiveErr, directoryarchive.ErrTooBig) {
+		return directoryarchive.Result{}, ErrArchiveTooBig
+	}
+	if commandErr != nil {
+		if commandExitCode(commandErr) == 10 {
+			return directoryarchive.Result{}, ErrNotFound
+		}
+		return directoryarchive.Result{}, &commandError{err: commandErr}
+	}
+	if archiveErr != nil {
+		return directoryarchive.Result{}, archiveErr
+	}
+	return result, nil
+}
+
+func (e *Engine) requireSnapshotDirectory(ctx context.Context, clientID, volumeID, snapshotID, rel string) error {
+	listingPath := "/"
+	expected := ""
+	if rel != "." {
+		listingPath += rel
+		expected = rel
+	}
+	listing, err := e.run(ctx, "", append(e.baseArgs(clientID, volumeID), "--json", "ls", "--recursive=false", snapshotID, listingPath)...)
+	if commandExitCode(err) == 10 {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(listing))
+	found := false
+	for {
+		var node struct {
+			MessageType string `json:"message_type"`
+			Path        string `json:"path"`
+			Type        string `json:"type"`
+			Tree        string `json:"tree"`
+		}
+		if err := decoder.Decode(&node); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return fmt.Errorf("%w: invalid snapshot directory listing", ErrCommand)
+		}
+		if rel == "." && node.MessageType == "snapshot" && node.Tree != "" {
+			// Restic ls represents the root with snapshot metadata rather than a
+			// node whose path is "/".
+			found = true
+			continue
+		}
+		if node.MessageType != "node" || !snapshotPathMatches(node.Path, expected) {
+			continue
+		}
+		if node.Type != "dir" {
+			return ErrInvalid
+		}
+		found = true
+	}
+	if !found {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func safeSnapshotDirectoryPath(rel string) bool {
+	if rel == "." {
+		return true
+	}
+	if rel == "" || strings.HasPrefix(rel, "/") || strings.Contains(rel, "\\") || len(rel) > 4096 ||
+		strings.IndexFunc(rel, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 || len(strings.Split(rel, "/")) > 64 {
+		return false
+	}
+	for _, part := range strings.Split(rel, "/") {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return path.Clean(rel) == rel
 }
 
 func snapshotPathMatches(candidate, rel string) bool {
