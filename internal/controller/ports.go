@@ -76,8 +76,10 @@ func (r *Reconciler) waitListening(ctx context.Context, w *api.ResumablePod, p *
 	go func() {
 		defer cancel()
 		spanCtx, span := telemetry.Start(waitCtx, "controller.resume.wait_listening", telemetry.String("pod.uid", string(pod.UID)))
+		waitStarted := time.Now()
 		execution, err := backend.WaitPortsListening(spanCtx, workload, pod)
 		telemetry.End(span, err)
+		stageLog("controller.resume.wait_listening", waitStarted, err)
 		r.ports.mu.Lock()
 		current := r.ports.pending[key] == waiting
 		if current {
