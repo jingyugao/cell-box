@@ -1087,6 +1087,38 @@ paths:
               schema: {$ref: '#/components/schemas/VolumeBackup'}
         default:
           $ref: '#/components/responses/Error'
+  /v1/volumes/{id}/backups/{backupId}/export:
+    parameters:
+    - in: path
+      name: id
+      required: true
+      schema: {type: string, maxLength: 55, pattern: '^[a-z0-9]([-a-z0-9]{0,53}[a-z0-9])?$'}
+    - in: path
+      name: backupId
+      required: true
+      schema: {type: string, pattern: '^[0-9a-f]{64}$'}
+    get:
+      operationId: exportVolumeBackupDirectory
+      summary: Export a directory from a retained Volume backup
+      description: Streams a bounded tar.gz from a completed, client-owned snapshot. The full snapshot ID must include its completion marker. The source Volume may already be deleted; this endpoint authorizes by the requesting client and that Volume's backup repository without restoring or creating a Volume or Box. Paths are clean, Volume-relative directory paths (maximum 4096 bytes and 64 segments); omitted or empty path selects '.', the Volume root. Archive entries are relative to the selected directory. Only regular files and directories are included; symbolic links and special files are skipped. Existing archive limits apply (8 GiB per file, 16 GiB total uncompressed, and 18 GiB compressed). The bounded archive is completed before the response starts; temporary files are removed after the request.
+      parameters:
+      - in: query
+        name: path
+        required: false
+        schema: {type: string, maxLength: 4096}
+        description: Clean relative directory path; '.', empty, or omitted selects the Volume root.
+      responses:
+        "200":
+          description: Complete gzip tar archive for the selected snapshot directory
+          headers:
+            X-Cellbox-Export-SHA256:
+              description: SHA-256 of the complete gzip response body.
+              schema: {type: string, pattern: '^[0-9a-f]{64}$'}
+          content:
+            application/gzip:
+              schema: {type: string, format: binary}
+        default:
+          $ref: '#/components/responses/Error'
   /v1/volumes/{id}/exports:
     parameters:
     - in: path
@@ -1096,7 +1128,7 @@ paths:
     post:
       operationId: createVolumeExport
       summary: Export a directory from a stopped independent Volume
-      description: Creates a temporary tar.gz directly from the Volume without starting a Box or using object storage. The Volume must be available and every non-deleted Box referencing it must be suspended with no operation or exec in progress; failed Boxes are rejected, and the node confirms that the Volume is stopped. A detached Volume is allowed. The path is a clean Volume-relative directory path (maximum 4096 bytes and 64 path segments); '.' denotes the Volume root. Only regular files and directories are included; symbolic links and special files are skipped. The chosen directory is the archive root. Existing archive limits apply (8 GiB per file, 16 GiB total uncompressed, and 18 GiB compressed). Exports expire after one hour, are discarded on server restart, and should be explicitly deleted after use. Empty request body or omitted path selects '.'. The accepted operation has kind volume-export; on success its result contains exportId and volumeId.
+      description: Creates a temporary tar.gz directly from the Volume without starting a Box or using object storage. The Volume must be available and every non-deleted Box referencing it must be suspended or failed, with no operation or exec in progress; the provider confirms that the Volume is stopped under its node lock. A detached Volume is allowed. The path is a clean Volume-relative directory path (maximum 4096 bytes and 64 path segments); '.' denotes the Volume root. Only regular files and directories are included; symbolic links and special files are skipped. The chosen directory is the archive root. Existing archive limits apply (8 GiB per file, 16 GiB total uncompressed, and 18 GiB compressed). Exports expire after one hour, are discarded on server restart, and should be explicitly deleted after use. Empty request body or omitted path selects '.'. The accepted operation has kind volume-export; on success its result contains exportId and volumeId.
       requestBody:
         required: false
         content:

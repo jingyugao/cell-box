@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -24,6 +25,8 @@ const (
 	maxEntries = 100000
 	maxDepth   = 64
 )
+
+var ErrTooBig = errors.New("directory archive exceeds limits")
 
 // Result describes the compressed tar.gz bytes written to output.
 type Result struct {
@@ -65,6 +68,117 @@ func Write(ctx context.Context, root, relative string, output io.Writer) (Result
 		return Result{}, err
 	}
 	return Result{SizeBytes: limited.n, SHA256: hex.EncodeToString(h.Sum(nil))}, nil
+}
+
+// WriteTar validates and repacks a tar stream as the same bounded tar.gz
+// format produced by Write. The source may be an archive from an untrusted
+// snapshot: links and special files are skipped, paths are checked, and size,
+// entry-count, and depth limits are applied before writing.
+func WriteTar(ctx context.Context, source io.Reader, output io.Writer) (Result, error) {
+	if ctx == nil || source == nil || output == nil {
+		return Result{}, errors.New("directory archive context, input, and output are required")
+	}
+	h := sha256.New()
+	limited := &wireLimitWriter{w: io.MultiWriter(output, h), limit: archivelimits.MaxWireBytes}
+	compressed := gzip.NewWriter(contextWriter{ctx: ctx, w: limited})
+	tarWriter := tar.NewWriter(compressed)
+	reader := tar.NewReader(source)
+	seen := make(map[string]struct{})
+	count := 0
+	var total int64
+	var resultErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			resultErr = err
+			break
+		}
+		header, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			resultErr = fmt.Errorf("invalid directory archive source: %w", err)
+			break
+		}
+		count++
+		if count > maxEntries {
+			resultErr = ErrTooBig
+			break
+		}
+		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA && header.Typeflag != tar.TypeDir {
+			continue
+		}
+		name := header.Name
+		if header.Typeflag == tar.TypeDir {
+			name = strings.TrimSuffix(name, "/")
+		} else if strings.HasSuffix(name, "/") {
+			resultErr = errors.New("directory archive contains an invalid file path")
+			break
+		}
+		if header.Typeflag == tar.TypeDir && (name == "." || name == "") {
+			continue
+		}
+		if err := safeTarPath(name); err != nil {
+			resultErr = err
+			break
+		}
+		if _, exists := seen[name]; exists {
+			resultErr = errors.New("directory archive contains a duplicate path")
+			break
+		}
+		seen[name] = struct{}{}
+		if len(strings.Split(name, "/")) > maxDepth {
+			resultErr = errors.New("directory archive nesting too deep")
+			break
+		}
+		if header.Typeflag == tar.TypeDir {
+			if header.Size != 0 {
+				resultErr = errors.New("directory archive contains an invalid directory entry")
+				break
+			}
+			if err := tarWriter.WriteHeader(&tar.Header{Name: name + "/", Mode: header.Mode & 0777, Typeflag: tar.TypeDir}); err != nil {
+				resultErr = err
+				break
+			}
+			continue
+		}
+		if header.Size < 0 || header.Size > archivelimits.MaxEntryBytes || header.Size > archivelimits.MaxContentBytes-total {
+			resultErr = ErrTooBig
+			break
+		}
+		if err := tarWriter.WriteHeader(&tar.Header{Name: name, Mode: header.Mode & 0777, Typeflag: tar.TypeReg, Size: header.Size}); err != nil {
+			resultErr = err
+			break
+		}
+		if _, err := io.CopyN(tarWriter, contextReader{ctx: ctx, r: reader}, header.Size); err != nil {
+			resultErr = err
+			break
+		}
+		total += header.Size
+	}
+	if err := tarWriter.Close(); resultErr == nil {
+		resultErr = err
+	}
+	if err := compressed.Close(); resultErr == nil {
+		resultErr = err
+	}
+	if resultErr != nil {
+		return Result{}, resultErr
+	}
+	return Result{SizeBytes: limited.n, SHA256: hex.EncodeToString(h.Sum(nil))}, nil
+}
+
+func safeTarPath(name string) error {
+	if name == "" || len(name) > 4096 || path.IsAbs(name) || strings.Contains(name, "\\") ||
+		strings.IndexFunc(name, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 || path.Clean(name) != name {
+		return errors.New("directory archive contains an unsafe path")
+	}
+	for _, component := range strings.Split(name, "/") {
+		if component == "" || component == "." || component == ".." {
+			return errors.New("directory archive contains an unsafe path")
+		}
+	}
+	return nil
 }
 
 func openDirectory(root, relative string) (*os.File, error) {
@@ -150,7 +264,7 @@ type wireLimitWriter struct {
 
 func (w *wireLimitWriter) Write(p []byte) (int, error) {
 	if int64(len(p)) > w.limit-w.n {
-		return 0, errors.New("directory archive exceeds wire limit")
+		return 0, ErrTooBig
 	}
 	n, err := w.w.Write(p)
 	w.n += int64(n)
