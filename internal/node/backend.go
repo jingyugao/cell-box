@@ -367,7 +367,7 @@ func (b *Backend) Prepare(ctx context.Context, r *api.ResumablePod, p *core.Pod)
 	} else if len(mounts) > 0 {
 		ticket.HomeID = mounts[0].HomeID
 	}
-	return AtomicJSON(filepath.Join(b.Base, "tickets", string(p.UID)+".json"), ticket)
+	return EphemeralJSON(filepath.Join(b.Base, "tickets", string(p.UID)+".json"), ticket)
 }
 
 func homeOwner(r *api.ResumablePod) string {
