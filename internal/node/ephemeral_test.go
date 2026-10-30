@@ -24,3 +24,16 @@ func TestEphemeralJSONReplacesAtomicallyAndLeavesNoTemporaryFile(t *testing.T) {
 		t.Fatalf("directory holds %d entries, want only the record: %v", len(entries), err)
 	}
 }
+
+func TestCreateEphemeralIsExclusive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "claims", "pod")
+	if err := CreateEphemeral(path, []byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	if err := CreateEphemeral(path, []byte("second")); !os.IsExist(err) {
+		t.Fatalf("second create = %v, want an already-exists error", err)
+	}
+	if data, _ := os.ReadFile(path); string(data) != "first" {
+		t.Fatalf("claim overwritten: %q", data)
+	}
+}

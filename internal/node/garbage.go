@@ -88,7 +88,7 @@ func (b *Backend) InvalidateSnapshot(ctx context.Context, w *api.ResumablePod) (
 	var job snapshotGarbage
 	if err := ReadJSON(path, &job); os.IsNotExist(err) {
 		job = snapshotGarbage{Owner: owner, Snapshot: snapshot}
-		if err := AtomicJSON(path, job); err != nil {
+		if err := EphemeralJSON(path, job); err != nil {
 			return err
 		}
 	} else if err != nil {
@@ -106,8 +106,6 @@ func (b *Backend) InvalidateSnapshot(ctx context.Context, w *api.ResumablePod) (
 		if !os.IsNotExist(err) {
 			return err
 		}
-	} else if err := SyncDir(filepath.Dir(path)); err != nil {
-		return err
 	}
 	return nil
 }

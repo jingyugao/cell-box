@@ -55,5 +55,5 @@ func setBundleGuestArgv(bundle string, want []string) error {
 	if spec["process"], err = json.Marshal(process); err != nil {
 		return err
 	}
-	return node.AtomicJSON(path, spec)
+	return node.EphemeralJSON(path, spec)
 }

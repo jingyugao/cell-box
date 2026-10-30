@@ -83,19 +83,7 @@ func argValue(args []string, key string) string {
 }
 
 func markStartAttempt(request string) error {
-	started := request + ".started"
-	f, err := os.OpenFile(started, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	if err = f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err = f.Close(); err != nil {
-		return err
-	}
-	return node.SyncDir(filepath.Dir(started))
+	return node.CreateEphemeral(request+".started", nil)
 }
 
 func (a Adapter) Rewrite(args []string) ([]string, error) {
@@ -179,31 +167,16 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 		}
 		// A Pod UID gets one sandbox execution, including across kubelet retries.
 		claim := filepath.Join(a.Base, "claims", uid)
-		if err := os.MkdirAll(filepath.Dir(claim), 0700); err != nil {
-			return nil, err
-		}
-		f, err := os.OpenFile(claim, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-		if err == nil {
-			_, err = f.WriteString(id)
-			if err == nil {
-				err = f.Sync()
-			}
-			f.Close()
-			if err == nil {
-				err = node.SyncDir(filepath.Dir(claim))
-			}
-			if err != nil {
-				return nil, err
-			}
-		} else if os.IsExist(err) {
+		err := node.CreateEphemeral(claim, []byte(id))
+		if os.IsExist(err) {
 			b, e := os.ReadFile(claim)
 			if e != nil || string(b) != id {
 				return nil, fmt.Errorf("Pod execution already claimed; controller retry required")
 			}
-		} else {
+		} else if err != nil {
 			return nil, err
 		}
-		if err = node.AtomicJSON(request, t); err != nil {
+		if err = node.EphemeralJSON(request, t); err != nil {
 			return nil, err
 		}
 		if hasNoRootContainerFlag(args[idx+1:]) {
@@ -235,7 +208,7 @@ func (a Adapter) Rewrite(args []string) ([]string, error) {
 			if err != nil {
 				return nil, err
 			}
-			if err = node.AtomicJSON(request, t); err != nil {
+			if err = node.EphemeralJSON(request, t); err != nil {
 				return nil, err
 			}
 		} else if !os.IsNotExist(warmErr) {
@@ -313,7 +286,7 @@ func normalizeNoRootBundle(bundle string) error {
 	}
 	delete(spec, "process")
 	delete(spec, "root")
-	return node.AtomicJSON(path, spec)
+	return node.EphemeralJSON(path, spec)
 }
 
 func (a Adapter) claimHome(t node.Ticket) error {
@@ -528,7 +501,7 @@ func (a Adapter) childCreate(id string, annotations map[string]string, bundle st
 		if err := a.claimHomeChild(sid, id); err != nil {
 			return err
 		}
-		return node.AtomicJSON(filepath.Join(a.Base, "children", id+".json"), node.ChildRecord{Ticket: t, SandboxID: sid, DeferredRestore: true, BundleDir: bundle})
+		return node.EphemeralJSON(filepath.Join(a.Base, "children", id+".json"), node.ChildRecord{Ticket: t, SandboxID: sid, DeferredRestore: true, BundleDir: bundle})
 	}
 	if err := node.ReadJSON(filepath.Join(a.Base, "tickets", t.PodUID+".json"), &live); err != nil {
 		return err
@@ -550,7 +523,7 @@ func (a Adapter) childCreate(id string, annotations map[string]string, bundle st
 			return err
 		}
 	}
-	return node.AtomicJSON(filepath.Join(a.Base, "children", id+".json"), node.ChildRecord{Ticket: t, SandboxID: sid, DeferredRestore: deferredRestore})
+	return node.EphemeralJSON(filepath.Join(a.Base, "children", id+".json"), node.ChildRecord{Ticket: t, SandboxID: sid, DeferredRestore: deferredRestore})
 }
 func (a Adapter) childStart(id string) error {
 	_, err := a.childStartArgs([]string{"start", id}, 0, id)
@@ -572,7 +545,7 @@ func (a Adapter) childStartArgs(args []string, idx int, id string) ([]string, er
 			return nil, fmt.Errorf("child Pod identity changed while waiting for warm authorization")
 		}
 		c.Ticket = t
-		if err = node.AtomicJSON(filepath.Join(a.Base, "requests", c.SandboxID+".json"), t); err != nil {
+		if err = node.EphemeralJSON(filepath.Join(a.Base, "requests", c.SandboxID+".json"), t); err != nil {
 			return nil, err
 		}
 		a.mark(c.SandboxID, c.Ticket.PodUID, "warm_released")
@@ -634,21 +607,13 @@ func (a Adapter) childStartArgs(args []string, idx int, id string) ([]string, er
 		if err := setBundleGuestArgv(c.BundleDir, c.Ticket.GuestArgv); err != nil {
 			return nil, err
 		}
-		if err := node.AtomicJSON(filepath.Join(a.Base, "children", id+".json"), c); err != nil {
+		if err := node.EphemeralJSON(filepath.Join(a.Base, "children", id+".json"), c); err != nil {
 			return nil, err
 		}
 		a.mark(c.SandboxID, c.Ticket.PodUID, "home_bound")
 	}
 	path := filepath.Join(a.Base, "children", id+".json.started")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	if err = f.Sync(); err != nil {
-		return nil, err
-	}
-	if err = node.SyncDir(filepath.Dir(path)); err != nil {
+	if err := node.CreateEphemeral(path, nil); err != nil {
 		return nil, err
 	}
 	a.mark(c.SandboxID, c.Ticket.PodUID, "started_marker")

@@ -2,12 +2,14 @@ package node
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -97,7 +99,7 @@ func BindWarm(base, uid, name, namespace, sid string) (WarmLease, error) {
 		}
 		l.SID = sid
 		l.Phase = "created"
-		return AtomicJSON(filepath.Join(base, "requests", sid+".json"), Ticket{PodUID: uid, PodName: name, Namespace: namespace})
+		return EphemeralJSON(filepath.Join(base, "requests", sid+".json"), Ticket{PodUID: uid, PodName: name, Namespace: namespace})
 	})
 }
 
@@ -391,6 +393,17 @@ func (b *Backend) ReapWarmWithRetirement(ctx context.Context, namespace string, 
 		path := filepath.Join(b.Base, "warm", entry.Name())
 		var l WarmLease
 		if err = ReadJSON(path, &l); err != nil {
+			// A crash can leave an empty or torn lease (they are written without
+			// fsync). Its file name is the Pod UID: when no Pod has that UID the
+			// record describes nothing, so drop it instead of failing every cycle.
+			var syntax *json.SyntaxError
+			uid := strings.TrimSuffix(entry.Name(), ".json")
+			if errors.As(err, &syntax) && ValidID(uid) && !existing[uid] {
+				slog.Warn("removing unreadable warm lease", "lease", entry.Name(), "error", err)
+				_ = os.Remove(path)
+				_ = os.Remove(filepath.Join(b.Base, "warm", uid+".lock"))
+				continue
+			}
 			failures = errors.Join(failures, fmt.Errorf("read warm lease %s: %w", entry.Name(), err))
 			continue
 		}

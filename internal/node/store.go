@@ -153,6 +153,25 @@ func EphemeralJSON(path string, v any) error {
 	return os.Rename(tmp, path)
 }
 
+// CreateEphemeral creates path exclusively with data and does not wait for the
+// disk. It returns an error satisfying os.IsExist when the file is already
+// there. The same trade-off as EphemeralJSON applies: only for markers that die
+// with the sandbox they guard.
+func CreateEphemeral(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	return err
+}
+
 func SyncDir(path string) error {
 	f, err := os.Open(path)
 	if err != nil {

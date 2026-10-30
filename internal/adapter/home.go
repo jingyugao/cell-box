@@ -81,14 +81,14 @@ func (a Adapter) bindHome(bundle string, t node.Ticket) error {
 	if err != nil {
 		return err
 	}
-	return node.AtomicJSON(path, spec)
+	return node.EphemeralJSON(path, spec)
 }
 
 // A Box has exactly one business container. A second child ID must not obtain
 // another writable Gofer for the same HOME, even after a failed OCI create.
 func (a Adapter) claimHomeChild(sid, id string) error {
 	path := filepath.Join(a.Base, "requests", sid+".json.child")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	err := node.CreateEphemeral(path, []byte(id))
 	if os.IsExist(err) {
 		b, err := os.ReadFile(path)
 		if err != nil || string(b) != id {
@@ -96,15 +96,5 @@ func (a Adapter) claimHomeChild(sid, id string) error {
 		}
 		return nil
 	}
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if _, err := f.WriteString(id); err != nil {
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		return err
-	}
-	return node.SyncDir(filepath.Dir(path))
+	return err
 }
