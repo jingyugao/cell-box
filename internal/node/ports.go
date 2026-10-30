@@ -88,40 +88,90 @@ func (b *Backend) portExecution(ctx context.Context, w *api.ResumablePod, p *cor
 	if w.Status.Execution != nil && *w.Status.Execution != *execution {
 		return nil, nil, ErrExecutionLost
 	}
-	status, err := b.Runtime.PodSandboxStatus(ctx, &cri.PodSandboxStatusRequest{PodSandboxId: sid, Verbose: true})
+	pid, cached := b.cachedSandboxPID(sid)
+	if !cached {
+		if pid, err = b.querySandboxPID(ctx, sid, p); err != nil {
+			return nil, nil, err
+		}
+	}
+	ns, err := openSandboxNetNS(pid, sid)
+	if cached && errors.Is(err, ErrExecutionLost) {
+		// Ask CRI before reporting a loss from a cached value.
+		b.forgetSandboxPID(sid)
+		if pid, err = b.querySandboxPID(ctx, sid, p); err != nil {
+			return nil, nil, err
+		}
+		ns, err = openSandboxNetNS(pid, sid)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
+	return execution, ns, nil
+}
+
+// A sandbox keeps its PID for life, and a verbose CRI status costs far more than
+// all other execution checks together, so it is only asked for once per sandbox.
+const maxCachedSandboxPIDs = 4096
+
+func (b *Backend) cachedSandboxPID(sid string) (int, bool) {
+	b.portsMu.Lock()
+	defer b.portsMu.Unlock()
+	pid, ok := b.sandboxPIDs[sid]
+	return pid, ok
+}
+
+func (b *Backend) forgetSandboxPID(sid string) {
+	b.portsMu.Lock()
+	defer b.portsMu.Unlock()
+	delete(b.sandboxPIDs, sid)
+}
+
+func (b *Backend) querySandboxPID(ctx context.Context, sid string, p *core.Pod) (int, error) {
+	status, err := b.Runtime.PodSandboxStatus(ctx, &cri.PodSandboxStatusRequest{PodSandboxId: sid, Verbose: true})
+	if err != nil {
+		return 0, err
+	}
 	if status.Status == nil || status.Status.Id != sid || status.Status.Metadata == nil || status.Status.Metadata.Uid != string(p.UID) {
-		return nil, nil, ErrExecutionLost
+		return 0, ErrExecutionLost
 	}
 	var info struct {
 		PID int `json:"pid"`
 	}
 	if err := json.Unmarshal([]byte(status.Info["info"]), &info); err != nil || info.PID <= 0 {
-		return nil, nil, fmt.Errorf("CRI did not provide sandbox namespace PID")
+		return 0, fmt.Errorf("CRI did not provide sandbox namespace PID")
 	}
-	// Prevent a recycled PID from binding this operation to an unrelated netns.
-	group, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", info.PID))
+	b.portsMu.Lock()
+	defer b.portsMu.Unlock()
+	if b.sandboxPIDs == nil || len(b.sandboxPIDs) >= maxCachedSandboxPIDs {
+		b.sandboxPIDs = make(map[string]int)
+	}
+	b.sandboxPIDs[sid] = info.PID
+	return info.PID, nil
+}
+
+// openSandboxNetNS prevents a recycled PID from binding this operation to an
+// unrelated netns.
+func openSandboxNetNS(pid int, sid string) (*os.File, error) {
+	group, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil, ErrExecutionLost
+			return nil, ErrExecutionLost
 		}
-		return nil, nil, err
+		return nil, err
 	}
 	if !strings.Contains(string(group), sid) {
-		return nil, nil, ErrExecutionLost
+		return nil, ErrExecutionLost
 	}
-	ns, err := os.Open(fmt.Sprintf("/proc/%d/ns/net", info.PID))
+	ns, err := os.Open(fmt.Sprintf("/proc/%d/ns/net", pid))
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	group, err = os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", info.PID))
+	group, err = os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
 	if err != nil || !strings.Contains(string(group), sid) {
 		ns.Close()
-		return nil, nil, ErrExecutionLost
+		return nil, ErrExecutionLost
 	}
-	return execution, ns, nil
+	return ns, nil
 }
 
 // WaitPortsListening waits for the current execution's actual TCP listeners.

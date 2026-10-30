@@ -39,6 +39,7 @@ type Backend struct {
 	Images             cri.ImageServiceClient
 	connection         *grpc.ClientConn
 	portsMu            sync.Mutex
+	sandboxPIDs        map[string]int
 	ports              *portwait.Monitor
 	closed             bool
 	// Objects stores archive payloads. Checkpoint payloads remain on their
