@@ -23,6 +23,7 @@ import (
 	"maps"
 	"net/http"
 	"path"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -34,6 +35,7 @@ import (
 )
 
 type Service struct {
+	journal      *runtimecontrol.Journal
 	objects      objectstorage.Objects
 	config       Config
 	store        *Store
@@ -67,10 +69,16 @@ func (s *Service) RuntimeObjects() objectstorage.Objects { return s.objects }
 
 func (s *Service) CheckpointStore() inventory.CheckpointStore { return s.store }
 
-// RuntimeJournal borrows the same durable database as operations and metadata.
-// Stop the runtime synchronizer before closing the service.
-func (s *Service) RuntimeJournal() *runtimecontrol.Journal {
-	return runtimecontrol.NewRelaxedJournal(s.store.relaxed, s.store.db)
+// RuntimeJournal uses the same database as operations and metadata, with commits
+// in memory and a log until they reach it. Call it once, before runtime workers
+// start, and stop the runtime synchronizer before closing the service.
+func (s *Service) RuntimeJournal(ctx context.Context) (*runtimecontrol.Journal, error) {
+	journal, err := runtimecontrol.OpenRelaxedJournal(ctx, s.store.relaxed, s.store.db, filepath.Join(s.store.dir, "runtime-journal.log"))
+	if err != nil {
+		return nil, err
+	}
+	s.journal = journal
+	return journal, nil
 }
 
 func NewContext(parent context.Context, config Config, providers map[string]boxprovider.Provider) (*Service, error) {
@@ -181,7 +189,13 @@ func (s *Service) Close() error {
 	s.mu.Unlock()
 	s.wg.Wait()
 	s.http.CloseIdleConnections()
-	return errors.Join(s.cleanupVolumeExports(), s.catalog.Close(), s.store.Close())
+	var journalErr error
+	if s.journal != nil {
+		journalCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		journalErr = s.journal.Close(journalCtx)
+	}
+	return errors.Join(journalErr, s.cleanupVolumeExports(), s.catalog.Close(), s.store.Close())
 }
 
 func randomID(prefix string) string {

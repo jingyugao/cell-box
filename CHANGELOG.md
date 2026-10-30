@@ -16,7 +16,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Requests to a running Box are routed with an in-process cache of the committed execution's address instead of reading Kubernetes on every request. The identity check above makes a stale entry harmless.
 - Restores that bind a checkpoint now load pages lazily by default (`--background-load=lazy`). Set `CELLBOX_BACKGROUND_LOAD=eager` in the wrapper script to restore the previous behavior.
 - Resume completes when the process listens on its ports, and health is monitored independently.
-- A warm resume waits for the disk only once, for the checkpoint-consumed marker. Its other database commits no longer sync to disk: they survive a process crash, and power loss can drop the newest ones. The consumed marker then refuses the replay, and local state is synced before it is published to Kubernetes.
+- A warm resume waits for the disk only once, for the checkpoint-consumed marker. Resume records are kept in memory with an unsynced log (`runtime-journal.log` in the data directory) and written to SQLite in the background. They survive a process crash, and power loss can drop the newest ones. The consumed marker then refuses the replay, and local state is synced before it is published to Kubernetes.
 - Warm pool demand is derived from the checkpoints that exist on the node. `warmSlots` and `defaultWarmSlots` are kept for compatibility and no longer create demand.
 - `make test`, `vet` and `fmt` are scoped to the source directories; `make check` also verifies formatting.
 
