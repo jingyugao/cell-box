@@ -22,6 +22,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Suspending a Box right after it resumed no longer fails the Box. The image check before a checkpoint now reads the container from CRI instead of the Pod status, which kubelet can publish after the guest is already serving. A container whose start call has not returned is retried.
 - The Box instance identity is no longer part of the Guest command line. It is stored in a Custom Resource annotation and bound to the Guest once through `POST /v1/identity`. Warm slots built from one Box can again be claimed by any Box of the same revision. Boxes created by the previous release keep working but should be recreated to share warm slots.
 
 - Warm resume failed with `"Args" does not match across checkpoint restore` when a Box claimed a warm slot that had been built from another Box of the same revision, which is the normal case once a revision has more than one Box. The instance identity added to the Guest arguments made them differ. The wrapper now gives the pre-created container the claiming Box's command line, carried in the ticket, and refuses a slot whose arguments differ in anything but the instance marker.

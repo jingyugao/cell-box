@@ -19,6 +19,7 @@ import (
 	"github.com/jingyugao/cell-box/internal/inventory"
 	"github.com/jingyugao/cell-box/internal/objectstorage"
 	"github.com/jingyugao/cell-box/internal/portwait"
+	runtimebackend "github.com/jingyugao/cell-box/internal/runtime"
 	"github.com/jingyugao/cell-box/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
@@ -172,6 +173,34 @@ func runningImageMatches(actual string, image *cri.Image) bool {
 	}
 	return false
 }
+
+// runningContainerImage asks CRI rather than the Pod status: kubelet publishes
+// the image ID only after a resumed guest may already have accepted a suspend.
+func (b *Backend) runningContainerImage(ctx context.Context, r *api.ResumablePod, sid string) (string, error) {
+	res, err := b.Runtime.ListContainers(ctx, &cri.ListContainersRequest{Filter: &cri.ContainerFilter{PodSandboxId: sid}})
+	if err != nil {
+		return "", err
+	}
+	var found *cri.Container
+	for _, c := range res.Containers {
+		if c.Metadata == nil || c.Metadata.Name != r.Spec.Container.Name || c.State == cri.ContainerState_CONTAINER_EXITED {
+			continue
+		}
+		if found != nil {
+			return "", fmt.Errorf("expected one %s container in sandbox %s", r.Spec.Container.Name, sid)
+		}
+		found = c
+	}
+	if found == nil {
+		return "", fmt.Errorf("no %s container in sandbox %s", r.Spec.Container.Name, sid)
+	}
+	// A guest can serve before its start call returns. Wait for that call
+	// instead of failing the Box and losing the guest's memory.
+	if found.State != cri.ContainerState_CONTAINER_RUNNING {
+		return "", fmt.Errorf("%w: container %s is still starting", runtimebackend.ErrRetryableStorage, found.Id)
+	}
+	return found.ImageRef, nil
+}
 func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.Pod) (resultErr error) {
 	ctx, span := telemetry.Start(ctx, "node.checkpoint")
 	defer func() { telemetry.End(span, resultErr) }()
@@ -218,12 +247,10 @@ func (b *Backend) Checkpoint(ctx context.Context, r *api.ResumablePod, p *core.P
 		return err
 	}
 	// Detect local tag replacement since the running container was created.
-	// Kubernetes may report a repository manifest digest, while CRI Image.Id is
-	// the config digest. Both must resolve to this same local image.
-	if len(p.Status.ContainerStatuses) != 1 {
-		return fmt.Errorf("missing container status")
+	actual, err := b.runningContainerImage(ctx, r, live[0].Id)
+	if err != nil {
+		return err
 	}
-	actual := p.Status.ContainerStatuses[0].ImageID
 	if !runningImageMatches(actual, image) {
 		return fmt.Errorf("running image %s differs from local image %s", actual, image.Id)
 	}
