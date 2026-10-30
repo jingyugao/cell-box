@@ -98,7 +98,13 @@ func (b *Backend) InvalidateSnapshot(ctx context.Context, w *api.ResumablePod) (
 		return fmt.Errorf("invalid snapshot invalidation record")
 	}
 	if b.Checkpoints != nil {
-		if err := b.Checkpoints.DeleteCheckpoint(ctx, owner, snapshot); err != nil && !errors.Is(err, inventory.ErrNotFound) {
+		remove := b.Checkpoints.DeleteCheckpoint
+		if relaxed, ok := b.Checkpoints.(interface {
+			InvalidateCheckpoint(context.Context, string, string) error
+		}); ok {
+			remove = relaxed.InvalidateCheckpoint
+		}
+		if err := remove(ctx, owner, snapshot); err != nil && !errors.Is(err, inventory.ErrNotFound) {
 			return err
 		}
 	}

@@ -2,8 +2,10 @@ package runtimecontrol
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -533,5 +535,28 @@ func TestExternalNodeChangeReclaimsOriginalLocalExecution(t *testing.T) {
 	}
 	if reclaim.Resource.DeletionTimestamp == nil || reclaim.Resource.Spec.NodeName != w.Spec.NodeName || reclaim.Pod.UID != pod.UID || reclaim.Complete {
 		t.Fatalf("node edit lost the original cleanup identity: %#v", reclaim)
+	}
+}
+
+func TestSyncPublishesNothingBeforeTheJournalIsDurable(t *testing.T) {
+	db, _, _ := openTestJournal(t)
+	durable, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "closed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable.Close()
+	w, pod := localResumeObjects("barrier", "barrier-uid")
+	c, raw := localFixture(t, w, pod)
+	configureJournal(t, c, NewRelaxedJournal(db, durable))
+	beginLocalResume(t, c, w, pod)
+	if err := c.Sync(t.Context(), client.ObjectKeyFromObject(w)); err == nil {
+		t.Fatal("Sync succeeded although the journal could not be made durable")
+	}
+	published := &api.ResumablePod{}
+	if err := raw.Get(t.Context(), client.ObjectKeyFromObject(w), published); err != nil {
+		t.Fatal(err)
+	}
+	if published.Spec.TransitionID != "previous" || published.Status.Phase != "Suspended" {
+		t.Fatalf("Kubernetes moved ahead of the journal: %q %q", published.Spec.TransitionID, published.Status.Phase)
 	}
 }
