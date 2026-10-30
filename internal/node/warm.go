@@ -62,7 +62,7 @@ func warmUpdateContext(_ context.Context, base, uid string, create bool, fn func
 		return l, err
 	}
 	if !reflect.DeepEqual(before, l) {
-		err = AtomicJSON(path, l)
+		err = EphemeralJSON(path, l)
 	}
 	return l, err
 }
@@ -246,7 +246,7 @@ func (b *Backend) ActivateWarm(ctx context.Context, w *api.ResumablePod, p *core
 		if l.Phase != "waiting" || !time.Now().Before(l.Deadline) {
 			return backend.ErrWarmExpired
 		}
-		if err := AtomicJSON(filepath.Join(b.Base, "tickets", string(p.UID)+".json"), t); err != nil {
+		if err := EphemeralJSON(filepath.Join(b.Base, "tickets", string(p.UID)+".json"), t); err != nil {
 			return err
 		}
 		l.Phase = "claimed"

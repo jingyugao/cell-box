@@ -123,6 +123,36 @@ func AtomicJSON(path string, v any) error {
 	}
 	return SyncDir(filepath.Dir(path))
 }
+
+// EphemeralJSON replaces path atomically for readers but does not wait for the
+// disk. Use it only for records that die with the sandboxes they describe (warm
+// leases and tickets): a crash that loses them also loses those sandboxes, and
+// an fsync of the file and its directory costs a few milliseconds each on the
+// resume path.
+func EphemeralJSON(path string, v any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".write-")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if _, err = f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 func SyncDir(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
