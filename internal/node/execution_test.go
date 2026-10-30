@@ -2,9 +2,11 @@ package node
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	runtimebackend "github.com/jingyugao/cell-box/internal/runtime"
 	"google.golang.org/grpc"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -54,5 +56,19 @@ func TestWarmExecutionRequiresStartedBusinessContainer(t *testing.T) {
 	c.sandbox.Metadata.Uid = "other"
 	if _, err := b.warmExecution(context.Background(), w, p, "sandbox"); err == nil {
 		t.Fatal("another sandbox accepted")
+	}
+}
+
+func TestCheckpointReadsTheImageFromCRIAndWaitsForAStartInFlight(t *testing.T) {
+	w := &api.ResumablePod{Spec: api.Spec{Container: core.Container{Name: "guest"}}}
+	guest := &cri.Container{Id: "child", Metadata: &cri.ContainerMetadata{Name: "guest"}, ImageRef: "sha256:config", State: cri.ContainerState_CONTAINER_CREATED}
+	old := &cri.Container{Id: "old", Metadata: &cri.ContainerMetadata{Name: "guest"}, ImageRef: "sha256:other", State: cri.ContainerState_CONTAINER_EXITED}
+	b := &Backend{Runtime: &executionCRI{containers: []*cri.Container{old, guest}}}
+	if _, err := b.runningContainerImage(context.Background(), w, "sandbox"); !errors.Is(err, runtimebackend.ErrRetryableStorage) {
+		t.Fatalf("a start in flight must be retried without failing the Box: %v", err)
+	}
+	guest.State = cri.ContainerState_CONTAINER_RUNNING
+	if image, err := b.runningContainerImage(context.Background(), w, "sandbox"); err != nil || image != "sha256:config" {
+		t.Fatalf("image=%q error=%v", image, err)
 	}
 }

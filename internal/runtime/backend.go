@@ -12,8 +12,8 @@ import (
 	core "k8s.io/api/core/v1"
 )
 
-// ErrRetryableStorage marks an object-storage outage that must not make a
-// checkpoint unrecoverable or fail an otherwise valid restore permanently.
+// ErrRetryableStorage marks an object-storage outage or a guest still starting.
+// Neither must make a checkpoint unrecoverable or fail a valid restore permanently.
 var ErrRetryableStorage = errors.New("retryable checkpoint storage failure")
 
 // ErrWarmExpired permits ordinary restore from the unchanged checkpoint.
