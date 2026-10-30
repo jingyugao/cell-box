@@ -2,7 +2,7 @@
 
 The warm pool prepares Pods and gVisor root sandboxes ahead of time, so resuming from a checkpoint does not have to create a Pod inside the request. This page explains where warm demand comes from, how slots are created and retired, which resumes hit the pool, and how to observe it. For API fields see the [REST quick start](rest-quickstart.md) and the [Go SDK guide](go-sdk.md); for the call chain see [architecture](architecture.md). Terms are defined in [concepts](concepts.md).
 
-With a warm-pool hit on the same node, the business process serves requests again in about 200 ms (see [the sample measurement](#8-sample-measurement) for the conditions).
+With a warm-pool hit on the same node, the business process answers its first request in about 75 ms (see [the sample measurement](#8-sample-measurement) for the conditions).
 
 ## 1. Scope
 
@@ -112,18 +112,27 @@ When an idle slot is retired, its container may still be in the starting state (
 
 ## 8. Sample measurement
 
-The numbers below are one sample from a single machine (a single-node k3s cluster with the node disk on NVMe, measured on 2026-10-27), with few runs per case. They show order of magnitude only and are not a performance guarantee.
+The numbers below are samples from a single machine (a single-node k3s cluster). They show order of magnitude only and are not a performance guarantee.
+
+Serial resumes with a warm-pool hit, measured on 2026-10-30 (see [Resume on Kubernetes](resume-on-kubernetes.md#5-measurements)):
+
+| Measured | Runs | Median | Range |
+| --- | --- | --- | --- |
+| Until the resume operation completes | 100 | 52 ms | 42-73 ms |
+| Until the first HTTP response, polling from the start of the request | 30 | 74 ms | 61-90 ms |
+
+Concurrent resumes, measured on 2026-10-27 with an older version. These have not been measured again and are slower than the current code would be:
 
 | Scenario | Resume latency |
 | --- | --- |
-| One Box, serial resumes, warm-pool hit (8 runs) | 176-224 ms |
 | 4 Boxes resuming concurrently with 2 slots: the 2 that hit (4 rounds) | 263-341 ms |
 | The other 2 in the same rounds, which missed (4 rounds) | 876-967 ms |
 
-Disk speed has a large effect. On the same machine with the virtual disk on a spinning drive, hits took about 2.7 s and misses about 7.1 s, mostly from fsync latency. Measure in your own environment.
+Disk speed had a large effect on that older version: with the virtual disk on a spinning drive, hits took about 2.7 s and misses about 7.1 s, mostly from fsync latency. A warm hit now waits for the disk only once, so this effect should be smaller, but it has not been measured again. Measure in your own environment.
 
 ## 9. Known limits
 
+- With `cellbox-gvisor-20261029`, a resume that misses the pool crashes the sandbox and fails, leaving the Box failed. All 5 standard-path restores in the logs of the measured node hit this. Hits are not affected.
 - Only `Suspended` Boxes with a checkpoint are warmed; creating a new Box is not faster.
 - Each group has at most 2 slots. Concurrent resumes beyond the slot count take the standard path.
 - The budget is per node and shared by all groups. The pool does not rank workloads by importance.

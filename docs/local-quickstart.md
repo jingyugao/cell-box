@@ -10,7 +10,7 @@ The same REST API and Go SDK as the Kubernetes deployment, backed by local gViso
 - suspend a Box to a checkpoint on this machine and resume it with process memory intact;
 - persistent HOME volumes.
 
-What it does not have: the warm pool (a resume restores a checkpoint without a prepared slot, so the roughly 200 ms figure in [Resume on Kubernetes](resume-on-kubernetes.md) does not apply), multiple nodes, and archives unless you also configure object storage. Resume timing on this provider has not been measured.
+What it does not have: the warm pool (a resume restores a checkpoint without a prepared slot, so the figure in [Resume on Kubernetes](resume-on-kubernetes.md) does not apply), multiple nodes, and archives unless you also configure object storage. Resume timing on this provider has not been measured.
 
 ## Requirements
 

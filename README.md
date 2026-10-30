@@ -1,6 +1,6 @@
 # Cellbox
 
-Cellbox gives you isolated sandboxes over an HTTP API, and lets you **suspend a running sandbox and resume it in about 200 ms with its process memory intact**.
+Cellbox gives you isolated sandboxes over an HTTP API, and lets you **suspend a running sandbox and resume it in under 100 ms with its process memory intact**.
 
 A sandbox runs in [gVisor](https://gvisor.dev) on Kubernetes. You create it from a versioned template, run time-limited commands in it, read and write its files, proxy HTTP to services inside it, and suspend and resume it. Resume continues the same processes where they stopped; it does not start them again.
 
@@ -14,7 +14,7 @@ Restoring a gVisor checkpoint normally means creating a Pod, setting up its netw
 - **Deferred checkpoint.** A warm sandbox starts without a checkpoint; the checkpoint and the persistent HOME are bound only when a sandbox claims the slot.
 - **Lazy checkpoint load.** After restore, memory pages are read when the application touches them, not in one pass up front.
 
-With a warm-pool hit, a suspended sandbox is running again and serving requests in about **200 ms**. The figure applies to a resume on the same node that finds a ready warm slot. A resume that misses the pool falls back to a normal checkpoint restore, which keeps process memory but takes longer. How the number is measured and where the time goes is described in [Resume on Kubernetes](docs/resume-on-kubernetes.md); the warm pool is explained in [warm pool](docs/warm-pool.md).
+With a warm-pool hit, a suspended sandbox answered its first HTTP request in about **75 ms** (median, small test service, one machine). The figure applies to a resume on the same node that finds a ready warm slot. A resume that misses the pool falls back to a normal checkpoint restore, which is meant to keep process memory but takes longer. **Known issue:** with `cellbox-gvisor-20261029`, this fallback crashes the sandbox and the resume fails, leaving the Box failed. All 5 fallback restores in the logs of the measured node hit this. How the number is measured and where the time goes is described in [Resume on Kubernetes](docs/resume-on-kubernetes.md); the warm pool is explained in [warm pool](docs/warm-pool.md).
 
 ## What you can do
 
@@ -71,7 +71,7 @@ No cluster? The [local quick start](docs/local-quickstart.md) runs Cellbox on on
 | [Usage](docs/cellbox-usage.md) | Templates, revisions and the sandbox lifecycle |
 | [REST quick start](docs/rest-quickstart.md) | `curl` examples |
 | [Go SDK](docs/go-sdk.md) | Client usage and examples |
-| [Resume on Kubernetes](docs/resume-on-kubernetes.md) | What the 200 ms figure means, how it is achieved, measurements and limits |
+| [Resume on Kubernetes](docs/resume-on-kubernetes.md) | What the resume figure means, how it is achieved, measurements and limits |
 | [Warm pool](docs/warm-pool.md) | How warm slots are sized, claimed and reclaimed |
 | [Architecture](docs/architecture.md) | Components and the create and resume flows |
 | [End-to-end validation](docs/e2e-validation.md) | The acceptance suite and what it proves |

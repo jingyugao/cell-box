@@ -273,7 +273,7 @@ Archives are a separate capability. They export the workspace from a stopped Box
 
 | Location | Contents and ownership |
 | --- | --- |
-| `cellbox.db` in the server data directory | Templates, revisions, build operations, Boxes, lifecycle operations, exec records and results, archive metadata and the checkpoint index; business metadata is queried from here |
+| `cellbox.db` in the server data directory | Templates, revisions, build operations, Boxes, lifecycle operations, exec records and results, archive metadata and the checkpoint index; business metadata is queried from here. Runtime records are kept in memory and reach this file in the background, with `runtime-journal.log` beside it covering a process crash |
 | `logs/` in the same directory | Build log bodies, so large build output stays out of SQLite |
 | Kubernetes | The Cellbox CR with desired and observed runtime state, the current Pod identity and the checkpoint reference; the actual Pod and Service and their ownership; and deployment configuration, RBAC, the RuntimeClass and the process Lease |
 | `/var/lib/cellbox` on the node (node base) | Runtime tickets and claims, persistent HOME, checkpoint contents and diagnostic files; the server and the host wrapper hand off prepared state through this directory |
