@@ -33,21 +33,24 @@ type Record struct {
 }
 
 // Journal stores resume records in the service's shared runtime_records table.
-// It keeps no process-local copy, so every operation observes SQLite state.
+// Without a write-behind it keeps no process-local copy and every operation
+// observes SQLite state. The running server opens it with OpenRelaxedJournal.
 type Journal struct {
 	db      *sql.DB
 	durable *sql.DB
+	wb      *writeBehind
 }
 
 func NewJournal(db *sql.DB) *Journal { return &Journal{db: db} }
 
-// NewRelaxedJournal commits through db without waiting for the disk. Barrier
-// uses durable, a connection to the same WAL database with synchronous=FULL.
-func NewRelaxedJournal(db, durable *sql.DB) *Journal { return &Journal{db: db, durable: durable} }
-
 // Barrier makes every earlier commit survive power loss, because a FULL commit
 // syncs the whole WAL. Call it before publishing local state outside this node.
 func (j *Journal) Barrier(ctx context.Context) error {
+	if j.wb != nil {
+		if err := j.flush(ctx); err != nil {
+			return err
+		}
+	}
 	if j.durable == nil {
 		return nil
 	}
@@ -59,7 +62,12 @@ func (j *Journal) Barrier(ctx context.Context) error {
 
 func journalID(key client.ObjectKey) string { return key.Namespace + "/" + key.Name }
 
+func clientKey(w *api.ResumablePod) client.ObjectKey { return client.ObjectKeyFromObject(w) }
+
 func (j *Journal) Load(ctx context.Context, key client.ObjectKey) (*Record, error) {
+	if j.wb != nil {
+		return j.wb.load(journalID(key)), nil
+	}
 	var raw string
 	err := j.db.QueryRowContext(ctx, `SELECT record FROM runtime_records WHERE kind=? AND id=?`, journalKind, journalID(key)).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -84,6 +92,12 @@ func (j *Journal) Save(ctx context.Context, record *Record, expectedRevision uin
 		return errors.New("runtime control journal resource namespace and name are required")
 	}
 	id := journalID(key)
+	if j.wb != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return j.wb.save(id, record, expectedRevision)
+	}
 	tx, err := j.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin runtime control journal transaction: %w", err)
@@ -165,6 +179,12 @@ func (j *Journal) Save(ctx context.Context, record *Record, expectedRevision uin
 }
 
 func (j *Journal) Delete(ctx context.Context, key client.ObjectKey, expectedRevision uint64) error {
+	if j.wb != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return j.wb.delete(journalID(key), expectedRevision)
+	}
 	tx, err := j.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin runtime control journal transaction: %w", err)
@@ -192,6 +212,9 @@ func (j *Journal) ListPending(ctx context.Context) ([]Record, error) {
 }
 
 func (j *Journal) list(ctx context.Context, pendingOnly bool) ([]Record, error) {
+	if j.wb != nil {
+		return j.wb.list(pendingOnly), nil
+	}
 	query := `SELECT record FROM runtime_records WHERE kind=?`
 	if pendingOnly {
 		query += ` AND json_extract(record,'$.pending')=1`

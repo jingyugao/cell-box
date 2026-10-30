@@ -266,7 +266,11 @@ func serveUnified(parent context.Context, config service.Config, dockerBinary st
 		backend.Objects = app.RuntimeObjects()
 		backend.Checkpoints = app.CheckpointStore()
 		provider := providers["resumable-k8s-pod"].(*resumable.Provider)
-		if err := provider.Local.SetJournal(ctx, app.RuntimeJournal()); err != nil {
+		journal, err := app.RuntimeJournal(ctx)
+		if err != nil {
+			return errors.Join(err, app.Close())
+		}
+		if err := provider.Local.SetJournal(ctx, journal); err != nil {
 			return errors.Join(err, app.Close())
 		}
 	}
