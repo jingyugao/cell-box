@@ -232,3 +232,75 @@ func TestWarmClaimRaceAndExpiry(t *testing.T) {
 		t.Fatalf("expired slot: %v", err)
 	}
 }
+
+// TestWaitWarmReturnsClaimAmongOtherSlotEvents checks that filtering events of
+// other slots does not hide the claim of this slot.
+func TestWaitWarmReturnsClaimAmongOtherSlotEvents(t *testing.T) {
+	base := t.TempDir()
+	if _, err := warmUpdate(base, "pod", true, func(l *WarmLease) error {
+		*l = WarmLease{UID: "pod", SID: "sid", Phase: "created"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		ticket Ticket
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		ticket, err := WaitWarm(base, "pod", "sid")
+		done <- result{ticket, err}
+	}()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		var l WarmLease
+		if err := ReadJSON(filepath.Join(base, "warm", "pod.json"), &l); err != nil {
+			t.Fatal(err)
+		}
+		if l.Phase == "waiting" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("slot never started waiting")
+		}
+	}
+	for i := 0; i < 50; i++ {
+		if err := EphemeralJSON(filepath.Join(base, "warm", "other.json"), WarmLease{UID: "other", Name: strings.Repeat("x", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case r := <-done:
+		t.Fatalf("returned before the claim: %+v", r)
+	case <-time.After(50 * time.Millisecond):
+	}
+	ticket := Ticket{OwnerUID: "owner", PodUID: "pod", Snapshot: "snapshot"}
+	if err := EphemeralJSON(filepath.Join(base, "tickets", "pod.json"), ticket); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := warmUpdate(base, "pod", false, func(l *WarmLease) error {
+		l.Phase = "claimed"
+		l.Ticket = ticket
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatal(r.err)
+		}
+		if !reflect.DeepEqual(r.ticket, ticket) {
+			t.Fatalf("ticket = %+v, want %+v", r.ticket, ticket)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("claim was not observed")
+	}
+	var l WarmLease
+	if err := ReadJSON(filepath.Join(base, "warm", "pod.json"), &l); err != nil {
+		t.Fatal(err)
+	}
+	if l.Phase != "restoring" {
+		t.Fatalf("phase = %q, want restoring", l.Phase)
+	}
+}

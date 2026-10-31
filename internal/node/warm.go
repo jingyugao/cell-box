@@ -142,6 +142,9 @@ func WaitWarm(base, uid, sid string) (Ticket, error) {
 			// Closing inotify can wait several milliseconds in the kernel. Once
 			// authorized, overlap that cleanup with the wrapper's restore setup.
 			// The descriptor is CLOEXEC; errors still clean up synchronously.
+			// Cleanup that has not finished when the wrapper execs runsc is
+			// paid by the exec instead, so the saving depends on the work in
+			// between, today mostly the consumed marker's sync.
 			go watcher.Close()
 		} else {
 			watcher.Close()
