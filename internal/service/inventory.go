@@ -198,7 +198,10 @@ func (s *Store) PutCheckpoint(ctx context.Context, record inventory.Record) erro
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO runtime_records(kind,id,client_id,box_id,record) VALUES('checkpoints',?,?,?,?)
+	// Reconciliation publishes the index again from the custom resource, so a
+	// record lost on power failure comes back. Deletions stay synchronous: a
+	// running Box does not remove a stale index entry.
+	_, err = s.relaxed.ExecContext(ctx, `INSERT INTO runtime_records(kind,id,client_id,box_id,record) VALUES('checkpoints',?,?,?,?)
  ON CONFLICT(kind,id) DO UPDATE SET client_id=excluded.client_id,box_id=excluded.box_id,record=excluded.record WHERE record!=excluded.record`, record.RuntimeID, record.ClientID, box.ID, string(data))
 	return err
 }

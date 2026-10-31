@@ -166,8 +166,11 @@ func (s *Store) Write(ctx context.Context, fn func(*storeTx) error) error {
 	return s.write(ctx, s.db, fn)
 }
 
-// WriteRelaxed is for records that a consumed checkpoint marker already fences
-// after power loss. Volumes, suspends and other durable facts must use Write.
+// WriteRelaxed does not wait for the disk. Use it only for records whose loss on
+// power failure is harmless: those a consumed checkpoint marker already fences,
+// those rebuilt from the runtime on the next observation, and those describing
+// work that died with the sandbox. Volumes, suspends and other durable facts
+// must use Write, whose commit also makes every earlier relaxed commit durable.
 func (s *Store) WriteRelaxed(ctx context.Context, fn func(*storeTx) error) error {
 	return s.write(ctx, s.relaxed, fn)
 }
@@ -442,7 +445,9 @@ func sameObservationBase(a, b boxRecord) bool {
 }
 func (s *Store) UpdateObservedBox(base boxRecord, fn func(*boxRecord) (bool, error)) (boxRecord, error) {
 	var current boxRecord
-	err := s.Write(context.Background(), func(t *storeTx) error {
+	// The runtime owns observed state and is projected again after a restart,
+	// so this record can be lost on power failure.
+	err := s.WriteRelaxed(context.Background(), func(t *storeTx) error {
 		var err error
 		current, err = t.Box("", base.Box.ID)
 		if err != nil {
