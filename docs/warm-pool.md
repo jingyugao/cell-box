@@ -121,18 +121,17 @@ Serial resumes with a warm-pool hit, measured on 2026-10-30 (see [Resume on Kube
 | Until the resume operation completes | 100 | 52 ms | 42-73 ms |
 | Until the first HTTP response, polling from the start of the request | 30 | 74 ms | 61-90 ms |
 
-Concurrent resumes, measured on 2026-10-27 with an older version. These have not been measured again and are slower than the current code would be:
+Concurrent resumes, measured on 2026-10-31 with `cellbox-gvisor-20261030`: 5 Boxes resuming at once with 2 slots, 8 rounds. Every resume succeeded, and each Box kept its background process and counter.
 
-| Scenario | Resume latency |
-| --- | --- |
-| 4 Boxes resuming concurrently with 2 slots: the 2 that hit (4 rounds) | 263-341 ms |
-| The other 2 in the same rounds, which missed (4 rounds) | 876-967 ms |
+| Scenario | Runs | Median | Range |
+| --- | --- | --- | --- |
+| Hit a warm slot | 16 | 96 ms | 68-126 ms |
+| Missed and took the standard path | 24 | 873 ms | 755-939 ms |
 
-Disk speed had a large effect on that older version: with the virtual disk on a spinning drive, hits took about 2.7 s and misses about 7.1 s, mostly from fsync latency. A warm hit now waits for the disk only once, so this effect should be smaller, but it has not been measured again. Measure in your own environment.
+Disk speed had a large effect on an older version (2026-10-27): with the virtual disk on a spinning drive, hits took about 2.7 s and misses about 7.1 s, mostly from fsync latency. A warm hit now waits for the disk only once, so this effect should be smaller, but it has not been measured again. Measure in your own environment.
 
 ## 9. Known limits
 
-- With `cellbox-gvisor-20261029`, a resume that misses the pool crashes the sandbox and fails, leaving the Box failed. All 5 standard-path restores in the logs of the measured node hit this. Hits are not affected.
 - Only `Suspended` Boxes with a checkpoint are warmed; creating a new Box is not faster.
 - Each group has at most 2 slots. Concurrent resumes beyond the slot count take the standard path.
 - The budget is per node and shared by all groups. The pool does not rank workloads by importance.

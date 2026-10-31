@@ -21,9 +21,9 @@ Cellbox needs a gVisor build with three options that upstream gVisor does not ha
 
 | Cellbox version | gVisor build |
 | --- | --- |
-| 0.1.0 | [`cellbox-gvisor-20261029`](https://github.com/jingyugao/gvisor/releases/tag/cellbox-gvisor-20261029) |
+| 0.1.0 | [`cellbox-gvisor-20261030`](https://github.com/jingyugao/gvisor/releases/tag/cellbox-gvisor-20261030) |
 
-The build is upstream gVisor `ac7b4e0fdc` (2026-10-28) plus pull requests [#15721](https://github.com/google/gvisor/pull/15721), [#15722](https://github.com/google/gvisor/pull/15722) and [#16368](https://github.com/google/gvisor/pull/16368). Source: [`jingyugao/gvisor`](https://github.com/jingyugao/gvisor), tag `cellbox-gvisor-20261029`.
+The build is upstream gVisor `ac7b4e0fdc` (2026-10-28) plus pull requests [#15721](https://github.com/google/gvisor/pull/15721), [#15722](https://github.com/google/gvisor/pull/15722), [#16368](https://github.com/google/gvisor/pull/16368) and [#16744](https://github.com/google/gvisor/pull/16744). Source: [`jingyugao/gvisor`](https://github.com/jingyugao/gvisor), tag `cellbox-gvisor-20261030`. Do not use `cellbox-gvisor-20261029`: a resume that misses the warm pool crashes the sandbox on that build.
 
 ## How the pieces fit
 
@@ -56,7 +56,7 @@ Install into a versioned directory so any existing gVisor stays untouched. The d
 ```bash
 (
   set -euo pipefail
-  tag=cellbox-gvisor-20261029
+  tag=cellbox-gvisor-20261030
   dest=/usr/local/bin/gvisor-cellbox/$tag
   base=https://github.com/jingyugao/gvisor/releases/download/$tag
   work=$(mktemp -d); trap 'rm -rf -- "$work"' EXIT; cd "$work"
@@ -74,10 +74,10 @@ Install into a versioned directory so any existing gVisor stays untouched. The d
 )
 ```
 
-`runsc --version` should print `cellbox-gvisor-20261029`. Confirm the three options exist:
+`runsc --version` should print `cellbox-gvisor-20261030`. Confirm the three options exist:
 
 ```bash
-d=/usr/local/bin/gvisor-cellbox/cellbox-gvisor-20261029
+d=/usr/local/bin/gvisor-cellbox/cellbox-gvisor-20261030
 $d/runsc restore --help 2>&1 | grep -E 'defer-checkpoint|background-load'
 $d/runsc create  --help 2>&1 | grep 'no-root-container'
 ```
@@ -102,7 +102,7 @@ Create the wrapper script. It is what containerd actually runs, and it carries t
 sudo tee /usr/local/libexec/cellbox/runsc-wrapper >/dev/null <<'EOF'
 #!/bin/sh
 export CELLBOX_NODE_BASE=/var/lib/cellbox
-export CELLBOX_RUNSC=/usr/local/bin/gvisor-cellbox/cellbox-gvisor-20261029/runsc
+export CELLBOX_RUNSC=/usr/local/bin/gvisor-cellbox/cellbox-gvisor-20261030/runsc
 export CELLBOX_NO_ROOT_CONTAINER=true
 export CELLBOX_DEFER_CHECKPOINT=true
 export CELLBOX_BACKGROUND_LOAD=lazy
@@ -153,7 +153,7 @@ For a `version = 3` configuration add the following; for `version = 2` replace b
 ```toml
 [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc-recoverable]
   runtime_type = "io.containerd.runsc.v1"
-  runtime_path = "/usr/local/bin/gvisor-cellbox/cellbox-gvisor-20261029/containerd-shim-runsc-v1"
+  runtime_path = "/usr/local/bin/gvisor-cellbox/cellbox-gvisor-20261030/containerd-shim-runsc-v1"
   pod_annotations = ["dev.gvisor.internal.recovery.ticket"]
   [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc-recoverable.options]
     TypeUrl = "io.containerd.runsc.v1.options"
@@ -175,7 +175,7 @@ version = 3
 
 [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc-recoverable]
   runtime_type = "io.containerd.runsc.v1"
-  runtime_path = "/usr/local/bin/gvisor-cellbox/cellbox-gvisor-20261029/containerd-shim-runsc-v1"
+  runtime_path = "/usr/local/bin/gvisor-cellbox/cellbox-gvisor-20261030/containerd-shim-runsc-v1"
   pod_annotations = ["dev.gvisor.internal.recovery.ticket"]
   [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc-recoverable.options]
     TypeUrl = "io.containerd.runsc.v1.options"
@@ -243,6 +243,6 @@ A running `cellbox-server` only proves the basics. Finish by creating a Box, sus
 ## Upgrade, migration and rollback
 
 - A new Cellbox server image does not update host components. To update the wrapper, install the matching version, check `--adapter-version`, and replace the file as in section 3. Changing the wrapper or `runsc.toml` does not need a containerd restart, but existing shims may keep the old settings; verify with a newly created Box.
-- To change the gVisor build, install it side by side (section 2), point the wrapper script and the handler's `runtime_path` at it, and restart the runtime service. Suspended Boxes may not restore under a different build, so test existing checkpoints first, or keep the old build and handler for them.
+- To change the gVisor build, install the whole release directory side by side (section 2), point the wrapper script and the handler's `runtime_path` at it, restart the runtime service, and restart the Cellbox server or update `controller.runsc`. The server compares the runsc file's inode and timestamps as well as its hash and keeps the old file mounted until it restarts, so do not replace a build in place. gVisor refuses a checkpoint from another `runsc --version`, so suspended Boxes will not restore under a different build, and neither will a Box still running on the old one once it suspends. Recreate them, or keep the old build and handler for them. HOME volumes are not affected.
 - If the restart fails, keep the node cordoned, restore the backed-up configuration, remove files you added, restore the previous wrapper and `runsc.toml`, then restart the service and verify. For k3s restore the template or drop-in, not the generated file.
 - Never delete `tickets`, `requests`, `claims`, `workloads` or other runtime state under the node base to "reinstall". `helm uninstall` does not remove node components; deal with existing Boxes first, then remove the handler and components by hand.

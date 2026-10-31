@@ -10,7 +10,7 @@ The figure is the time from the request `POST /v1/boxes/{id}:resume` to the firs
 - a warm slot was ready and was claimed (`resumePath` is `warm_pool`);
 - the node is set up as in [node installation](node-installation.md): the Cellbox gVisor build, the deferred-checkpoint settings and lazy page loading.
 
-A resume that misses the pool is meant to preserve process memory but takes longer. It is not covered by this figure. **Known issue:** with `cellbox-gvisor-20261029`, this fallback crashes the sandbox and the resume fails, leaving the Box failed. All 5 fallback restores in the logs of the measured node hit this.
+A resume that misses the pool preserves process memory but takes longer, about 870 ms in [one test](warm-pool.md#8-sample-measurement). It is not covered by this figure.
 
 ## 2. Why a restore is slow by default
 
@@ -91,7 +91,7 @@ Conditions: one k3s node (8 cores, 15 GiB, virtual disk) with about 40 sandboxes
 | Polling the service from the start of the request | 30 | median 52 ms, range 46-64 ms | median 74 ms, p90 86 ms, range 61-90 ms |
 | Operation only, suspending right after | 100 | median 52 ms, p90 64 ms, p99 73 ms, range 42-73 ms | not measured |
 
-All 160 resumes succeeded, and the first two rows reported `warm_pool`. They exclude one earlier attempt whose first resume missed the pool and hit the known issue in section 1. In the first two rows the service's counter was unchanged across every resume, and over 10 separate cycles a background process kept its PID and a file in `/tmp` was preserved.
+All 160 resumes succeeded, and the first two rows reported `warm_pool`. They exclude one earlier attempt whose first resume missed the pool, which crashed the sandbox on this build. `cellbox-gvisor-20261030` fixes that. In the first two rows the service's counter was unchanged across every resume, and over 10 separate cycles a background process kept its PID and a file in `/tmp` was preserved.
 
 These are samples from one machine with a small workload. A Box with more memory or a larger HOME has not been measured with the current code. Do not assume this figure for a real workload; measure your own as described below. With lazy loading, a first request that touches a lot of memory also takes longer.
 
