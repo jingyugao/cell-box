@@ -136,7 +136,20 @@ func WaitWarm(base, uid, sid string) (Ticket, error) {
 	if err != nil {
 		return Ticket{}, err
 	}
-	defer watcher.Close()
+	asyncClose := false
+	defer func() {
+		if asyncClose {
+			// Closing inotify can wait several milliseconds in the kernel. Once
+			// authorized, overlap that cleanup with the wrapper's restore setup.
+			// The descriptor is CLOEXEC; errors still clean up synchronously.
+			// Cleanup that has not finished when the wrapper execs runsc is
+			// paid by the exec instead, so the saving depends on the work in
+			// between, today mostly the consumed marker's sync.
+			go watcher.Close()
+		} else {
+			watcher.Close()
+		}
+	}()
 	// Watch the directory before publishing waiting: authorization replaces
 	// the lease atomically, so a watch on the old file inode would miss it.
 	if err = watcher.Add(filepath.Join(base, "warm")); err != nil {
@@ -155,6 +168,8 @@ func WaitWarm(base, uid, sid string) (Ticket, error) {
 	}
 	deadline := time.NewTimer(time.Until(initial.Deadline))
 	defer deadline.Stop()
+	leasePath := filepath.Join(base, "warm", uid+".json")
+checkLease:
 	for {
 		l, err := warmUpdate(base, uid, false, func(l *WarmLease) error {
 			if l.Phase == "waiting" && !time.Now().Before(l.Deadline) {
@@ -177,23 +192,30 @@ func WaitWarm(base, uid, sid string) (Ticket, error) {
 		}
 		switch l.Phase {
 		case "restoring":
+			asyncClose = true
 			return l.Ticket, nil
 		case "waiting":
-			select {
-			case <-deadline.C:
-			case event, ok := <-watcher.Events:
-				if !ok {
-					return Ticket{}, fmt.Errorf("warm authorization watcher closed")
-				}
-				if event.Name != filepath.Join(base, "warm", uid+".json") {
-					continue
-				}
-			case err, ok := <-watcher.Errors:
-				if !ok {
-					return Ticket{}, fmt.Errorf("warm authorization watcher closed")
-				}
-				if err != fsnotify.ErrEventOverflow {
-					return Ticket{}, err
+			// Other slots and atomic-write temporary files share this watch.
+			// Drain their events without taking our lease lock and reading it again.
+			for {
+				select {
+				case <-deadline.C:
+					continue checkLease
+				case event, ok := <-watcher.Events:
+					if !ok {
+						return Ticket{}, fmt.Errorf("warm authorization watcher closed")
+					}
+					if event.Name == leasePath {
+						continue checkLease
+					}
+				case err, ok := <-watcher.Errors:
+					if !ok {
+						return Ticket{}, fmt.Errorf("warm authorization watcher closed")
+					}
+					if err != fsnotify.ErrEventOverflow {
+						return Ticket{}, err
+					}
+					continue checkLease
 				}
 			}
 		default:
