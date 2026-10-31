@@ -14,7 +14,7 @@ Restoring a gVisor checkpoint normally means creating a Pod, setting up its netw
 - **Deferred checkpoint.** A warm sandbox starts without a checkpoint; the checkpoint and the persistent HOME are bound only when a sandbox claims the slot.
 - **Lazy checkpoint load.** After restore, memory pages are read when the application touches them, not in one pass up front.
 
-With a warm-pool hit, a suspended sandbox answered its first HTTP request in about **75 ms** (median, small test service, one machine). The figure applies to a resume on the same node that finds a ready warm slot. A resume that misses the pool falls back to a normal checkpoint restore, which keeps process memory but takes longer (about 870 ms in one test). How the number is measured and where the time goes is described in [Resume on Kubernetes](docs/resume-on-kubernetes.md); the warm pool is explained in [warm pool](docs/warm-pool.md).
+With a warm-pool hit, a suspended sandbox with 1 GB of memory is running again in about **100 ms** (median, one machine, memory not yet touched, no client overhead). A first command through the API finishes after about 150 ms. The figures apply to a resume on the same node that finds a ready warm slot. A resume that misses the pool falls back to a normal checkpoint restore, which keeps process memory but takes longer (about 870 ms in one test). How the number is measured and where the time goes is described in [Resume on Kubernetes](docs/resume-on-kubernetes.md); the warm pool is explained in [warm pool](docs/warm-pool.md).
 
 ## What you can do
 
