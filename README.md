@@ -72,6 +72,7 @@ No cluster? The [local quick start](docs/local-quickstart.md) runs Cellbox on on
 | [REST quick start](docs/rest-quickstart.md) | `curl` examples |
 | [Go SDK](docs/go-sdk.md) | Client usage and examples |
 | [Resume on Kubernetes](docs/resume-on-kubernetes.md) | What the resume figure means, how it is achieved, measurements and limits |
+| [Resume timeline](docs/resume-timeline.md) | Where the time goes in one resume, layer by layer, and what is being optimized |
 | [Warm pool](docs/warm-pool.md) | How warm slots are sized, claimed and reclaimed |
 | [Architecture](docs/architecture.md) | Components and the create and resume flows |
 | [End-to-end validation](docs/e2e-validation.md) | The acceptance suite and what it proves |
