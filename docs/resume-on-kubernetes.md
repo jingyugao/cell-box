@@ -69,6 +69,8 @@ Requests to a running Box go straight to its Pod IP on port 40000. The server ke
 
 ## 4. Where the time goes
 
+A per-layer timeline from the resume request to the first response of a web service, with what has been optimized and what is left, is in [Resume timeline](resume-timeline.md). The trace below is older.
+
 Trace of 30 warm-hit resumes of the small test service in section 5, with controller and wrapper timestamps, as median offsets from the request (`cellbox-gvisor-20261029`):
 
 | Offset | Event |
