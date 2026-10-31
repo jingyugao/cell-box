@@ -2,7 +2,7 @@
 
 The warm pool prepares Pods and gVisor root sandboxes ahead of time, so resuming from a checkpoint does not have to create a Pod inside the request. This page explains where warm demand comes from, how slots are created and retired, which resumes hit the pool, and how to observe it. For API fields see the [REST quick start](rest-quickstart.md) and the [Go SDK guide](go-sdk.md); for the call chain see [architecture](architecture.md). Terms are defined in [concepts](concepts.md).
 
-With a warm-pool hit on the same node, the business process answers its first request in about 75 ms (see [the sample measurement](#8-sample-measurement) for the conditions).
+With a warm-pool hit on the same node, processes in the Box are running again in about 100 ms, also with 1 GB of memory in the Pod (see [the sample measurement](#8-sample-measurement) for the conditions).
 
 ## 1. Scope
 
@@ -120,6 +120,14 @@ Serial resumes with a warm-pool hit, measured on 2026-10-30 (see [Resume on Kube
 | --- | --- | --- | --- |
 | Until the resume operation completes | 100 | 52 ms | 42-73 ms |
 | Until the first HTTP response, polling from the start of the request | 30 | 74 ms | 61-90 ms |
+
+With 1 GB in the Pod, measured on 2026-10-31 with memory that is not read after the resume:
+
+| Measured | Runs | Median | Range |
+| --- | --- | --- | --- |
+| Until the resume operation completes | 16 | about 75 ms | 69-91 ms |
+| Until a background process runs again | 16 | about 100 ms | 89-123 ms |
+| Until a first command through the API finishes | 16 | 151 ms | 137-175 ms |
 
 Concurrent resumes, measured on 2026-10-31 with `cellbox-gvisor-20261030`: 5 Boxes resuming at once with 2 slots, 8 rounds. Every resume succeeded, and each Box kept its background process and counter.
 
