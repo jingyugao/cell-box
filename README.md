@@ -14,7 +14,7 @@ Restoring a gVisor checkpoint normally means creating a Pod, setting up its netw
 - **Deferred checkpoint.** A warm sandbox starts without a checkpoint; the checkpoint and the persistent HOME are bound only when a sandbox claims the slot.
 - **Lazy checkpoint load.** After restore, memory pages are read when the application touches them, not in one pass up front.
 
-With a warm-pool hit, a suspended sandbox answered its first HTTP request in about **75 ms** (median, small test service, one machine). The figure applies to a resume on the same node that finds a ready warm slot. A resume that misses the pool falls back to a normal checkpoint restore, which is meant to keep process memory but takes longer. **Known issue:** with `cellbox-gvisor-20261029`, this fallback crashes the sandbox and the resume fails, leaving the Box failed. All 5 fallback restores in the logs of the measured node hit this. How the number is measured and where the time goes is described in [Resume on Kubernetes](docs/resume-on-kubernetes.md); the warm pool is explained in [warm pool](docs/warm-pool.md).
+With a warm-pool hit, a suspended sandbox answered its first HTTP request in about **75 ms** (median, small test service, one machine). The figure applies to a resume on the same node that finds a ready warm slot. A resume that misses the pool falls back to a normal checkpoint restore, which keeps process memory but takes longer (about 870 ms in one test). How the number is measured and where the time goes is described in [Resume on Kubernetes](docs/resume-on-kubernetes.md); the warm pool is explained in [warm pool](docs/warm-pool.md).
 
 ## What you can do
 
@@ -47,7 +47,7 @@ client / Go SDK
 ## Requirements
 
 - A Kubernetes node on **linux/amd64** with containerd (tested: k3s v1.36, containerd 2.3, Ubuntu 24.04), and root access to it.
-- A **Cellbox gVisor build**. Upstream gVisor does not yet have the options the fast path uses, so install the build published at [`jingyugao/gvisor`](https://github.com/jingyugao/gvisor/releases/tag/cellbox-gvisor-20261029). The [node installation guide](docs/node-installation.md) covers it.
+- A **Cellbox gVisor build**. Upstream gVisor does not yet have the options the fast path uses, so install the build published at [`jingyugao/gvisor`](https://github.com/jingyugao/gvisor/releases/tag/cellbox-gvisor-20261030). The [node installation guide](docs/node-installation.md) covers it.
 - BuildKit, if you build templates from a base image (the Helm chart can deploy it).
 - S3-compatible object storage, only if you use archives.
 
