@@ -17,6 +17,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Restores that bind a checkpoint now load pages lazily by default (`--background-load=lazy`). Set `CELLBOX_BACKGROUND_LOAD=eager` in the wrapper script to restore the previous behavior.
 - Resume completes when the process listens on its ports, and health is monitored independently.
 - A warm resume waits for the disk only once, for the checkpoint-consumed marker. Resume records are kept in memory with an unsynced log (`runtime-journal.log` in the data directory) and written to SQLite in the background. They survive a process crash, and power loss can drop the newest ones. The consumed marker then refuses the replay, and local state is synced before it is published to Kubernetes.
+- Exec operations, runtime observations and checkpoint inventory publication no longer wait for the disk. Each exec previously synced the database three times, about 11 ms on the measured disk. Power loss can drop the newest of these records; see [Resume on Kubernetes](docs/resume-on-kubernetes.md).
 - Warm pool demand is derived from the checkpoints that exist on the node. `warmSlots` and `defaultWarmSlots` are kept for compatibility and no longer create demand.
 - `make test`, `vet` and `fmt` are scoped to the source directories; `make check` also verifies formatting.
 

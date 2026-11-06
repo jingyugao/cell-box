@@ -307,7 +307,7 @@ func (s *Service) prepareOperationContext(ctx context.Context, client, kind, tar
 	}
 	op := Operation{ID: randomID("op-"), Kind: kind, TargetID: target, Status: "running", Version: 1, CreatedAt: time.Now().UTC()}
 	write := s.store.Write
-	if kind == "resume" {
+	if relaxedOperationKind(kind) {
 		write = s.store.WriteRelaxed
 	}
 	err := write(ctx, func(tx *storeTx) error {
@@ -337,7 +337,7 @@ func (s *Service) launchWithCommitContext(request context.Context, op Operation,
 		persist, cancelPersist := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancelPersist()
 		write := s.store.Write
-		if op.Kind == "resume" {
+		if relaxedOperationKind(op.Kind) {
 			write = s.store.WriteRelaxed
 		}
 		saveErr := write(persist, func(tx *storeTx) error {
@@ -427,6 +427,14 @@ func (s *Service) launchWithCommitContext(request context.Context, op Operation,
 		}
 	}()
 }
+
+// relaxedOperationKind reports operations whose records need not wait for the
+// disk. A consumed checkpoint marker fences a lost resume record, and an exec
+// ran in a sandbox that power loss also ends.
+func relaxedOperationKind(kind string) bool {
+	return kind == "resume" || kind == "exec"
+}
+
 func lifecycleOperationKind(kind string) bool {
 	switch kind {
 	case "create", "restore", "suspend", "resume", "destroy", "activate":
@@ -1189,7 +1197,7 @@ func (s *Service) execute(client, id string, input execInput) (Operation, error)
 		}
 		saveCtx, stopSave := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer stopSave()
-		saveErr := s.store.Write(saveCtx, func(tx *storeTx) error {
+		saveErr := s.store.WriteRelaxed(saveCtx, func(tx *storeTx) error {
 			e, readErr := tx.Execution(eid)
 			if readErr != nil {
 				return readErr

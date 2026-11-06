@@ -55,6 +55,14 @@ Everything else avoids the wait:
 
 A process crash loses no committed record, because the page cache survives it. Power loss can drop the newest records; the consumed marker then refuses to replay the checkpoint, so the Box fails instead of running a second time from the same memory.
 
+The same rule covers three other kinds of record, which are written without waiting for the disk:
+
+- exec operations and their results, because power loss also ends the sandbox the command ran in;
+- runtime observations of a Box, because the server projects them again from the custom resource after a restart;
+- publishing a checkpoint in the inventory, because reconciliation publishes it again. Removing an entry still waits for the disk.
+
+Creating, suspending and destroying Boxes, volumes and archives still wait for the disk, and such a commit also makes every earlier unsynced commit durable.
+
 ### Completion by port listening
 
 The node does not wait for kubelet Pod status. It confirms the execution through the local CRI and detects that the Box's ports are listening with an eBPF monitor in the Pod's network namespace. The operation completes when the execution is confirmed and the ports are open.
