@@ -25,6 +25,8 @@ build:
 	CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -o "$$out/cellbox-container-agent" ./cmd/cellbox-container-agent
 	CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags "$$ldflags" -o "$$out/cellbox-runsc-wrapper" ./cmd/cellbox-runsc-wrapper
 	cp -r charts examples images "$$out/"
+	mkdir -p "$$out/scripts"
+	cp scripts/download-runtime.sh "$$out/scripts/"
 	rm -f -- "$$out/charts/cellbox/values_local.yaml"
 	mkdir -p "$$out/test" "$$out/config" "$$out/api"
 	cp -r test/scripts "$$out/test/"
@@ -49,7 +51,7 @@ vet:
 
 check: test vet
 	@unformatted=$$(gofmt -l $(SRC_DIRS)); [[ -z $$unformatted ]] || { echo "gofmt needed:"; echo "$$unformatted"; exit 1; }
-	@for script in test/scripts/*.sh; do bash -n "$$script"; done
+	@for script in scripts/*.sh test/scripts/*.sh; do bash -n "$$script"; done
 
 fmt:
 	gofmt -w $(SRC_DIRS)
