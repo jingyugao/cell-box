@@ -113,6 +113,7 @@ spec:
             - --node=$(NODE_NAME)
             - --namespace={{ .Release.Namespace }}
             - --warm-pool-size={{ if hasKey .Values.controller "warmPoolSize" }}{{ .Values.controller.warmPoolSize }}{{ else }}2{{ end }}
+            - --restart-on-execution-loss={{ .Values.controller.restartOnExecutionLoss | default false }}
             - {{ printf "--runtime-class=%s" $runtimeClassName | quote }}
             - {{ printf "--runtime-handler=%s" $runtimeHandler | quote }}
             - {{ printf "--node-base=%s" $nodeBase | quote }}

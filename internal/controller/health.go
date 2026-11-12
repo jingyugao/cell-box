@@ -184,6 +184,12 @@ func (h *HealthChecker) recordHealthResult(ctx context.Context, local *runtimeco
 		}
 	}
 	// Optimistic status publication fences concurrent suspend/resume/deletion.
+	if errors.Is(err, node.ErrExecutionLost) && w.Status.Phase == "Running" && r.canRecoverExecution(w) {
+		if _, updateErr := r.recoverExecution(ctx, w, err.Error()); updateErr != nil {
+			ctrl.LoggerFrom(ctx).Error(updateErr, "cannot publish execution recovery", "box", w.Name)
+		}
+		return
+	}
 	// Preserve the execution for inspection; health checks do not destroy it.
 	w.Status.Phase, w.Status.Message = "Failed", err.Error()
 	w.Status.ObservedGeneration, w.Status.ObservedTransitionID = w.Generation, w.Spec.TransitionID

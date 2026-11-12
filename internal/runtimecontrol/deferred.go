@@ -575,6 +575,49 @@ func (c *Client) Sync(ctx context.Context, key client.ObjectKey) error {
 // resume. Only those later lifecycle actions wait; resume completion does not.
 func (c *Client) Flush(ctx context.Context, key client.ObjectKey) error { return c.Sync(ctx, key) }
 
+// ReleaseLostExecution publishes the recovery intent after the caller has
+// reclaimed the old runtime. This also releases an unpublished warm claim so
+// the next reconcile can allocate an ordinary cold-start Pod.
+func (c *Client) ReleaseLostExecution(ctx context.Context, w *api.ResumablePod) (bool, error) {
+	key := client.ObjectKeyFromObject(w)
+	c.syncMu.Lock()
+	defer c.syncMu.Unlock()
+	r, err := c.LocalRecord(ctx, key)
+	if err != nil || r == nil {
+		return false, err
+	}
+	if r.Resource.ResourceVersion != w.ResourceVersion || w.Status.Phase != "Recovering" {
+		return true, ErrJournalConflict
+	}
+	if err := c.getJournal().Barrier(ctx); err != nil {
+		return true, err
+	}
+	current, err := c.syncIntent(ctx, r)
+	if err != nil {
+		return true, err
+	}
+	current.Status = w.DeepCopy().Status
+	if err := c.Client.Status().Update(ctx, current); err != nil {
+		return true, err
+	}
+	defer c.lock(key)()
+	latest, err := c.LocalRecord(ctx, key)
+	if err != nil || latest == nil {
+		return true, err
+	}
+	if latest.Revision != r.Revision {
+		return true, ErrJournalConflict
+	}
+	latest.Resource, latest.Base, latest.Pod = current, nil, nil
+	latest.Pending, latest.Complete = false, false
+	if err := c.getJournal().Save(ctx, latest, latest.Revision); err != nil {
+		return true, err
+	}
+	c.publish(key, current, false)
+	c.Notify(key)
+	return true, nil
+}
+
 // observeExternal handles deletion/replacement even while the local snapshot is
 // ahead of Kubernetes. The local Pod assignment remains available to finalization.
 func (c *Client) observeExternal(ctx context.Context, r *Record) error {

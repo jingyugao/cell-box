@@ -38,6 +38,7 @@ type nodeOptions struct {
 	LocalPlatform                    string
 	HostMountNamespace               bool
 	WarmPoolSize                     int
+	RestartOnExecutionLoss           bool
 }
 
 func (o nodeOptions) runtimeClass() string {
@@ -187,7 +188,7 @@ func newRuntime(kube *rest.Config, options nodeOptions, readDesired func(context
 		defer cancel()
 		return backend.CacheImage(pull, image)
 	}
-	r := &controller.Reconciler{Client: local, Runtime: backend, NodeName: options.Node, NodeBase: options.nodeBase(), RuntimeClass: options.runtimeClass()}
+	r := &controller.Reconciler{Client: local, Runtime: backend, NodeName: options.Node, NodeBase: options.nodeBase(), RuntimeClass: options.runtimeClass(), RestartOnExecutionLoss: options.RestartOnExecutionLoss}
 	if err = mgr.Add(&runtimecontrol.Synchronizer{Client: local}); err != nil {
 		return nil, nil, nil, err
 	}
