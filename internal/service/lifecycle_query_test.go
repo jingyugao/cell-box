@@ -10,6 +10,16 @@ import (
 	"github.com/jingyugao/cell-box/internal/boxprovider"
 )
 
+func TestNewExecutionClearsOldRuntimeFailure(t *testing.T) {
+	current := boxRecord{Box: Box{Phase: "failed", Generation: 1, Error: &APIError{Code: "RUNTIME_ERROR", Message: "old execution lost"}}}
+	if _, err := projectRuntimeObservation(t.Context(), &current, boxprovider.Observation{Phase: "creating", Generation: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if current.Box.Error != nil || current.Box.Phase != "creating" || current.Box.Generation != 2 {
+		t.Fatal(current.Box)
+	}
+}
+
 type queryProviderHook struct {
 	boxprovider.Provider
 	inspect func(context.Context, boxprovider.Handle) (boxprovider.Observation, error)

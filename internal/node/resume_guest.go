@@ -3,7 +3,9 @@
 package node
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -18,6 +20,48 @@ import (
 )
 
 const resumeGuestTimeout = 3 * time.Second
+
+// BindGuestIdentity binds a fresh cold execution before recovery is advertised
+// as Running. Repeating the same identity is idempotent; another identity is
+// rejected by the Guest before it can accept application requests.
+func (b *Backend) BindGuestIdentity(ctx context.Context, w *api.ResumablePod, p *core.Pod) error {
+	id := w.Annotations[api.GuestIdentityAnnotation]
+	if id == "" {
+		return nil
+	}
+	actual, err := b.ConfirmExecution(ctx, w, p)
+	if err != nil {
+		return err
+	}
+	endpoint, err := resumeGuestURL(actual.PodIP)
+	if err != nil {
+		return err
+	}
+	endpoint = strings.TrimSuffix(endpoint, "/v1/unquiesce") + "/v1/identity"
+	data, err := json.Marshal(guestapi.IdentityRequest{InstanceID: id})
+	if err != nil {
+		return err
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, resumeGuestTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, endpoint, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	transport := &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: resumeGuestTimeout}).DialContext}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: resumeGuestTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("bind recovered guest identity: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("bind recovered guest identity: HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
 
 // ResumeGuest unquiesces the guest belonging to the current local CRI
 // execution. It does not look up Kubernetes state: callers pass their current

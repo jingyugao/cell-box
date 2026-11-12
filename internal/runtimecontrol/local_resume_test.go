@@ -71,6 +71,42 @@ func localHandle(w *api.ResumablePod) boxprovider.Handle {
 	return boxprovider.Handle{Provider: "resumable-k8s-pod", ID: string(w.UID), Name: w.Name, Namespace: w.Namespace, NodeName: w.Spec.NodeName}
 }
 
+func TestReleaseLostWarmClaimPersistsRecoveryBeforeNewExecution(t *testing.T) {
+	_, journal, _ := openTestJournal(t)
+	w, pod := localResumeObjects("recover", "uid-recover")
+	c, raw := localFixture(t, w, pod)
+	configureJournal(t, c, journal)
+	if err := c.Get(t.Context(), client.ObjectKeyFromObject(w), w); err != nil {
+		t.Fatal(err)
+	}
+	beginLocalResume(t, c, w, pod)
+	if err := c.Get(t.Context(), client.ObjectKeyFromObject(w), w); err != nil {
+		t.Fatal(err)
+	}
+	w.Status.Phase, w.Status.RecoveryAttempts = "Recovering", 1
+	if err := c.Status().Update(t.Context(), w); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Delete(t.Context(), pod); err != nil {
+		t.Fatal(err)
+	}
+	if handled, err := c.ReleaseLostExecution(t.Context(), w); !handled || err != nil {
+		t.Fatalf("handled=%v err=%v", handled, err)
+	}
+	if record, err := c.LocalRecord(t.Context(), client.ObjectKeyFromObject(w)); record != nil || err != nil {
+		t.Fatalf("claim retained: %v %v", record, err)
+	}
+	if err := raw.Get(t.Context(), client.ObjectKeyFromObject(w), w); err != nil {
+		t.Fatal(err)
+	}
+	if w.Status.Phase != "Recovering" || w.Status.RecoveryAttempts != 1 || w.Spec.DesiredState != "Running" {
+		t.Fatal(w)
+	}
+	if handled, err := c.FallbackResume(t.Context(), w); handled || err != nil {
+		t.Fatalf("cold start blocked by old claim: %v %v", handled, err)
+	}
+}
+
 func configureJournal(t *testing.T, c *Client, journal *Journal) {
 	t.Helper()
 	if err := c.SetJournal(t.Context(), journal); err != nil {

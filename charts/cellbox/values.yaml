@@ -38,6 +38,9 @@ server:
       memory: 256Mi
     limits: {}
 controller:
+  # Opt in to cold restart after execution loss. Persistent volumes survive;
+  # process memory and in-flight operations do not. Suspended Boxes are unchanged.
+  restartOnExecutionLoss: false
   # Shared across compatible container specs, plus one slot during rotation.
   warmPoolSize: 2
   # Optional OTLP exporter configuration, same protocol as the API.

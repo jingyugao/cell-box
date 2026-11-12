@@ -534,6 +534,10 @@ func projectRuntimeObservation(ctx context.Context, current *boxRecord, ob boxpr
 	}
 	previousError := current.Box.Error
 	phase := ob.Phase
+	if ob.Generation > current.Box.Generation && phase != "failed" && phase != "deleted" &&
+		previousError != nil && (previousError.Code == "RUNTIME_FAILED" || previousError.Code == "RUNTIME_LOST" || previousError.Code == "RUNTIME_ERROR") {
+		current.Box.Error = nil
+	}
 	if phase == "failed" && ob.Message != "" {
 		current.Box.Error = &APIError{Code: "RUNTIME_FAILED", Message: ob.Message}
 	}

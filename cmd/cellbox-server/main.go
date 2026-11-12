@@ -58,6 +58,7 @@ func run(args []string) error {
 	flags.StringVar(&runtime.Shim, "shim", node.DefaultShim, "containerd runsc shim executable path")
 	flags.BoolVar(&runtime.HostMountNamespace, "host-mount-namespace", false, "run runsc in the host mount namespace (requires privileged hostPID Pod)")
 	flags.IntVar(&runtime.WarmPoolSize, "warm-pool-size", 2, "maximum idle warm Pods on this node (0 disables)")
+	flags.BoolVar(&runtime.RestartOnExecutionLoss, "restart-on-execution-loss", false, "cold restart running Boxes with persistent volumes after execution loss (process memory is lost)")
 	dockerBinary := flags.String("docker", "docker", "Docker CLI executable")
 	flags.StringVar(&runtime.LocalGuestBinary, "local-guest-binary", "", "static Cellbox guest binary for local-runsc (defaults to cellbox-container-agent beside the server)")
 	flags.StringVar(&runtime.LocalPlatform, "local-runsc-platform", "systrap", "gVisor platform for local-runsc (systrap or kvm)")

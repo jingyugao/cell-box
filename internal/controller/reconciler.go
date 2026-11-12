@@ -32,12 +32,13 @@ import (
 
 type Reconciler struct {
 	client.Client
-	Runtime      runtime.Backend
-	NodeName     string
-	NodeBase     string
-	RuntimeClass string
-	WarmPool     *WarmPool
-	ports        portWaits
+	Runtime                runtime.Backend
+	NodeName               string
+	NodeBase               string
+	RuntimeClass           string
+	WarmPool               *WarmPool
+	RestartOnExecutionLoss bool
+	ports                  portWaits
 }
 
 func (r *Reconciler) nodeBase() string {
@@ -488,6 +489,22 @@ func (r *Reconciler) started(ctx context.Context, w *api.ResumablePod, p *core.P
 	if err := traced(ctx, "controller.resume.confirm_execution", func(ctx context.Context) error { return r.confirmExecution(ctx, w, p) }); err != nil {
 		return again, err
 	}
+	if w.Status.Phase == "Creating" && w.Status.RecoveryAttempts > 0 {
+		if binder, ok := r.Runtime.(interface {
+			BindGuestIdentity(context.Context, *api.ResumablePod, *core.Pod) error
+		}); ok {
+			if err := binder.BindGuestIdentity(ctx, w, p); err != nil {
+				timeout := w.Spec.StartupTimeoutSeconds
+				if timeout == 0 {
+					timeout = 90
+				}
+				if time.Since(w.Status.Since.Time) > time.Duration(timeout)*time.Second {
+					return r.phase(ctx, w, "Failing", "recovered Guest identity binding timed out: "+err.Error())
+				}
+				return again, err
+			}
+		}
+	}
 	if backend, ok := r.Runtime.(snapshotInvalidator); ok && w.Status.Snapshot != "" {
 		if err := traced(ctx, "controller.resume.invalidate_snapshot", func(ctx context.Context) error { return backend.InvalidateSnapshot(ctx, w) }); err != nil {
 			return again, err
@@ -616,6 +633,9 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (traceResu
 			return again, err
 		}
 		localPending = record != nil
+		if record != nil && w.Status.Phase == "Failing" && w.Status.Message == "Local execution lost before Kubernetes publication" && r.canRecoverExecution(w) {
+			return r.recoverExecution(ctx, w, w.Status.Message)
+		}
 		if record != nil && record.Complete && w.Status.Phase != "Failed" && w.DeletionTimestamp == nil {
 			// Completion is already actionable locally. Publication runs in the
 			// background and must not re-enter the lifecycle while it is pending.
@@ -690,7 +710,7 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (traceResu
 			return again, err
 		}
 	}
-	if w.Status.Phase == "Failing" {
+	if w.Status.Phase == "Failing" || w.Status.Phase == "Recovering" {
 		if diagnostics, ok := r.Runtime.(failureDiagnostics); ok {
 			if err := diagnostics.CaptureFailure(ctx, w, p); err != nil {
 				return again, err
@@ -699,6 +719,20 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (traceResu
 		done, err := r.removePod(ctx, w, p)
 		if err != nil || !done {
 			return again, err
+		}
+		if w.Status.Phase == "Recovering" {
+			if !r.RestartOnExecutionLoss || w.Spec.DesiredState != "Running" || w.Status.Snapshot != "" {
+				return r.phase(ctx, w, "Failed", "Execution lost; automatic restart cancelled by current policy or desired state")
+			}
+			if err := validate(w, r.nodeBase()); err != nil {
+				return r.phase(ctx, w, "Failed", err.Error())
+			}
+			if local, ok := r.Client.(*runtimecontrol.Client); ok {
+				if handled, err := local.ReleaseLostExecution(ctx, w); handled || err != nil {
+					return again, err
+				}
+			}
+			return r.begin(ctx, w)
 		}
 		return r.phase(ctx, w, "Failed", w.Status.Message)
 	}
@@ -715,6 +749,9 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (traceResu
 		}
 		if w.Status.Snapshot == "" {
 			w.Status.RetryNonce = w.Spec.RetryNonce
+			if r.canRecoverExecution(w) {
+				return r.recoverExecution(ctx, w, "Explicit retry of lost execution")
+			}
 			return r.phase(ctx, w, "Failed", "No recoverable snapshot; explicit recreation of the CR is required for cold start")
 		}
 		w.Status.RetryNonce = w.Spec.RetryNonce
@@ -841,6 +878,9 @@ func (r *Reconciler) reconcile(ctx context.Context, req ctrl.Request) (traceResu
 		}
 	case "Running":
 		if p == nil || p.DeletionTimestamp != nil || p.Status.Phase == core.PodFailed || p.Status.Phase == core.PodSucceeded {
+			if r.canRecoverExecution(w) {
+				return r.recoverExecution(ctx, w, "active execution lost")
+			}
 			return fail(fmt.Errorf("active execution lost; no automatic rollback or cold start"))
 		}
 		// Older cold-start records lack the address. Populate it once in the

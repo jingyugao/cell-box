@@ -66,7 +66,7 @@ func (p *Provider) list(ctx context.Context, namespace, clientID string, verifyP
 	for _, w := range resources {
 		phase := "failed"
 		switch w.Status.Phase {
-		case "", "Creating":
+		case "", "Creating", "Recovering":
 			phase = "creating"
 		case "Restoring":
 			phase = "resuming"

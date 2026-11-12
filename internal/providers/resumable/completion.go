@@ -98,7 +98,7 @@ func observationFromResource(w *api.ResumablePod, deleted bool) boxprovider.Obse
 		return observation
 	}
 	switch w.Status.Phase {
-	case "", "Creating":
+	case "", "Creating", "Recovering":
 		observation.Phase, observation.ExecutionID = "creating", ""
 	case "Restoring":
 		observation.Phase, observation.ExecutionID = "resuming", ""

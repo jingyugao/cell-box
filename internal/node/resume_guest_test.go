@@ -119,6 +119,45 @@ func TestResumeGuestPostsOnlyForCurrentExecution(t *testing.T) {
 	}
 }
 
+func TestBindRecoveredGuestIdentityFencesCRIAndRejectsConflicts(t *testing.T) {
+	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(guestapi.Port)))
+	if err != nil {
+		t.Skipf("guest API test port unavailable: %v", err)
+	}
+	var requests atomic.Int32
+	var status atomic.Int32
+	status.Store(http.StatusOK)
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		var identity guestapi.IdentityRequest
+		if r.Method != "POST" || r.URL.Path != "/v1/identity" {
+			t.Error("unexpected identity endpoint")
+		}
+		if err := json.NewDecoder(r.Body).Decode(&identity); err != nil || identity.InstanceID != "guest-recovery" {
+			t.Error("incorrect identity payload")
+		}
+		w.WriteHeader(int(status.Load()))
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+	b, workload, pod := resumeGuestFixture(t, false, "container-one")
+	workload.Annotations = map[string]string{api.GuestIdentityAnnotation: "guest-recovery"}
+	if err := b.BindGuestIdentity(t.Context(), workload, pod); err != nil {
+		t.Fatal(err)
+	}
+	status.Store(http.StatusConflict)
+	if err := b.BindGuestIdentity(t.Context(), workload, pod); err == nil {
+		t.Fatal("conflicting identity accepted")
+	}
+	pod.Status.ContainerStatuses[0].ContainerID = "containerd://replacement"
+	if err := b.BindGuestIdentity(t.Context(), workload, pod); err == nil {
+		t.Fatal("replaced execution accepted")
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("HTTP requests=%d; replaced execution must not be contacted", requests.Load())
+	}
+}
+
 func TestResumeGuestRejectsReplacedContainerBeforeRequest(t *testing.T) {
 	_, _, requests := startResumeGuestServer(t, http.StatusNoContent, "", "")
 	b, w, p := resumeGuestFixture(t, true, "old-container")

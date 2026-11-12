@@ -102,6 +102,10 @@ type Status struct {
 	// ResumePath records the execution source selected for this resume.
 	// Empty means no selection has been reported.
 	ResumePath string `json:"resumePath,omitempty"`
+	// RecoveryAttempts bounds cold restarts after execution loss. These survive
+	// controller restarts; a healthy ten-minute interval resets the budget.
+	RecoveryAttempts int64     `json:"recoveryAttempts,omitempty"`
+	LastRecoveryTime meta.Time `json:"lastRecoveryTime,omitempty"`
 }
 type ResumablePod struct {
 	meta.TypeMeta   `json:",inline"`

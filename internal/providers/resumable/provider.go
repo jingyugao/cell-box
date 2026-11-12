@@ -247,7 +247,7 @@ func (p *Provider) Inspect(ctx context.Context, h boxprovider.Handle) (boxprovid
 		return obs, nil
 	}
 	switch w.Status.Phase {
-	case "", "Creating":
+	case "", "Creating", "Recovering":
 		obs.Phase = "creating"
 		// Pending Pods cannot serve I/O. Publish their identity together with
 		// readiness instead of requiring a separate durable generation update.
