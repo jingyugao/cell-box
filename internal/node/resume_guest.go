@@ -49,6 +49,7 @@ func (b *Backend) BindGuestIdentity(ctx context.Context, w *api.ResumablePod, p 
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(guestapi.BoxIDHeader, w.Labels["cellbox.jingyugao.github.io/box-id"])
 	transport := &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: resumeGuestTimeout}).DialContext}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: resumeGuestTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
