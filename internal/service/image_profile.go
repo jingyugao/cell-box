@@ -33,6 +33,7 @@ func applyImageConfiguration(profile Profile, imageRef string, command []string,
 	}
 	if !slices.Contains(out.TrustedToolImages, imageRef) {
 		out.Guest.Tools = nil
+		out.Guest.CredentialSources = nil
 		out.SharedReadOnlyHostPath = ""
 	}
 	out.DebugReadOnlyHostPath = ""

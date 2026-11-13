@@ -15,6 +15,8 @@ const MaxCredentialBytes = 1 << 20
 const MaxCredentialBatchBytes = 2 << 20
 
 const InstanceIDEnv = "CELLBOX_INSTANCE_ID"
+const BoxIDEnv = "CELLBOX_BOX_ID"
+const BoxIDHeader = "X-Cellbox-Box-ID"
 const InstanceIDHeader = "X-Cellbox-Instance-ID"
 const InstanceMismatchHeader = "X-Cellbox-Instance-Mismatch"
 
@@ -82,6 +84,10 @@ type Config struct {
 	CommandDir string            `json:"commandDir,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 	Tools      []Tool            `json:"tools,omitempty"`
+
+	// CredentialSources maps slots to trusted files. {boxId} is resolved only
+	// after the control plane binds this guest, including warm guests.
+	CredentialSources map[string]string `json:"credentialSources,omitempty"`
 }
 
 // Decode defaults before applying supplied fields so an explicit debug UID/GID

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -22,6 +23,58 @@ import (
 	"github.com/jingyugao/cell-box/internal/guestapi"
 	"golang.org/x/sys/unix"
 )
+
+// Sources live on the admitted read-only host mount, outside checkpoint state.
+// Read again before every tool call so restored guests cannot retain stale slots.
+func (s *Server) loadCredentialSource(slot string) error {
+	source, ok := s.cfg.CredentialSources[slot]
+	if !ok {
+		return nil
+	}
+	s.identityMu.Lock()
+	boxID := s.boxID
+	s.identityMu.Unlock()
+	if !boxIDPattern.MatchString(boxID) {
+		return errors.New("guest Box identity is not bound")
+	}
+	source = strings.ReplaceAll(source, "{boxId}", boxID)
+	fd, err := unix.Openat2(unix.AT_FDCWD, source, &unix.OpenHow{
+		Flags:   unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NONBLOCK,
+		Resolve: unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
+	})
+	if err != nil {
+		return fmt.Errorf("open credential source: %w", err)
+	}
+	f := os.NewFile(uintptr(fd), source)
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	owner, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0600 || owner.Uid == s.cfg.Agent.UID || fi.Size() < 1 || fi.Size() > guestapi.MaxCredentialBytes {
+		return errors.New("unsafe credential source")
+	}
+	data, err := io.ReadAll(io.LimitReader(f, guestapi.MaxCredentialBytes+1))
+	if err != nil {
+		return err
+	}
+	defer clear(data)
+	if len(data) < 1 || len(data) > guestapi.MaxCredentialBytes {
+		return errors.New("invalid credential source size")
+	}
+	return writeCredential(debugRoot, slot, bytes.NewReader(data), s.cfg.Debug)
+}
+
+func (s *Server) loadCredentialSources() {
+	for slot := range s.cfg.CredentialSources {
+		if err := s.loadCredentialSource(slot); err != nil {
+			// New Boxes can bind before their owner publishes configuration.
+			// Only the affected tools remain unavailable; calls retry the source.
+			slog.Warn("guest credential source not ready", "slot", slot, "error", err)
+		}
+	}
+}
 
 func writeCredential(root, slot string, body io.Reader, id guestapi.Identity) error {
 	if !namePattern.MatchString(slot) {
@@ -112,6 +165,9 @@ func (s *Server) runTool(ctx context.Context, t compiledTool, req guestapi.ToolR
 	}
 	env := make(map[string]string, len(t.spec.CredentialEnv))
 	for key, slot := range t.spec.CredentialEnv {
+		if err := s.loadCredentialSource(slot); err != nil {
+			return guestapi.ExecResult{}, fmt.Errorf("credential slot %q restore: %w", slot, err)
+		}
 		p := filepath.Join(debugRoot, slot)
 		fi, err := os.Lstat(p)
 		if err != nil {

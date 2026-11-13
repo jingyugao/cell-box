@@ -33,6 +33,7 @@ type Server struct {
 	proxyTransport *http.Transport
 	identityMu     sync.Mutex
 	identity       string
+	boxID          string
 }
 
 func NewServer(c guestapi.Config, self string, staged bool) (*Server, error) {
@@ -44,7 +45,7 @@ func NewServer(c guestapi.Config, self string, staged bool) (*Server, error) {
 		return nil, errors.New("guest executable path must be absolute")
 	}
 	transport := &http.Transport{Proxy: nil, MaxIdleConns: 64, MaxIdleConnsPerHost: 8, IdleConnTimeout: 30 * time.Second, ResponseHeaderTimeout: 30 * time.Second}
-	return &Server{cfg: c, self: self, tools: tools, staged: staged, proxyTransport: transport, identity: c.Env[guestapi.InstanceIDEnv]}, nil
+	return &Server{cfg: c, self: self, tools: tools, staged: staged, proxyTransport: transport, identity: c.Env[guestapi.InstanceIDEnv], boxID: c.Env[guestapi.BoxIDEnv]}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -89,14 +90,22 @@ func (s *Server) identityHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid instance ID", http.StatusBadRequest)
 		return
 	}
+	boxID := r.Header.Get(guestapi.BoxIDHeader)
+	if boxID != "" && !boxIDPattern.MatchString(boxID) {
+		http.Error(w, "invalid box ID", http.StatusBadRequest)
+		return
+	}
 	s.identityMu.Lock()
-	defer s.identityMu.Unlock()
-	if s.identity != "" && s.identity != req.InstanceID {
+	if (s.identity != "" && s.identity != req.InstanceID) || (s.boxID != "" && s.boxID != boxID) {
+		s.identityMu.Unlock()
 		w.Header().Set(guestapi.InstanceMismatchHeader, "true")
 		http.Error(w, "box instance mismatch", http.StatusConflict)
 		return
 	}
 	s.identity = req.InstanceID
+	s.boxID = boxID
+	s.identityMu.Unlock()
+	s.loadCredentialSources()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -273,6 +282,7 @@ func (s *Server) proxyHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) Start() error {
+	s.loadCredentialSources()
 	if s.staged {
 		return nil
 	}

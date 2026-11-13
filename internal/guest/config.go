@@ -20,6 +20,7 @@ const (
 
 var namePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,63}$`)
 var environmentPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
+var boxIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
 
 type compiledTool struct {
 	spec     guestapi.Tool
@@ -27,6 +28,11 @@ type compiledTool struct {
 }
 
 func validateConfig(c guestapi.Config) (map[string]compiledTool, error) {
+	for slot, source := range c.CredentialSources {
+		if !namePattern.MatchString(slot) || !strings.HasPrefix(source, "/var/lib/cellbox/shared/") || filepath.Clean(source) != source || strings.ContainsRune(source, 0) {
+			return nil, errors.New("credential sources must name slots and clean absolute files in the shared mount")
+		}
+	}
 	if c.CommandDir != "" && (!filepath.IsAbs(c.CommandDir) || filepath.Clean(c.CommandDir) != c.CommandDir || strings.ContainsRune(c.CommandDir, 0)) {
 		return nil, errors.New("commandDir must be a clean absolute directory")
 	}
@@ -36,7 +42,7 @@ func validateConfig(c guestapi.Config) (map[string]compiledTool, error) {
 	if !filepath.IsAbs(c.Workspace) || filepath.Clean(c.Workspace) != c.Workspace || c.Workspace == "/" {
 		return nil, errors.New("workspace must be a clean absolute path")
 	}
-	for _, private := range []string{debugRoot, "/home/debug", "/run/cellbox", toolRoot, "/etc", "/home/agent"} {
+	for _, private := range []string{debugRoot, "/home/debug", "/run/cellbox", toolRoot, "/etc", "/home/agent", "/var/lib/cellbox/shared"} {
 		if private == "/home/agent" && c.Workspace == "/home/agent/workspace" {
 			continue
 		}
