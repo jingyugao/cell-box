@@ -467,6 +467,7 @@ func runtimeSpec(b boxRecord) boxprovider.Spec {
 			config.Env = make(map[string]string)
 		}
 		config.Env[guestapi.InstanceIDEnv] = b.GuestIdentity
+		config.Env[guestapi.BoxIDEnv] = b.Box.ID
 	}
 	if b.Profile.DebugReadWriteHostPath != "" {
 		config.DebugHome = "/home/debug"
@@ -685,20 +686,21 @@ func (s *Service) guestRequestHeaders(client *http.Client, ctx context.Context, 
 	// A fresh Guest process has no identity yet. Bind it and repeat the request,
 	// which is safe because it carries no body. Readiness probes take this path.
 	res.Body.Close()
-	if err = s.bindGuest(ctx, client, conn, b.GuestIdentity); err != nil {
+	if err = s.bindGuest(ctx, client, conn, b.GuestIdentity, b.Box.ID); err != nil {
 		return nil, err
 	}
 	retry := r.Clone(ctx)
 	return client.Do(retry)
 }
 
-func (s *Service) bindGuest(ctx context.Context, client *http.Client, conn boxprovider.Connection, id string) error {
+func (s *Service) bindGuest(ctx context.Context, client *http.Client, conn boxprovider.Connection, id, boxID string) error {
 	data, _ := json.Marshal(guestapi.IdentityRequest{InstanceID: id})
 	r, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(conn.URL, "/")+"/v1/identity", bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
 	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set(guestapi.BoxIDHeader, boxID)
 	res, err := client.Do(r)
 	if err != nil {
 		return err
