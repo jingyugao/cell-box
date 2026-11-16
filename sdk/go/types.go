@@ -13,12 +13,13 @@ import (
 
 // CreateOptions selects a fixed revision, or the current stable revision of a template.
 type CreateOptions struct {
-	ID           string  `json:"id,omitempty"`
-	RevisionID   string  `json:"revisionId,omitempty"`
-	TemplateID   string  `json:"templateId,omitempty"`
-	OwnerKey     string  `json:"ownerKey"`
-	HomeVolumeID string  `json:"homeVolumeId,omitempty"`
-	Mounts       []Mount `json:"mounts,omitempty"`
+	HTTPService  *HTTPService `json:"httpService,omitempty"`
+	ID           string       `json:"id,omitempty"`
+	RevisionID   string       `json:"revisionId,omitempty"`
+	TemplateID   string       `json:"templateId,omitempty"`
+	OwnerKey     string       `json:"ownerKey"`
+	HomeVolumeID string       `json:"homeVolumeId,omitempty"`
+	Mounts       []Mount      `json:"mounts,omitempty"`
 	// Staged holds the configured workload until explicitly activated via the API.
 	Staged bool `json:"staged,omitempty"`
 }
@@ -31,6 +32,7 @@ type ResumeOptions struct {
 
 // SandboxInfo is a lifecycle snapshot. Running does not imply application health.
 type SandboxInfo struct {
+	HTTPService     *HTTPService `json:"httpService,omitempty"`
 	ID              string       `json:"id"`
 	OwnerKey        string       `json:"ownerKey"`
 	HomeVolumeID    string       `json:"homeVolumeId,omitempty"`

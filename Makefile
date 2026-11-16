@@ -6,7 +6,7 @@ OUT ?= dist/release
 LOCAL_ARCH ?= $(shell go env GOARCH)
 # Go package roots. Listed explicitly so scratch directories such as tmp/ are never built or tested.
 PKGS := ./api/... ./cmd/... ./internal/... ./test/...
-SRC_DIRS := api cmd internal sdk/go test
+SRC_DIRS := api cmd internal sdk/go integrations/traefik test
 LOCAL_PACKAGE := dist/cellbox-local-runsc-linux-$(LOCAL_ARCH).tar.gz
 
 .PHONY: build check test vet fmt package local-package
@@ -32,22 +32,26 @@ build:
 	cp -r test/scripts "$$out/test/"
 	cp -r test/fixtures "$$out/test/"
 	mkdir -p "$$out/test/e2e"
-	cp test/e2e/full.py test/e2e/Dockerfile "$$out/test/e2e/"
+	cp test/e2e/full.py test/e2e/traefik.py test/e2e/Dockerfile "$$out/test/e2e/"
 	cp config/sample.json config/local-runsc.sample.json "$$out/config/"
 	cp api/openapi.yaml "$$out/api/"
 	cp LICENSE VERSION README.md "$$out/"
 	if [[ -d docs ]]; then cp -r docs "$$out/"; fi
 	mkdir -p "$$out/sdk"
 	cp -r sdk/go "$$out/sdk/"
+	mkdir -p "$$out/integrations"
+	cp -r integrations/traefik "$$out/integrations/"
 	printf 'Release directory: %s\n' "$$out"
 
 test:
 	go test -race $(PKGS)
-	cd sdk/go && go test -race ./...
+	(cd sdk/go && go test -race ./...)
+	(cd integrations/traefik && go test -race ./...)
 
 vet:
 	go vet $(PKGS)
-	cd sdk/go && go vet ./...
+	(cd sdk/go && go vet ./...)
+	(cd integrations/traefik && go vet ./...)
 
 check: test vet
 	@unformatted=$$(gofmt -l $(SRC_DIRS)); [[ -z $$unformatted ]] || { echo "gofmt needed:"; echo "$$unformatted"; exit 1; }

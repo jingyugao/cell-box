@@ -19,6 +19,7 @@ var ErrNotReady = errors.New("current runtime is not ready")
 var ErrStaleVolume = errors.New("persistent volume identity changed")
 
 type Spec struct {
+	HTTPPort               int // Optional business port exposed directly through a Kubernetes Service.
 	Inventory              json.RawMessage
 	BoxID                  string
 	Image                  string
@@ -79,6 +80,12 @@ type Observation struct {
 
 type Connection struct {
 	URL string
+}
+
+// HTTPServiceProvider resolves the stable Kubernetes Service after the current
+// execution has been published as a ready endpoint.
+type HTTPServiceProvider interface {
+	HTTPServiceAddress(context.Context, Handle, int) (string, error)
 }
 
 type Provider interface {

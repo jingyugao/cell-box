@@ -221,6 +221,8 @@ components:
     Box:
       additionalProperties: false
       properties:
+        httpService:
+          $ref: '#/components/schemas/HTTPService'
         capabilities:
           $ref: '#/components/schemas/Capabilities'
         createdAt:
@@ -452,6 +454,8 @@ components:
       - required: [templateId]
       - required: [revisionId]
       properties:
+        httpService:
+          $ref: '#/components/schemas/HTTPService'
         staged:
           type: boolean
           default: false
@@ -485,6 +489,43 @@ components:
       description: Choose exactly one of templateId (resolves current stable revision at admission) or revisionId (pins an explicit revision). Caller-selected box IDs use lowercase DNS-label syntax and are unique across clients for their full lifetime, including after purge; duplicate IDs return 409 CONFLICT.
       required: [ownerKey]
       type: object
+    HTTPService:
+      type: object
+      additionalProperties: false
+      description: Opt-in direct Kubernetes Service for a non-staged Box. Install the Cellbox Traefik middleware and route business traffic through it. Traefik retains its configured connection pooling and protocol settings. Business listeners must accept connections on the Pod address. Readiness confirms the current ready endpoint and a TCP connection through the Service, not application health.
+      required: [port]
+      properties:
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          not: {const: 40000}
+        idleTimeoutSeconds:
+          type: integer
+          description: Zero or omission uses 300 seconds.
+          minimum: 0
+          maximum: 86400
+          default: 300
+    HTTPRequest:
+      type: object
+      additionalProperties: false
+      required: [id, startedAt, admitted]
+      properties:
+        id: {type: string}
+        startedAt: {type: string, format: date-time}
+        admitted: {type: boolean}
+    HTTPServiceStatus:
+      type: object
+      additionalProperties: false
+      required: [configuration, serviceName, namespace, lastActivityAt, requests]
+      properties:
+        configuration: {$ref: '#/components/schemas/HTTPService'}
+        serviceName: {type: string}
+        namespace: {type: string}
+        lastActivityAt: {type: string, format: date-time}
+        requests:
+          type: array
+          items: {$ref: '#/components/schemas/HTTPRequest'}
     Error:
       additionalProperties: false
       properties:
@@ -1361,6 +1402,49 @@ paths:
       responses:
         "204":
           description: All slots installed in the requested generation
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/boxes/{id}/http-service:
+    get:
+      summary: Read direct HTTP service configuration and outstanding requests
+      operationId: getHTTPService
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+      responses:
+        "200":
+          description: Service identity and durable request accounting
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/HTTPServiceStatus'}
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/boxes/{id}/http-requests/{requestId}:
+    parameters:
+    - in: path
+      name: id
+      required: true
+      schema: {type: string}
+    - in: path
+      name: requestId
+      required: true
+      schema: {type: string, pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$'}
+    put:
+      summary: Admit one Traefik request, resuming the Box if necessary
+      description: Persist a caller-allocated request ID before waiting for a shared resume operation and the current Service endpoint. Returns only when forwarding can start. At most 1024 active and waiting requests per Box. An outstanding request blocks suspend and destructive lifecycle operations. IDs must be unique per request; repeat PUT of the same outstanding ID does not allocate another request. The caller must DELETE even after an uncertain PUT outcome. This endpoint does not forward business traffic.
+      operationId: admitHTTPRequest
+      responses:
+        "204": {description: Request admitted; Traefik can forward the original request}
+        default:
+          $ref: '#/components/responses/Error'
+    delete:
+      summary: Release one completed Traefik request
+      description: Idempotently remove an outstanding request. The idle interval starts when a request is released. Requests never expire automatically; if Traefik crashes or release cannot be confirmed, inspect outstanding requests and release an orphan only after confirming its business request has ended. Premature release can allow checkpointing an active request.
+      operationId: releaseHTTPRequest
+      responses:
+        "204": {description: Request released or already absent}
         default:
           $ref: '#/components/responses/Error'
   /v1/boxes/{id}/services/{port}/{path}:

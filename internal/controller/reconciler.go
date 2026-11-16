@@ -545,8 +545,17 @@ func (r *Reconciler) service(ctx context.Context, w *api.ResumablePod) (retErr e
 	s := &core.Service{}
 	err := r.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: w.Name}, s)
 	selector := map[string]string{api.OwnerLabel: string(w.UID), api.ServingLabel: "true"}
+	annotations := map[string]string{}
+	for _, port := range w.Spec.ServicePorts {
+		if port.Name == "http" {
+			annotations["traefik.ingress.kubernetes.io/service.nativelb"] = "true"
+		}
+	}
 	if errors.IsNotFound(err) {
 		s = &core.Service{ObjectMeta: meta.ObjectMeta{Name: w.Name, Namespace: w.Namespace}, Spec: core.ServiceSpec{Selector: selector, Ports: w.Spec.ServicePorts}}
+		if len(annotations) > 0 {
+			s.Annotations = annotations
+		}
 		if err = controllerutil.SetControllerReference(w, s, r.Scheme()); err != nil {
 			return err
 		}
@@ -558,12 +567,22 @@ func (r *Reconciler) service(ctx context.Context, w *api.ResumablePod) (retErr e
 	if !owned(w, s) {
 		return errServiceCollision
 	}
-	if reflect.DeepEqual(s.Spec.Selector, selector) && reflect.DeepEqual(s.Spec.Ports, w.Spec.ServicePorts) {
+	annotationsMatch := true
+	for key, value := range annotations {
+		annotationsMatch = annotationsMatch && s.Annotations[key] == value
+	}
+	if reflect.DeepEqual(s.Spec.Selector, selector) && reflect.DeepEqual(s.Spec.Ports, w.Spec.ServicePorts) && annotationsMatch {
 		return nil
 	}
 	old := s.DeepCopy()
 	s.Spec.Selector = selector
 	s.Spec.Ports = w.Spec.ServicePorts
+	if len(annotations) > 0 && s.Annotations == nil {
+		s.Annotations = map[string]string{}
+	}
+	for key, value := range annotations {
+		s.Annotations[key] = value
+	}
 	return r.Patch(ctx, s, client.MergeFrom(old))
 }
 func (r *Reconciler) serving(ctx context.Context, p *core.Pod, on bool) (retErr error) {

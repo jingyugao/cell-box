@@ -1,0 +1,10 @@
+displayName: Cellbox on-demand HTTP services
+type: middleware
+import: github.com/jingyugao/cell-box/integrations/traefik
+summary: Resume Cellbox services before forwarding and suspend them after idle.
+testData:
+  cellboxURL: http://cellbox-api.cell-box:8090
+  clientID: internal
+  boxID: my-http-service
+  wakeTimeout: 120s
+  controlTimeout: 5s

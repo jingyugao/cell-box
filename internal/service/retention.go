@@ -42,6 +42,10 @@ func (s *Store) Prune(ctx context.Context, now time.Time, operations, outputs ti
 		if err := tx.exec(`DELETE FROM runtime_records WHERE kind='executions' AND json_extract(record,'$.operationId') NOT IN (SELECT id FROM runtime_records WHERE kind='operations')`); err != nil {
 			return err
 		}
+		if err := tx.exec(`DELETE FROM runtime_records WHERE kind IN ('http_activity','http_requests') AND box_id IN
+			(SELECT id FROM runtime_records WHERE kind='boxes' AND json_extract(record,'$.box.phase')='deleted')`); err != nil {
+			return err
+		}
 		return tx.exec(`DELETE FROM runtime_records WHERE kind='boxes' AND json_extract(record,'$.box.phase')='deleted'
             AND coalesce(json_extract(record,'$.box.operationId'),'')='' AND id NOT IN (SELECT box_id FROM runtime_records WHERE kind='operations')`)
 	})

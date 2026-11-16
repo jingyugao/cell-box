@@ -5,6 +5,7 @@ import (
 
 	api "github.com/jingyugao/cell-box/api/v1alpha1"
 	core "k8s.io/api/core/v1"
+	discovery "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -27,6 +28,9 @@ func NewForConfig(cfg *rest.Config) (*Provider, error) {
 	}
 	scheme := runtime.NewScheme()
 	if err := core.AddToScheme(scheme); err != nil {
+		return nil, err
+	}
+	if err := discovery.AddToScheme(scheme); err != nil {
 		return nil, err
 	}
 	if err := api.AddToScheme(scheme); err != nil {
