@@ -86,6 +86,7 @@ type Capabilities struct {
 	PersistentHome     bool   `json:"persistentHome,omitempty"`
 }
 type Box struct {
+	HTTPService     *HTTPService `json:"httpService,omitempty"`
 	Mounts          []Mount      `json:"mounts,omitempty"`
 	HomeVolumeID    string       `json:"homeVolumeId,omitempty"`
 	TemplateID      string       `json:"templateId"`

@@ -11,6 +11,7 @@ import (
 	"net"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/jingyugao/cell-box/internal/telemetry"
 	"github.com/jingyugao/cell-box/internal/warmtemplates"
 	core "k8s.io/api/core/v1"
+	discovery "k8s.io/api/discovery/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -54,6 +56,51 @@ type Provider struct {
 
 func New(c client.Client) *Provider { return &Provider{Client: c} }
 func (*Provider) Name() string      { return name }
+
+func (p *Provider) HTTPServiceAddress(ctx context.Context, h boxprovider.Handle, port int) (string, error) {
+	w, err := p.get(ctx, h)
+	if err != nil {
+		return "", err
+	}
+	if w.Status.Phase != "Running" || w.Status.Execution == nil || w.Status.Execution.PodUID != w.Status.PodUID {
+		return "", boxprovider.ErrNotReady
+	}
+	svc := &core.Service{}
+	if err := p.Client.Get(ctx, client.ObjectKey{Namespace: h.Namespace, Name: h.Name}, svc); err != nil {
+		return "", err
+	}
+	owner := meta.GetControllerOf(svc)
+	if owner == nil || owner.UID != w.UID || owner.Kind != api.Kind || owner.APIVersion != api.GroupVersion.String() ||
+		svc.DeletionTimestamp != nil || svc.Spec.ClusterIP == "" || svc.Spec.ClusterIP == core.ClusterIPNone ||
+		svc.Spec.Selector[api.OwnerLabel] != string(w.UID) || svc.Spec.Selector[api.ServingLabel] != "true" {
+		return "", boxprovider.ErrNotReady
+	}
+	var exposed bool
+	for _, servicePort := range svc.Spec.Ports {
+		if int(servicePort.Port) == port && servicePort.TargetPort == intstr.FromInt(port) && servicePort.Protocol == core.ProtocolTCP {
+			exposed = true
+		}
+	}
+	if !exposed {
+		return "", boxprovider.ErrNotReady
+	}
+	endpoints := &discovery.EndpointSliceList{}
+	if err := p.Client.List(ctx, endpoints, client.InNamespace(h.Namespace), client.MatchingLabels{discovery.LabelServiceName: h.Name}); err != nil {
+		return "", err
+	}
+	for _, slice := range endpoints.Items {
+		owner := meta.GetControllerOf(&slice)
+		if owner == nil || owner.UID != svc.UID {
+			continue
+		}
+		for _, endpoint := range slice.Endpoints {
+			if endpoint.TargetRef != nil && string(endpoint.TargetRef.UID) == w.Status.PodUID && endpoint.Conditions.Ready != nil && *endpoint.Conditions.Ready {
+				return net.JoinHostPort(svc.Spec.ClusterIP, strconv.Itoa(port)), nil
+			}
+		}
+	}
+	return "", boxprovider.ErrNotReady
+}
 
 func crName(boxID string) (string, error) {
 	if len(boxID) == 0 || len(boxID) > 55 || !validBoxID.MatchString(boxID) {
@@ -139,13 +186,21 @@ func buildWanted(spec boxprovider.Spec) (*api.ResumablePod, error) {
 			Capabilities: &core.Capabilities{Drop: []core.Capability{"ALL"}, Add: []core.Capability{"CHOWN", "SETUID", "SETGID", "FOWNER", "DAC_OVERRIDE"}}},
 		ReadinessProbe: &core.Probe{ProbeHandler: core.ProbeHandler{TCPSocket: &core.TCPSocketAction{Port: intstr.FromInt32(guestapi.Port)}}, PeriodSeconds: 1},
 	}
+	servicePorts := []core.ServicePort{{Name: "guest", Port: guestapi.Port, TargetPort: intstr.FromInt32(guestapi.Port), Protocol: core.ProtocolTCP}}
+	if spec.HTTPPort != 0 {
+		if spec.HTTPPort < 1 || spec.HTTPPort > 65535 || spec.HTTPPort == guestapi.Port {
+			return nil, errors.New("invalid business HTTP port")
+		}
+		container.Ports = append(container.Ports, core.ContainerPort{Name: "http", ContainerPort: int32(spec.HTTPPort), Protocol: core.ProtocolTCP})
+		servicePorts = append(servicePorts, core.ServicePort{Name: "http", Port: int32(spec.HTTPPort), TargetPort: intstr.FromInt(spec.HTTPPort), Protocol: core.ProtocolTCP})
+	}
 	wanted := &api.ResumablePod{
 		TypeMeta:   meta.TypeMeta{APIVersion: api.GroupVersion.String(), Kind: api.Kind},
 		ObjectMeta: meta.ObjectMeta{Name: crname, Namespace: spec.Namespace, Labels: map[string]string{managedLabel: "true", boxLabel: spec.BoxID}},
 		Spec: api.Spec{NodeName: spec.NodeName, DesiredState: "Running", Container: container,
 			SharedReadOnlyHostPath: spec.SharedReadOnlyHostPath, DebugReadOnlyHostPath: spec.DebugReadOnlyHostPath,
 			DebugReadWriteHostPath: spec.DebugReadWriteHostPath, PersistentHome: spec.PersistentHome, HomeVolumeUID: spec.HomeVolumeUID, Mounts: append([]api.VolumeMount(nil), spec.Mounts...),
-			ServicePorts: []core.ServicePort{{Name: "guest", Port: guestapi.Port, TargetPort: intstr.FromInt32(guestapi.Port), Protocol: core.ProtocolTCP}}},
+			ServicePorts: servicePorts},
 	}
 	if spec.GuestIdentity != "" {
 		wanted.Annotations = map[string]string{api.GuestIdentityAnnotation: spec.GuestIdentity}

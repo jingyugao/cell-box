@@ -34,7 +34,7 @@ func (s *Service) purgeBox(ctx context.Context, client, id string) error {
 		if active {
 			return apiError("BUSY", "Box has an active execution")
 		}
-		return tx.exec("DELETE FROM runtime_records WHERE box_id=? AND kind IN ('boxes','operations','executions','execution_results')", id)
+		return tx.exec("DELETE FROM runtime_records WHERE box_id=? AND kind IN ('boxes','operations','executions','execution_results','http_activity','http_requests')", id)
 	})
 }
 

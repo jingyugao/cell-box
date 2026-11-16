@@ -1,0 +1,38 @@
+# Create the Box with id=my-http-service and:
+# "httpService": {"port": 8080, "idleTimeoutSeconds": 300}
+# The application must bind to 0.0.0.0:8080 (or its Pod address).
+# Cellbox creates cellbox-my-http-service with NativeLB enabled.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: cellbox-my-http-service
+  namespace: cell-box
+spec:
+  plugin:
+    cellbox:
+      cellboxURL: http://cellbox-api.cell-box:8090
+      clientID: internal
+      boxID: my-http-service
+      wakeTimeout: 120s
+      controlTimeout: 5s
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: my-http-service
+  namespace: cell-box
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: cell-box-cellbox-my-http-service@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: my-service.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cellbox-my-http-service
+                port:
+                  number: 8080

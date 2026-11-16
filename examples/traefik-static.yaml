@@ -1,0 +1,12 @@
+# Merge into the existing Traefik static configuration.
+# Mount integrations/traefik read-only at:
+# /plugins-local/src/github.com/jingyugao/cell-box/integrations/traefik
+experimental:
+  localPlugins:
+    cellbox:
+      moduleName: github.com/jingyugao/cell-box/integrations/traefik
+providers:
+  kubernetesIngress:
+    allowEmptyServices: true
+  kubernetesCRD:
+    allowEmptyServices: true

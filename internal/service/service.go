@@ -176,6 +176,7 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 	}
 	s.startRetention()
 	s.startRuntimeObservers()
+	s.startHTTPIdleWorker()
 	return s, nil
 }
 func (s *Service) Done() <-chan struct{} { return s.ctx.Done() }
@@ -311,6 +312,15 @@ func (s *Service) prepareOperationContext(ctx context.Context, client, kind, tar
 		write = s.store.WriteRelaxed
 	}
 	err := write(ctx, func(tx *storeTx) error {
+		if target != "" && kind != "exec" && kind != "resume" {
+			active, err := tx.hasHTTPRequests(target)
+			if err != nil {
+				return err
+			}
+			if active {
+				return apiError("BUSY", "Box has active or waiting HTTP requests")
+			}
+		}
 		if err := prepare(tx, &op); err != nil {
 			return err
 		}
@@ -473,7 +483,11 @@ func runtimeSpec(b boxRecord) boxprovider.Spec {
 		config.DebugHome = "/home/debug"
 	}
 	metadata, _ := json.Marshal(inventory.Record{ClientID: b.ClientID, Box: mustBoxJSON(b.Box), Staged: b.Staged})
-	return boxprovider.Spec{Inventory: metadata, Mounts: b.VolumeMounts, HomeVolumeUID: b.HomeVolumeUID, BoxID: b.Box.ID, Image: b.Profile.Image, Config: config, GuestIdentity: b.GuestIdentity, CPU: b.Profile.CPU, MemoryMiB: b.Profile.MemoryMiB, Namespace: b.Profile.Namespace, NodeName: b.Profile.NodeName, SharedReadOnlyHostPath: b.Profile.SharedReadOnlyHostPath, DebugReadOnlyHostPath: b.Profile.DebugReadOnlyHostPath, DebugReadWriteHostPath: b.Profile.DebugReadWriteHostPath, PersistentHome: b.Profile.PersistentHome, Staged: b.Staged}
+	var httpPort int
+	if b.Box.HTTPService != nil {
+		httpPort = b.Box.HTTPService.Port
+	}
+	return boxprovider.Spec{HTTPPort: httpPort, Inventory: metadata, Mounts: b.VolumeMounts, HomeVolumeUID: b.HomeVolumeUID, BoxID: b.Box.ID, Image: b.Profile.Image, Config: config, GuestIdentity: b.GuestIdentity, CPU: b.Profile.CPU, MemoryMiB: b.Profile.MemoryMiB, Namespace: b.Profile.Namespace, NodeName: b.Profile.NodeName, SharedReadOnlyHostPath: b.Profile.SharedReadOnlyHostPath, DebugReadOnlyHostPath: b.Profile.DebugReadOnlyHostPath, DebugReadWriteHostPath: b.Profile.DebugReadWriteHostPath, PersistentHome: b.Profile.PersistentHome, Staged: b.Staged}
 }
 func (s *Service) rawBox(id string) (boxRecord, error) {
 	return s.store.BoxRecord(id)
@@ -864,13 +878,14 @@ func (s *Service) provision(ctx context.Context, id string) (Box, error) {
 }
 
 type createRequest struct {
-	Mounts       []Mount `json:"mounts,omitempty"`
-	ID           string  `json:"id,omitempty"`
-	HomeVolumeID string  `json:"homeVolumeId,omitempty"`
-	TemplateID   string  `json:"templateId,omitempty"`
-	RevisionID   string  `json:"revisionId,omitempty"`
-	OwnerKey     string  `json:"ownerKey"`
-	Staged       bool    `json:"staged,omitempty"`
+	HTTPService  *HTTPService `json:"httpService,omitempty"`
+	Mounts       []Mount      `json:"mounts,omitempty"`
+	ID           string       `json:"id,omitempty"`
+	HomeVolumeID string       `json:"homeVolumeId,omitempty"`
+	TemplateID   string       `json:"templateId,omitempty"`
+	RevisionID   string       `json:"revisionId,omitempty"`
+	OwnerKey     string       `json:"ownerKey"`
+	Staged       bool         `json:"staged,omitempty"`
 }
 
 func (s *Service) create(client string, input createRequest, archiveID string, acceptImageChange bool) (Operation, error) {
@@ -891,6 +906,17 @@ func (s *Service) create(client string, input createRequest, archiveID string, a
 		return Operation{}, err
 	}
 	profile := tmpl.Profile
+	if input.HTTPService != nil {
+		if err := input.HTTPService.validate(); err != nil {
+			return Operation{}, err
+		}
+		if profile.Provider != "resumable-k8s-pod" || input.Staged || archiveID != "" {
+			return Operation{}, apiError("UNSUPPORTED_CAPABILITY", "HTTP service requires a non-staged Kubernetes Box")
+		}
+		if _, ok := s.providers[profile.Provider].(boxprovider.HTTPServiceProvider); !ok {
+			return Operation{}, boxprovider.ErrUnsupported
+		}
+	}
 	if len(input.Mounts) > 0 && input.HomeVolumeID != "" {
 		return Operation{}, apiError("INVALID_REQUEST", "Specify mounts or homeVolumeId, not both")
 	}
@@ -951,7 +977,7 @@ func (s *Service) create(client string, input createRequest, archiveID string, a
 		if archiveID != "" {
 			phase = "restoring"
 		}
-		b := boxRecord{Box: Box{ID: id, TemplateID: tmpl.Template.ID, RevisionID: tmpl.RevisionID, TemplateName: tmpl.Template.Name, TemplateVersion: tmpl.Template.Version,
+		b := boxRecord{Box: Box{HTTPService: input.HTTPService, ID: id, TemplateID: tmpl.Template.ID, RevisionID: tmpl.RevisionID, TemplateName: tmpl.Template.Name, TemplateVersion: tmpl.Template.Version,
 			OwnerKey: input.OwnerKey, ProfileID: profile.ID, Phase: phase, Version: 1, Image: profile.Image, Workspace: profile.Guest.Workspace,
 			Capabilities: profileCapabilities(profile), OperationID: op.ID, CreatedAt: time.Now().UTC()},
 			ClientID: client, Profile: profile, Staged: archiveID != "" || input.Staged, RestoreComplete: input.Staged && archiveID == "", RestoreArchiveID: archiveID, AcceptImageChange: acceptImageChange}
@@ -960,6 +986,11 @@ func (s *Service) create(client string, input createRequest, archiveID string, a
 		}
 		if err := s.admitBoxMounts(tx, &b, input.Mounts, input.HomeVolumeID); err != nil {
 			return err
+		}
+		if b.Box.HTTPService != nil {
+			if err := tx.touchHTTPService(b, time.Now().UTC()); err != nil {
+				return err
+			}
 		}
 		return tx.PutBox(b)
 	})
@@ -992,6 +1023,10 @@ func (s *Service) action(client, id, action string) (Operation, error) {
 	return s.actionContextWithGeneration(context.Background(), client, id, action, nil)
 }
 func (s *Service) actionContextWithGeneration(ctx context.Context, client, id, action string, expectedGeneration *uint64, requestedPorts ...int) (Operation, error) {
+	return s.actionWithCheck(ctx, client, id, action, expectedGeneration, nil, requestedPorts...)
+}
+
+func (s *Service) actionWithCheck(ctx context.Context, client, id, action string, expectedGeneration *uint64, check func(*storeTx, boxRecord) error, requestedPorts ...int) (Operation, error) {
 	switch action {
 	case "suspend", "resume", "destroy", "activate":
 	default:
@@ -1014,6 +1049,11 @@ func (s *Service) actionContextWithGeneration(ctx context.Context, client, id, a
 		b, err = tx.Box(client, id)
 		if err != nil {
 			return err
+		}
+		if check != nil {
+			if err := check(tx, b); err != nil {
+				return err
+			}
 		}
 		switch action {
 		case "destroy":
