@@ -1,10 +1,18 @@
 # Cellbox
 
-Cellbox gives you isolated sandboxes over an HTTP API, and lets you **suspend a running sandbox and resume it in under 100 ms with its process memory intact**.
+Cellbox gives you isolated sandboxes over an HTTP API. On Kubernetes, it can **automatically checkpoint idle HTTP services to free node memory** and resume them on the next request. With a warm-pool hit, a sandbox resumes in about 100 ms with its process memory intact.
 
 A sandbox runs in [gVisor](https://gvisor.dev) on Kubernetes. You create it from a versioned template, run time-limited commands in it, read and write its files, proxy HTTP to services inside it, and suspend and resume it. Resume continues the same processes where they stopped; it does not start them again.
 
 > **Status: alpha.** The API is `v1alpha1` and may change. Cellbox currently targets a single Kubernetes node on linux/amd64, and needs a patched gVisor build (see [Requirements](#requirements)). Read [Limitations](#limitations) before relying on it.
+
+## Run HTTP services on demand
+
+An internal dashboard, for example, can release its memory between visits and keep its in-memory cache across them. Run the service in a Cellbox sandbox, set `httpService.port` when creating the sandbox, and route all application traffic through the Cellbox middleware on your Traefik Ingress.
+
+Once the last request finishes and the service stays idle for `httpService.idleTimeoutSeconds` (five minutes by default), Cellbox saves a checkpoint on the node and deletes the workload Pod. Open streams such as SSE or WebSocket connections keep the sandbox running. The next request to the same URL triggers a restore. Traefik waits until the service port accepts connections, then forwards that original request to the resumed process.
+
+See the [Traefik plugin configuration](examples/traefik-static.yaml) and the [sandbox settings, middleware and Ingress example](examples/traefik.yaml).
 
 ## Why resume is fast
 
