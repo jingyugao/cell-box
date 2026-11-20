@@ -135,6 +135,10 @@ func writeCredentialBatch(root string, batch guestapi.CredentialBatch, id guesta
 }
 
 func (s *Server) runTool(ctx context.Context, t compiledTool, req guestapi.ToolRequest) (result guestapi.ExecResult, err error) {
+	timeout, err := req.Timeout()
+	if err != nil {
+		return guestapi.ExecResult{}, err
+	}
 	if err := validateToolArgs(t, req.Args); err != nil {
 		return guestapi.ExecResult{}, err
 	}
@@ -192,7 +196,7 @@ func (s *Server) runTool(ctx context.Context, t compiledTool, req guestapi.ToolR
 	if t.spec.WorkspaceRead {
 		workingDir = s.cfg.Workspace
 	}
-	result, err = runWithGroups(ctx, s.self, s.cfg.Debug, groups, argv, workingDir, home, env, req.TimeoutMS)
+	result, err = runWithGroups(ctx, s.self, s.cfg.Debug, groups, argv, workingDir, home, env, timeout, time.Second)
 	return result, err
 }
 
@@ -307,7 +311,7 @@ func ToolClient(id string, args []string) (guestapi.ExecResult, error) {
 	if err != nil {
 		return guestapi.ExecResult{}, err
 	}
-	client := &http.Client{Timeout: 5 * time.Minute, Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", toolSocket)
 	}}}
 	resp, err := client.Post("http://unix/v1/tools/"+id, "application/json", bytes.NewReader(body))

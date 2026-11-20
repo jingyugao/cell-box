@@ -646,24 +646,20 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var input struct {
-		Args      []string `json:"args"`
-		TimeoutMS int64    `json:"timeoutMs"`
-	}
+	var input guestapi.ToolRequest
 	if err = decode(w, r, &input); err != nil {
 		fail(w, err)
 		return
 	}
-	if input.TimeoutMS == 0 {
-		input.TimeoutMS = 30000
-	}
-	if input.TimeoutMS < 1 || input.TimeoutMS > 300000 {
+	if _, err = input.Timeout(); err != nil {
 		fail(w, apiError("INVALID_REQUEST", "Invalid timeoutMs"))
 		return
 	}
 	data, _ := json.Marshal(input)
-	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(input.TimeoutMS)*time.Millisecond+time.Second)
+	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	stop := context.AfterFunc(s.ctx, cancel)
+	defer stop()
 	res, err := s.guestRequestWith(s.toolHTTP, ctx, b, "POST", "/v1/tools/"+id, strings.NewReader(string(data)))
 	if err != nil {
 		fail(w, err)
