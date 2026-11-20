@@ -785,9 +785,10 @@ components:
             type: string
           type: array
         timeoutMs:
-          default: 30000
-          maximum: 300000
-          minimum: 1
+          description: Optional caller-selected execution deadline in milliseconds. Zero or omission applies no Cellbox execution deadline. Disconnecting the caller cancels the invocation.
+          default: 0
+          format: int64
+          minimum: 0
           type: integer
       required: []
       type: object

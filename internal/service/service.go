@@ -108,7 +108,7 @@ func NewContext(parent context.Context, config Config, providers map[string]boxp
 	noRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	s := &Service{objects: objects, config: config, store: store, providers: providers,
 		http:     &http.Client{Transport: &http.Transport{Proxy: nil, ResponseHeaderTimeout: 35 * time.Second}, CheckRedirect: noRedirect},
-		toolHTTP: &http.Client{Transport: &http.Transport{Proxy: nil, ResponseHeaderTimeout: 5*time.Minute + 5*time.Second}, CheckRedirect: noRedirect},
+		toolHTTP: &http.Client{Transport: &http.Transport{Proxy: nil}, CheckRedirect: noRedirect},
 		ctx:      ctx, cancel: cancel, streams: map[string]activeStream{}}
 	if config.VolumeBackups.Enabled {
 		s.backups, err = volumebackup.New(config.VolumeBackups, config.ObjectStorage)

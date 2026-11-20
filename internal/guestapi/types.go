@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"time"
 )
 
 const Port = 40000
@@ -132,6 +133,14 @@ type FileEntry struct {
 }
 
 type ToolRequest struct {
-	Args      []string `json:"args,omitempty"`
-	TimeoutMS int64    `json:"timeoutMs,omitempty"`
+	Args []string `json:"args,omitempty"`
+	// TimeoutMS is the caller's execution deadline. Zero leaves execution bounded by cancellation only.
+	TimeoutMS int64 `json:"timeoutMs,omitempty"`
+}
+
+func (r ToolRequest) Timeout() (time.Duration, error) {
+	if r.TimeoutMS < 0 || r.TimeoutMS > (1<<63-1)/int64(time.Millisecond) {
+		return 0, fmt.Errorf("invalid timeoutMs")
+	}
+	return time.Duration(r.TimeoutMS) * time.Millisecond, nil
 }

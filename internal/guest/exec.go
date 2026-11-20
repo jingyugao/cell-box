@@ -65,10 +65,16 @@ func RunChild(argv []string) error {
 }
 
 func run(ctx context.Context, self string, id guestapi.Identity, argv []string, dir, home string, env map[string]string, timeoutMS int64) (guestapi.ExecResult, error) {
-	return runWithGroups(ctx, self, id, nil, argv, dir, home, env, timeoutMS)
+	if timeoutMS < 0 || timeoutMS > 300000 {
+		return guestapi.ExecResult{}, errors.New("timeout must be between 0 and 300000 ms")
+	}
+	if timeoutMS == 0 {
+		timeoutMS = 30000
+	}
+	return runWithGroups(ctx, self, id, nil, argv, dir, home, env, time.Duration(timeoutMS)*time.Millisecond, 0)
 }
 
-func runWithGroups(ctx context.Context, self string, id guestapi.Identity, groups []uint32, argv []string, dir, home string, env map[string]string, timeoutMS int64) (guestapi.ExecResult, error) {
+func runWithGroups(ctx context.Context, self string, id guestapi.Identity, groups []uint32, argv []string, dir, home string, env map[string]string, timeout, cancelGrace time.Duration) (guestapi.ExecResult, error) {
 	if len(argv) == 0 || len(argv) > 128 || !filepath.IsAbs(argv[0]) {
 		return guestapi.ExecResult{}, errors.New("argv must start with an absolute executable")
 	}
@@ -77,19 +83,16 @@ func runWithGroups(ctx context.Context, self string, id guestapi.Identity, group
 			return guestapi.ExecResult{}, errors.New("invalid argument")
 		}
 	}
-	if timeoutMS < 0 || timeoutMS > 300000 {
-		return guestapi.ExecResult{}, errors.New("timeout must be between 0 and 300000 ms")
-	}
-	if timeoutMS == 0 {
-		timeoutMS = 30000
-	}
 	for k, v := range env {
 		if !validEnv(k, v) {
 			return guestapi.ExecResult{}, fmt.Errorf("invalid environment variable %q", k)
 		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMS)*time.Millisecond)
-	defer cancel()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	cmd := exec.CommandContext(ctx, self, append([]string{"__child"}, argv...)...)
 	// A child can spawn a new process group that keeps the inherited output
 	// pipes open after the direct child exits. Bound that wait independently
@@ -106,6 +109,12 @@ func runWithGroups(ctx context.Context, self string, id guestapi.Identity, group
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
+		}
+		if cancelGrace > 0 {
+			// A protected wrapper can terminate its own child process group on SIGTERM.
+			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err == nil {
+				time.Sleep(cancelGrace)
+			}
 		}
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
