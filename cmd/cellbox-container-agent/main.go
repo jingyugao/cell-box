@@ -29,6 +29,8 @@ func mainErr() error {
 	case "protocol-version":
 		_, err := fmt.Fprintln(os.Stdout, guestapi.ProtocolMarker)
 		return err
+	case "__worker":
+		return guest.ServeWorker(os.Stdin)
 	case "__child":
 		return guest.RunChild(os.Args[2:])
 	case "tool":
@@ -74,6 +76,9 @@ func mainErr() error {
 		self, err := os.Executable()
 		if err != nil {
 			return err
+		}
+		if c.Env[guestapi.GuestUpdateKeyEnv] != "" {
+			return guest.ServeManaged(c, self, *staged)
 		}
 		s, err := guest.NewServer(c, self, *staged)
 		if err != nil {

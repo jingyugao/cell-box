@@ -242,6 +242,8 @@ func profileCapabilities(p Profile) Capabilities {
 		c.CredentialBatch = true
 		c.RootDebug = p.Guest.Debug.UID == 0 && p.Guest.Debug.GID == 0
 		c.SharedDirectory = p.SharedReadOnlyHostPath != ""
+		c.WorkloadReleases = c.SharedDirectory && p.Guest.Env[guestapi.WorkloadReleasesEnv] != ""
+		c.MountedReleaseTools = c.WorkloadReleases && p.AutoTrustImportedImages && p.Guest.Env[guestapi.ReleaseToolsEnv] != ""
 		c.PersistentHome = p.PersistentHome
 		c.MountedToolRuntime = c.SharedDirectory && c.ProtectedTools && c.RootDebug && slices.Contains(p.MountedToolRuntimeImages, p.Image)
 		c.MountedDebugHome = c.MountedToolRuntime && p.DebugReadWriteHostPath == path.Join(p.SharedReadOnlyHostPath, "runtime/debug-homes") && slices.Contains(p.DebugHomeImages, p.Image)

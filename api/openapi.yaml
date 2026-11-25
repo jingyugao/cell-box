@@ -414,6 +414,11 @@ components:
         rootDebug:
           type: boolean
           description: Admitted tools run as debug UID/GID zero and can read agent-owned private workspace files without permission changes.
+        mountedReleaseTools:
+          type: boolean
+          description: Supports profile-admitted protected executables from a read-only workload release.
+        workloadReleases:
+          type: boolean
         sharedDirectory:
           type: boolean
           description: A profile-owned shared directory is mounted read-only at /var/lib/cellbox/shared.
@@ -1470,6 +1475,29 @@ paths:
       responses:
         "101": { description: WebSocket upgraded }
         "200": { description: Application HTTP response }
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/boxes/{id}/workload:
+    put:
+      operationId: updateBoxWorkload
+      description: Start the selected mounted revision as the Box workload. An already running matching revision is reused.
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [revision]
+              additionalProperties: false
+              properties:
+                revision: { type: string, pattern: '^[0-9a-f]{64}$' }
+      responses:
+        "204": { description: Workload process started or already running }
         default:
           $ref: '#/components/responses/Error'
   /v1/boxes/{id}/execs:

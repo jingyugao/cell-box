@@ -201,6 +201,7 @@ func (s *Service) Handler() http.Handler {
 		}
 		writeJSON(w, 202, op)
 	})
+	mux.HandleFunc("PUT /v1/boxes/{id}/workload", s.updateWorkload)
 	mux.HandleFunc("GET /v1/execs/{id}", s.getExec)
 	mux.HandleFunc("GET /v1/operations/{id}", func(w http.ResponseWriter, r *http.Request) {
 		if s.catalog != nil && strings.HasPrefix(r.PathValue("id"), "build-") {

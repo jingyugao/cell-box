@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	api "github.com/jingyugao/cell-box/api/v1alpha1"
+	"github.com/jingyugao/cell-box/internal/guestapi"
 	"maps"
 	"slices"
 	"strings"
@@ -21,6 +22,9 @@ func applyImageConfiguration(profile Profile, imageRef string, command []string,
 	out.Guest.Command = append([]string(nil), command...)
 	out.Guest.CommandDir = commandDir
 	out.Guest.Env = maps.Clone(imageEnv)
+	delete(out.Guest.Env, guestapi.WorkloadReleasesEnv)
+	delete(out.Guest.Env, guestapi.GuestUpdateKeyEnv)
+	delete(out.Guest.Env, guestapi.ReleaseToolsEnv)
 	if out.Guest.Env == nil {
 		out.Guest.Env = map[string]string{}
 	}
@@ -41,6 +45,9 @@ func applyImageConfiguration(profile Profile, imageRef string, command []string,
 		out.DebugReadWriteHostPath = ""
 	}
 	for key, value := range profile.Guest.Env {
+		if out.SharedReadOnlyHostPath == "" && (key == guestapi.GuestUpdateKeyEnv || key == guestapi.ReleaseToolsEnv) {
+			continue
+		}
 		if out.SharedReadOnlyHostPath == "" && (value == api.SharedMountPath || strings.HasPrefix(value, api.SharedMountPath+"/")) {
 			continue
 		}

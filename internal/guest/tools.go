@@ -142,7 +142,8 @@ func (s *Server) runTool(ctx context.Context, t compiledTool, req guestapi.ToolR
 	if err := validateToolArgs(t, req.Args); err != nil {
 		return guestapi.ExecResult{}, err
 	}
-	if err := checkImmutable(t.spec.Executable, true); err != nil {
+	executable, err := s.toolExecutable(t.spec)
+	if err != nil {
 		return guestapi.ExecResult{}, err
 	}
 	if t.spec.WorkspaceWrite {
@@ -182,7 +183,7 @@ func (s *Server) runTool(ctx context.Context, t compiledTool, req guestapi.ToolR
 		}
 		env[key] = p
 	}
-	argv := append([]string{t.spec.Executable}, t.spec.Args...)
+	argv := append([]string{executable}, t.spec.Args...)
 	argv = append(argv, req.Args...)
 	groups := []uint32(nil)
 	if t.spec.WorkspaceRead {
@@ -278,6 +279,12 @@ func (l peerListener) Accept() (net.Conn, error) {
 }
 
 func (s *Server) startToolSocket() error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/tools/{id}", s.toolHandler)
+	return serveToolSocket(s.cfg.Agent, mux)
+}
+
+func serveToolSocket(agent guestapi.Identity, handler http.Handler) error {
 	if err := os.Remove(toolSocket); err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -285,7 +292,7 @@ func (s *Server) startToolSocket() error {
 	if err != nil {
 		return err
 	}
-	if err := os.Chown(toolSocket, int(s.cfg.Agent.UID), int(s.cfg.Agent.GID)); err != nil {
+	if err := os.Chown(toolSocket, int(agent.UID), int(agent.GID)); err != nil {
 		l.Close()
 		return err
 	}
@@ -293,10 +300,8 @@ func (s *Server) startToolSocket() error {
 		l.Close()
 		return err
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/tools/{id}", s.toolHandler)
 	go func() {
-		_ = (&http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}).Serve(peerListener{l, s.cfg.Agent.UID})
+		_ = (&http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}).Serve(peerListener{l, agent.UID})
 	}()
 	return nil
 }

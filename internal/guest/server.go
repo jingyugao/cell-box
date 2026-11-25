@@ -23,12 +23,14 @@ import (
 type Server struct {
 	cfg            guestapi.Config
 	self           string
+	launch         func(guestapi.Config) (*os.Process, error)
 	tools          map[string]compiledTool
 	staged         bool
 	mu             sync.Mutex
 	active         bool
 	restoring      bool
 	busy           int
+	revision       string
 	proc           *os.Process
 	proxyTransport *http.Transport
 	identityMu     sync.Mutex
@@ -45,7 +47,7 @@ func NewServer(c guestapi.Config, self string, staged bool) (*Server, error) {
 		return nil, errors.New("guest executable path must be absolute")
 	}
 	transport := &http.Transport{Proxy: nil, MaxIdleConns: 64, MaxIdleConnsPerHost: 8, IdleConnTimeout: 30 * time.Second, ResponseHeaderTimeout: 30 * time.Second}
-	return &Server{cfg: c, self: self, tools: tools, staged: staged, proxyTransport: transport, identity: c.Env[guestapi.InstanceIDEnv], boxID: c.Env[guestapi.BoxIDEnv]}, nil
+	return &Server{cfg: c, self: self, launch: func(cfg guestapi.Config) (*os.Process, error) { return startWorkload(self, cfg) }, tools: tools, staged: staged, proxyTransport: transport, identity: c.Env[guestapi.InstanceIDEnv], boxID: c.Env[guestapi.BoxIDEnv]}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -63,6 +65,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/files", s.fileHandler)
 	mux.HandleFunc("GET /v1/archive", s.archiveHandler)
 	mux.HandleFunc("POST /v1/restore", s.restoreHandler)
+	mux.HandleFunc("PUT /v1/workload", s.updateWorkload)
 	mux.HandleFunc("POST /v1/activate", s.activateHandler)
 	mux.HandleFunc("POST /v1/quiesce", s.quiesceHandler)
 	mux.HandleFunc("POST /v1/unquiesce", s.unquiesceHandler)
@@ -106,6 +109,12 @@ func (s *Server) identityHandler(w http.ResponseWriter, r *http.Request) {
 	s.boxID = boxID
 	s.identityMu.Unlock()
 	s.loadCredentialSources()
+	if !s.staged && s.cfg.Env[guestapi.WorkloadReleasesEnv] != "" {
+		if err := s.Activate(); err != nil {
+			http.Error(w, "cannot start selected workload", 500)
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -283,7 +292,8 @@ func (s *Server) proxyHandler(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) Start() error {
 	s.loadCredentialSources()
-	if s.staged {
+	// Warm and cold resumable guests receive their Box identity after boot.
+	if s.staged || (s.cfg.Env[guestapi.WorkloadReleasesEnv] != "" && s.instanceID() == "") {
 		return nil
 	}
 	return s.Activate()
@@ -306,16 +316,20 @@ func (s *Server) Activate() error {
 		}
 		return errors.New("restore in progress")
 	}
-	if len(s.cfg.Command) == 0 {
+	cfg, revision, err := s.selectedWorkload()
+	if err != nil {
+		return err
+	}
+	if len(cfg.Command) == 0 {
 		s.active = true
 		return nil
 	}
 	// StartWorkload retains the process and reports a startup failure immediately.
-	p, err := startWorkload(s.self, s.cfg)
+	p, err := s.launch(cfg)
 	if err != nil {
 		return err
 	}
-	s.proc = p
+	s.proc, s.revision = p, revision
 	s.active = true
 	return nil
 }
@@ -349,7 +363,7 @@ func (s *Server) endCommand() { s.mu.Lock(); s.busy--; s.mu.Unlock() }
 func (s *Server) quiesceHandler(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.busy > 0 {
+	if s.busy > 0 || r.Context().Value(pendingWorkKey{}) == true {
 		http.Error(w, "guest has active commands", 409)
 		return
 	}

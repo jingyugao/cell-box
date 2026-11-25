@@ -68,22 +68,24 @@ func (e *APIError) Error() string         { return e.Message }
 func apiError(code, message string) error { return &APIError{Code: code, Message: message} }
 
 type Capabilities struct {
-	Exec               bool   `json:"exec"`
-	Files              bool   `json:"files"`
-	HTTP               bool   `json:"http"`
-	WebSocket          bool   `json:"websocket"`
-	PTY                bool   `json:"pty"`
-	ReconnectExec      bool   `json:"reconnectExec"`
-	Suspend            string `json:"suspend"`
-	Archives           string `json:"archives"`
-	ProtectedTools     bool   `json:"protectedTools"`
-	CredentialBatch    bool   `json:"credentialBatch,omitempty"`
-	InternalServices   bool   `json:"internalServices,omitempty"`
-	RootDebug          bool   `json:"rootDebug,omitempty"`
-	SharedDirectory    bool   `json:"sharedDirectory,omitempty"`
-	MountedToolRuntime bool   `json:"mountedToolRuntime,omitempty"`
-	MountedDebugHome   bool   `json:"mountedDebugHome,omitempty"`
-	PersistentHome     bool   `json:"persistentHome,omitempty"`
+	Exec                bool   `json:"exec"`
+	Files               bool   `json:"files"`
+	HTTP                bool   `json:"http"`
+	WebSocket           bool   `json:"websocket"`
+	PTY                 bool   `json:"pty"`
+	ReconnectExec       bool   `json:"reconnectExec"`
+	Suspend             string `json:"suspend"`
+	Archives            string `json:"archives"`
+	ProtectedTools      bool   `json:"protectedTools"`
+	CredentialBatch     bool   `json:"credentialBatch,omitempty"`
+	InternalServices    bool   `json:"internalServices,omitempty"`
+	RootDebug           bool   `json:"rootDebug,omitempty"`
+	MountedReleaseTools bool   `json:"mountedReleaseTools,omitempty"`
+	WorkloadReleases    bool   `json:"workloadReleases,omitempty"`
+	SharedDirectory     bool   `json:"sharedDirectory,omitempty"`
+	MountedToolRuntime  bool   `json:"mountedToolRuntime,omitempty"`
+	MountedDebugHome    bool   `json:"mountedDebugHome,omitempty"`
+	PersistentHome      bool   `json:"persistentHome,omitempty"`
 }
 type Box struct {
 	HTTPService     *HTTPService `json:"httpService,omitempty"`
