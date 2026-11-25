@@ -28,6 +28,9 @@ type compiledTool struct {
 }
 
 func validateConfig(c guestapi.Config) (map[string]compiledTool, error) {
+	if dir := c.Env[guestapi.WorkloadReleasesEnv]; dir != "" && (!strings.HasPrefix(dir, "/var/lib/cellbox/shared/") || filepath.Clean(dir) != dir || strings.ContainsRune(dir, 0)) {
+		return nil, errors.New("workload releases must be a directory in the read-only shared mount")
+	}
 	for slot, source := range c.CredentialSources {
 		if !namePattern.MatchString(slot) || !strings.HasPrefix(source, "/var/lib/cellbox/shared/") || filepath.Clean(source) != source || strings.ContainsRune(source, 0) {
 			return nil, errors.New("credential sources must name slots and clean absolute files in the shared mount")

@@ -62,6 +62,10 @@ func Bootstrap(c guestapi.Config) error {
 		return err
 	}
 	for _, t := range tools {
+		// Release-native tools may have no image fallback. Validate the selected executable at invocation.
+		if releaseToolEnabled(c, t.spec.ID) {
+			continue
+		}
 		if err := checkImmutable(t.spec.Executable, true); err != nil {
 			return err
 		}

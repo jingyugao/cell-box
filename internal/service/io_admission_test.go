@@ -1,7 +1,12 @@
 package service
 
 import (
+	"encoding/json"
 	"errors"
+	"github.com/jingyugao/cell-box/internal/guestapi"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -52,5 +57,44 @@ func TestInternalIOWaitsForLifecycleAdmission(t *testing.T) {
 				t.Fatal("I/O admission did not complete")
 			}
 		})
+	}
+}
+
+func TestWorkloadUpdateRoutesToOwnedBoxDuringExec(t *testing.T) {
+	f := newCoreFixture(t)
+	_, box := f.createBox(t, "workload-revision")
+	revision := strings.Repeat("a", 64)
+	received := make(chan string, 1)
+	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/v1/workload" {
+			http.NotFound(w, r)
+			return
+		}
+		var input map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Error(err)
+		}
+		received <- input["revision"]
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer guest.Close()
+	f.provider.guestURL = guest.URL
+	err := f.service.store.Update(func(st *State) error {
+		b := st.Boxes[box.ID]
+		b.Profile.Guest.Env = map[string]string{guestapi.WorkloadReleasesEnv: "/var/lib/cellbox/shared/harness"}
+		b.Box.OperationID = "active-tool-exec"
+		st.Operations[b.Box.OperationID] = operationRecord{ClientID: b.ClientID, Operation: Operation{ID: b.Box.OperationID, Kind: "exec", Status: "running"}}
+		st.Boxes[box.ID] = b
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, body := f.call(t, "PUT", "/v1/boxes/"+box.ID+"/workload", testClientToken, "", map[string]string{"revision": revision})
+	if status != http.StatusNoContent {
+		t.Fatalf("status %d: %s", status, body)
+	}
+	if got := <-received; got != revision {
+		t.Fatalf("expected %s, got %s", revision, got)
 	}
 }

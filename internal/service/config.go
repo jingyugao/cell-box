@@ -122,6 +122,20 @@ func (c *Config) Validate() error {
 			}
 			node, namespace = p.NodeName, p.Namespace
 		}
+		if key := p.Guest.Env[guestapi.GuestUpdateKeyEnv]; key != "" {
+			if p.SharedReadOnlyHostPath == "" {
+				return fmt.Errorf("Guest updates require the shared read-only mount")
+			}
+			if _, err := guestapi.GuestUpdateKey(key); err != nil {
+				return fmt.Errorf("profile %s: %w", p.ID, err)
+			}
+		}
+		if p.Guest.Env[guestapi.ReleaseToolsEnv] != "" && p.Guest.Env[guestapi.WorkloadReleasesEnv] == "" {
+			return fmt.Errorf("release tools require mounted workloads")
+		}
+		if p.Guest.Env[guestapi.WorkloadReleasesEnv] != "" && p.SharedReadOnlyHostPath == "" {
+			return fmt.Errorf("workload releases require the shared read-only mount")
+		}
 		if p.SharedReadOnlyHostPath != "" {
 			if (p.Provider != "resumable-k8s-pod" && p.Provider != "local-runsc") || !path.IsAbs(p.SharedReadOnlyHostPath) ||
 				path.Clean(p.SharedReadOnlyHostPath) != p.SharedReadOnlyHostPath || p.SharedReadOnlyHostPath == "/" ||

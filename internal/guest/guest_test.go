@@ -401,6 +401,19 @@ func TestIdleCheckDoesNotGateExecAndToolArguments(t *testing.T) {
 		t.Fatalf("busy quiesce: %d", got)
 	}
 	s.busy = 0
+	// During a handoff the supervisor can still have a command on the old worker.
+	quiesce := httptest.NewRequest("POST", "/v1/quiesce", nil)
+	quiesce.Header.Set(workerBusyHeader, "1")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, quiesce)
+	if w.Code != 204 {
+		t.Fatalf("public header overrode the idle check: %d", w.Code)
+	}
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, quiesce.WithContext(context.WithValue(quiesce.Context(), pendingWorkKey{}, true)))
+	if w.Code != 409 {
+		t.Fatalf("draining command was missed during handoff: %d", w.Code)
+	}
 	if got := request(s.Handler(), "POST", "/v1/quiesce", nil).Code; got != 204 {
 		t.Fatalf("quiesce: %d", got)
 	}

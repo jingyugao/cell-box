@@ -186,6 +186,9 @@ func buildWanted(spec boxprovider.Spec) (*api.ResumablePod, error) {
 			Capabilities: &core.Capabilities{Drop: []core.Capability{"ALL"}, Add: []core.Capability{"CHOWN", "SETUID", "SETGID", "FOWNER", "DAC_OVERRIDE"}}},
 		ReadinessProbe: &core.Probe{ProbeHandler: core.ProbeHandler{TCPSocket: &core.TCPSocketAction{Port: intstr.FromInt32(guestapi.Port)}}, PeriodSeconds: 1},
 	}
+	if spec.Config.Env[guestapi.WorkloadReleasesEnv] != "" {
+		container.SecurityContext.Capabilities.Add = append(container.SecurityContext.Capabilities.Add, "KILL")
+	}
 	servicePorts := []core.ServicePort{{Name: "guest", Port: guestapi.Port, TargetPort: intstr.FromInt32(guestapi.Port), Protocol: core.ProtocolTCP}}
 	if spec.HTTPPort != 0 {
 		if spec.HTTPPort < 1 || spec.HTTPPort > 65535 || spec.HTTPPort == guestapi.Port {
